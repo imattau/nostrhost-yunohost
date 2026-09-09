@@ -156,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        needs_operator = args.command != "status" and not (args.command == "request" and args.agent_sk)
+        if needs_operator:
+            from yunohost.nostr_identity import _require_bootstrapped
+
+            _require_bootstrapped()
         return {"request": cmd_request, "approve": cmd_approve, "reject": cmd_reject, "grant": cmd_grant, "status": cmd_status}[
             args.command
         ](args)

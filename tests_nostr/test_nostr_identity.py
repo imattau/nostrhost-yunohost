@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from coincurve import PublicKeyXOnly
@@ -177,3 +178,77 @@ def test_resolve_username_lists_identities(tmp_path):
     )
     ids = resolve_username("matt", db_path=tmp_path / "i.db")
     assert len(ids) == 2
+
+
+def test_operator_config_server_key_split(tmp_path, monkeypatch):
+    """A bootstrapped config carries a distinct server key; _operator_config
+    reads it and derives the server pubkey. Legacy configs (no server_sk)
+    fall back to the operator key."""
+    sk, pk = new_key()
+    server_sk, server_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'server_sk = "{server_sk}"\noperator_sk = "{sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    from yunohost.nostr_identity import _operator_config
+
+    cfg = _operator_config()
+    assert cfg.operator_sk == sk
+    assert cfg.operator_pubkey == pk
+    assert cfg.server_sk == server_sk
+    assert cfg.server_pubkey == server_pk
+    assert cfg.server_pubkey != cfg.operator_pubkey
+
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text(f'operator_sk = "{sk}"\n')
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(legacy))
+    cfg = _operator_config()
+    assert cfg.server_sk == sk  # legacy single-key fallback
+    assert cfg.server_pubkey == pk
+
+
+def test_bootstrapped_state(tmp_path, monkeypatch):
+    from yunohost.nostr_identity import _require_bootstrapped, is_bootstrapped
+
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "nope.toml"))
+    monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
+    assert is_bootstrapped() is False
+    with pytest.raises(IdentityError, match="nostrhost-bootstrap"):
+        _require_bootstrapped()
+
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_SK", "0" * 64)
+    assert is_bootstrapped() is True
+    _require_bootstrapped()  # no raise
+
+
+def test_bootstrap_tool_writes_distinct_keys(tmp_path, monkeypatch):
+    """nostrhost-bootstrap writes server + operator keys (distinct, root-only
+    mode), refuses overwrite, and --force regenerates."""
+    import runpy
+
+    cfg_path = tmp_path / "operator.toml"
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+    monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+
+    tool = str(Path(Path(__file__).resolve().parents[1] / "bin" / "nostrhost-bootstrap"))
+    rc = runpy.run_path(tool)
+    argv = [tool, "--server-sk", "1" * 64, "--operator-sk", "2" * 64, "--admins", "3" * 64]
+    monkeypatch.setattr("sys.argv", argv)
+    assert rc["main"]() == 0
+
+    from yunohost.nostr_identity import _operator_config
+
+    cfg = _operator_config()
+    assert cfg.server_sk == "1" * 64
+    assert cfg.operator_sk == "2" * 64
+    assert cfg.admins == ("3" * 64,)
+    assert (cfg_path.stat().st_mode & 0o777) == 0o600
+
+    # refusing overwrite
+    assert rc["main"]() == 1
+    # force regenerates
+    monkeypatch.setattr("sys.argv", argv + ["--force"])
+    assert rc["main"]() == 0

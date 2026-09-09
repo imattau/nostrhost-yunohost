@@ -258,3 +258,67 @@ def test_replay_sort_places_grants_before_requests():
     ordered = _sorted_replay([approval, req, grant])
     kinds = [e["kind"] for e in ordered]
     assert kinds == [KIND_CAPABILITY, KIND_OPERATION_REQUEST, 2201]
+
+
+def test_subscribe_processes_live_events_after_eose(monkeypatch):
+    """After the replay EOSE, live events must be processed immediately — not
+    buffered into the replay list forever (a restart-side regression that
+    left post-restart approvals unexecuted on the VM)."""
+    import asyncio
+    import websockets
+
+    from yunohost.nostr_operationsd import subscribe_loop
+
+    h = Harness()
+    h.grant(["server.read"])
+    request_ev, _ = h.request("system.version")
+    approval_ev = build_approval(h.admin_sk, h.admin_pk, request_ev["id"])
+
+    class FakeWS:
+        def __init__(self):
+            self._msgs = [
+                ["EVENT", "s", request_ev],
+                ["EOSE", "s"],
+                ["EVENT", "s", approval_ev],
+            ]
+            self._i = 0
+
+        async def send(self, data):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i < len(self._msgs):
+                m = self._msgs[self._i]
+                self._i += 1
+                return json.dumps(m)
+            raise StopAsyncIteration
+
+    calls = {"n": 0}
+
+    def fake_connect(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeWS()
+        raise RuntimeError("end the first connection")  # -> daemon reconnect sleep
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    async def drive():
+        task = asyncio.create_task(subscribe_loop("ws://x", engine=h.engine))
+        try:
+            await asyncio.wait_for(task, timeout=1.0)
+        except asyncio.TimeoutError:
+            pass  # the daemon loop never returns by design
+
+    asyncio.run(drive())
+    assert h.engine.state(request_ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("system.version", {})]

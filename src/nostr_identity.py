@@ -55,12 +55,26 @@ class Identity:
 
 @dataclass(frozen=True)
 class OperatorConfig:
-    """The operator identity that authors identity events (and the admins
-    the projector accepts events from)."""
+    """The node's identity configuration (server / operator / admins).
+
+    Three distinct roles (roadmap Phase 3, hardened bootstrap):
+
+      server_sk     — the server's own machine identity; signs execution
+                      events (2203/2204). Distinct from the operator once
+                      bootstrapped; falls back to the operator key for
+                      legacy single-key configs.
+      operator_sk   — the primary human admin; signs approvals (2201/2202),
+                      capability grants (31100) and identity definitions
+                      (31102).
+      admins        — the admin pubkeys the projector/executor accept events
+                      from (always includes the operator).
+    """
 
     operator_sk: str
     operator_pubkey: str
     control_relay: str
+    server_sk: str
+    server_pubkey: str
     admins: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -186,20 +200,49 @@ def _operator_config(
     operator_sk: str | None = None,
     control_relay: str | None = None,
     admins: list[str] | None = None,
+    server_sk: str | None = None,
 ) -> OperatorConfig:
-    sk = operator_sk or os.environ.get("NOSTRHOST_OPERATOR_SK") or _read_operator_config().get("operator_sk")
+    conf = _read_operator_config()
+    sk = operator_sk or os.environ.get("NOSTRHOST_OPERATOR_SK") or conf.get("operator_sk")
     relay = control_relay or os.environ.get("NOSTRHOST_CONTROL_RELAY") or DEFAULT_CONTROL_RELAY
     if not sk or not _is_hex64(sk):
         raise IdentityError("operator_sk is not configured (set NOSTRHOST_OPERATOR_SK or " + OPERATOR_CONFIG + ")")
     from coincurve import PublicKeyXOnly
 
     operator_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    srv = server_sk or os.environ.get("NOSTRHOST_SERVER_SK") or conf.get("server_sk") or sk
+    server_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(srv)).format().hex()
     if admins is None:
-        file_admins = _read_operator_config().get("admins")
+        file_admins = conf.get("admins")
         admins = file_admins if isinstance(file_admins, list) else []
     if not admins:
         admins = [operator_pubkey]
-    return OperatorConfig(sk, operator_pubkey, relay, tuple(admins))
+    return OperatorConfig(sk, operator_pubkey, relay, srv, server_pubkey, tuple(admins))
+
+
+def is_bootstrapped() -> bool:
+    """Whether the node has an operator configured (bootstrap done).
+
+    Bootstrap (nostrhost-bootstrap, root-only) is the high-trust, local
+    action that generates the server identity + operator keys and designates
+    the admins. Pre-bootstrap the server has no operator to act on its
+    behalf; post-bootstrap, authority flows through the configured admins
+    (approvals, grants, identity events)."""
+    if os.environ.get("NOSTRHOST_OPERATOR_SK"):
+        return True
+    return bool(_read_operator_config().get("operator_sk"))
+
+
+def _require_bootstrapped() -> None:
+    """Raise unless the node has an operator configured. Daemons and the
+    mutating CLI tools call this so a fresh server fails with a clear
+    pointer to the bootstrap action instead of a raw config error."""
+    if not is_bootstrapped():
+        raise IdentityError(
+            "nostrhost is not bootstrapped: no operator key configured in "
+            + OPERATOR_CONFIG + ". Run `nostrhost-bootstrap` (root) to generate the "
+            "server identity and operator key before starting the daemons."
+        )
 
 
 def _read_operator_config() -> dict[str, Any]:

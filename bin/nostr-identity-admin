@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        if args.command in ("link", "revoke"):
+            from yunohost.nostr_identity import _require_bootstrapped
+
+            _require_bootstrapped()
         return {"link": cmd_link, "revoke": cmd_revoke, "list": cmd_list}[args.command](args)
     except IdentityError as exc:
         print(f"error: {exc}", file=sys.stderr)

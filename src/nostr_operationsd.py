@@ -33,7 +33,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .nostr_identity import _init_headless_yunohost, _operator_config
+from .nostr_identity import _init_headless_yunohost, _operator_config, _require_bootstrapped
 from .nostr_operations import (
     KIND_CAPABILITY,
     KIND_OPERATION_APPROVAL,
@@ -360,14 +360,19 @@ async def subscribe_loop(
                 await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS}]))
                 logger.info("operations executor subscribed to %s", relay_url)
                 replay: list[dict[str, Any]] = []
+                replaying = True
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg[0] == "EVENT":
-                        replay.append(msg[2])
+                        if replaying:
+                            replay.append(msg[2])
+                        else:
+                            engine.handle_event(msg[2])
                     elif msg[0] == "EOSE":
                         for ev in _sorted_replay(replay):
                             engine.handle_event(ev)
                         replay.clear()
+                        replaying = False
                     elif msg[0] == "CLOSED":
                         logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
                         break
@@ -382,8 +387,9 @@ def run() -> None:
     """Entry point for bin/nostr-operationsd."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     _init_headless_yunohost()
+    _require_bootstrapped()
     cfg = _operator_config()
-    engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.operator_sk, admins=cfg.admins)
+    engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins)
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))
     except KeyboardInterrupt:

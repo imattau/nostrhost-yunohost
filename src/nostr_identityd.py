@@ -30,6 +30,7 @@ from .nostr_identity import (
     IDENTITY_KIND,
     _init_headless_yunohost,
     _operator_config,
+    _require_bootstrapped,
     _store,
 )
 
@@ -161,10 +162,18 @@ async def subscribe_loop(
                 await ws.send(json.dumps(["REQ", sub_id, filter]))
                 logger.info("identity projector subscribed to %s", relay_url)
                 replay: list[dict[str, Any]] = []
+                replaying = True
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg[0] == "EVENT":
-                        replay.append(msg[2])
+                        if replaying:
+                            replay.append(msg[2])
+                        else:
+                            handled = handle_identity_event(
+                                msg[2], store=store, admin_pubkeys=admin_pubkeys, accounts=accounts
+                            )
+                            if on_event is not None and handled:
+                                on_event(msg[2])
                     elif msg[0] == "EOSE":
                         for ev in sorted(
                             replay,
@@ -176,6 +185,7 @@ async def subscribe_loop(
                             if on_event is not None and handled:
                                 on_event(ev)
                         replay.clear()
+                        replaying = False
                     elif msg[0] == "CLOSED":
                         logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
                         break
@@ -190,6 +200,7 @@ def run() -> None:
     """Entry point for bin/nostr-identityd."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     _init_headless_yunohost()
+    _require_bootstrapped()
     cfg = _operator_config()
     store = _store()
     accounts: AccountBackend = YnhAccountBackend()
