@@ -25,7 +25,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .nostr_identity import DEFAULT_IDENTITY_DB, IDENTITY_KIND, _operator_config, _store
+from .nostr_identity import (
+    DEFAULT_IDENTITY_DB,
+    IDENTITY_KIND,
+    _init_headless_yunohost,
+    _operator_config,
+    _store,
+)
 
 logger = logging.getLogger("nostr-identityd")
 
@@ -154,14 +160,22 @@ async def subscribe_loop(
                 sub_id = "nostrhost-identity-" + secrets.token_hex(4)
                 await ws.send(json.dumps(["REQ", sub_id, filter]))
                 logger.info("identity projector subscribed to %s", relay_url)
+                replay: list[dict[str, Any]] = []
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg[0] == "EVENT":
-                        handled = handle_identity_event(
-                            msg[2], store=store, admin_pubkeys=admin_pubkeys, accounts=accounts
-                        )
-                        if on_event is not None and handled:
-                            on_event(msg[2])
+                        replay.append(msg[2])
+                    elif msg[0] == "EOSE":
+                        for ev in sorted(
+                            replay,
+                            key=lambda e: (int(e.get("created_at") or 0), str(e.get("id") or "")),
+                        ):
+                            handled = handle_identity_event(
+                                ev, store=store, admin_pubkeys=admin_pubkeys, accounts=accounts
+                            )
+                            if on_event is not None and handled:
+                                on_event(ev)
+                        replay.clear()
                     elif msg[0] == "CLOSED":
                         logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
                         break
@@ -175,6 +189,7 @@ async def subscribe_loop(
 def run() -> None:
     """Entry point for bin/nostr-identityd."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _init_headless_yunohost()
     cfg = _operator_config()
     store = _store()
     accounts: AccountBackend = YnhAccountBackend()

@@ -26,7 +26,7 @@ from yunohost.nostr_operations import (
     build_rejection,
 )
 from yunohost.nostr_operations_state import OpState
-from yunohost.nostr_operationsd import OperationEngine
+from yunohost.nostr_operationsd import OperationEngine, _sorted_replay
 
 
 def new_key():
@@ -243,3 +243,18 @@ def test_tool_args_are_forwarded():
     request_id = ev["id"]
     h.approve(request_id)
     assert h.backend.calls == [("app.list", {"full": True})]
+
+
+def test_replay_sort_places_grants_before_requests():
+    """A same-second replay must feed capability grants to the engine before
+    the requests they authorise — otherwise a restart rejects an in-flight
+    request as unauthorized (seen live on the VM)."""
+    from yunohost.nostr_operations import KIND_CAPABILITY, KIND_OPERATION_REQUEST
+
+    now = 1788966000
+    req = {"kind": KIND_OPERATION_REQUEST, "created_at": now, "id": "a" * 64}
+    grant = {"kind": KIND_CAPABILITY, "created_at": now, "id": "b" * 64}
+    approval = {"kind": 2201, "created_at": now, "id": "c" * 64}
+    ordered = _sorted_replay([approval, req, grant])
+    kinds = [e["kind"] for e in ordered]
+    assert kinds == [KIND_CAPABILITY, KIND_OPERATION_REQUEST, 2201]

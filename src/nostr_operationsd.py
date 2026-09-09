@@ -33,7 +33,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .nostr_identity import _operator_config
+from .nostr_identity import _init_headless_yunohost, _operator_config
 from .nostr_operations import (
     KIND_CAPABILITY,
     KIND_OPERATION_APPROVAL,
@@ -317,6 +317,31 @@ SUBSCRIBE_KINDS = [
     KIND_CAPABILITY,
 ]
 
+# Replay order within the same created_at second: capability grants must be
+# projected before the requests they authorise, then requests before the
+# approval/rejection/execution events that reference them. The relay's
+# fresh-connect replay order is not guaranteed for same-second events, so a
+# restart must sort before feeding the engine (otherwise a mid-flight request
+# is wrongly re-evaluated before its grant is seen).
+_REPLAY_PRIORITY = {
+    KIND_CAPABILITY: 0,
+    KIND_OPERATION_REQUEST: 1,
+    KIND_OPERATION_APPROVAL: 2,
+    KIND_OPERATION_REJECTION: 3,
+    KIND_EXECUTION_STARTED: 4,
+    KIND_EXECUTION_RESULT: 5,
+}
+
+
+def _sorted_replay(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable order for a fresh-connect replay: grants before the requests
+    they authorise, requests before the approval/rejection/execution events
+    that reference them, then by creation time."""
+    return sorted(
+        events,
+        key=lambda e: (int(e.get("created_at") or 0), _REPLAY_PRIORITY.get(int(e.get("kind") or 0), 99)),
+    )
+
 
 async def subscribe_loop(
     relay_url: str,
@@ -334,10 +359,15 @@ async def subscribe_loop(
                 sub_id = "nostrhost-operations-" + secrets.token_hex(4)
                 await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS}]))
                 logger.info("operations executor subscribed to %s", relay_url)
+                replay: list[dict[str, Any]] = []
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg[0] == "EVENT":
-                        engine.handle_event(msg[2])
+                        replay.append(msg[2])
+                    elif msg[0] == "EOSE":
+                        for ev in _sorted_replay(replay):
+                            engine.handle_event(ev)
+                        replay.clear()
                     elif msg[0] == "CLOSED":
                         logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
                         break
@@ -351,6 +381,7 @@ async def subscribe_loop(
 def run() -> None:
     """Entry point for bin/nostr-operationsd."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _init_headless_yunohost()
     cfg = _operator_config()
     engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.operator_sk, admins=cfg.admins)
     try:

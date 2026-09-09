@@ -139,6 +139,18 @@ def _e_tag(request_id: str) -> list[list[str]]:
     return [["e", request_id]]
 
 
+def _json_default(obj: Any) -> Any:
+    """JSON-serialise non-primitive values found in tool results (service
+    status carries datetimes, sets, …) so the signed 2204 content builds."""
+    import datetime
+
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+        return obj.isoformat()
+    if isinstance(obj, set):
+        return sorted(obj, key=str)
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 def build_operation_request(
     requester_sk: str,
     requester_pubkey: str,
@@ -149,19 +161,19 @@ def build_operation_request(
 ) -> dict[str, Any]:
     """Build (without publishing) a kind-2200 operation request."""
     tags = [["p", target]] if target else []
-    content = json.dumps({"tool": tool, "args": args})
+    content = json.dumps({"tool": tool, "args": args}, default=_json_default)
     return _sign_event(requester_sk, requester_pubkey, KIND_OPERATION_REQUEST, content, tags)
 
 
 def build_approval(admin_sk: str, admin_pubkey: str, request_id: str, note: str | None = None) -> dict[str, Any]:
     """Build (without publishing) a kind-2201 approval for a request."""
-    content = json.dumps({"note": note}) if note is not None else ""
+    content = json.dumps({"note": note}, default=_json_default) if note is not None else ""
     return _sign_event(admin_sk, admin_pubkey, KIND_OPERATION_APPROVAL, content, _e_tag(request_id))
 
 
 def build_rejection(admin_sk: str, admin_pubkey: str, request_id: str, reason: str | None = None) -> dict[str, Any]:
     """Build (without publishing) a kind-2202 rejection for a request."""
-    content = json.dumps({"reason": reason}) if reason is not None else ""
+    content = json.dumps({"reason": reason}, default=_json_default) if reason is not None else ""
     return _sign_event(admin_sk, admin_pubkey, KIND_OPERATION_REJECTION, content, _e_tag(request_id))
 
 
@@ -179,7 +191,7 @@ def build_execution_result(
     **extra: Any,
 ) -> dict[str, Any]:
     """Build (without publishing) a kind-2204 execution-result event."""
-    content = json.dumps({"ok": ok, **extra})
+    content = json.dumps({"ok": ok, **extra}, default=_json_default)
     return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_RESULT, content, _e_tag(request_id))
 
 
@@ -191,7 +203,7 @@ def build_capability(
     scopes: list[str],
 ) -> dict[str, Any]:
     """Build (without publishing) a kind-31100 capability grant for a subject."""
-    content = json.dumps({"type": type_, "scopes": scopes})
+    content = json.dumps({"type": type_, "scopes": scopes}, default=_json_default)
     return _sign_event(admin_sk, admin_pubkey, KIND_CAPABILITY, content, [["d", subject_pubkey]])
 
 

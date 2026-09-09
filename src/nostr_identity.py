@@ -67,10 +67,42 @@ class OperatorConfig:
 # --------------------------------------------------------------------------- #
 # projection store
 
-def _store(db_path: str | Path | None):
+def _store(db_path: str | Path | None = None):
     from nostrhost_auth.identity.mappings import MappingStore
 
     return MappingStore(Path(db_path or os.environ.get("NOSTRHOST_IDENTITY_DB", DEFAULT_IDENTITY_DB)))
+
+
+def _init_headless_yunohost() -> None:
+    """Initialise moulinette + logging so YunoHost machinery (user creation,
+    tool execution) can be invoked from a daemon/headless context where no
+    CLI or API interface is running.
+
+    YunoHost's operation logger reads ``Moulinette.interface.type`` and
+    translation needs the locales dir loaded; without this, calling e.g.
+    ``user_create`` from ``nostr-identityd`` fails with
+    ``AttributeError: 'NoneType' object has no attribute 'type'``.
+    """
+    from moulinette import Moulinette, m18n
+
+    if Moulinette.interface is None:
+        m18n.set_locales_dir("/usr/share/yunohost/locales/")
+        m18n.set_locale("en")
+
+        class _HeadlessCli:
+            type = "cli"
+
+            def display(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - cosmetic
+                return None
+
+            def prompt(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("interactive prompt not available in headless mode")
+
+        Moulinette._interface = _HeadlessCli()
+
+    from yunohost.utils.logging import init_logging
+
+    init_logging(interface="cli", debug=False, quiet=True)
 
 
 def _to_identity(rec: Any) -> Identity:
