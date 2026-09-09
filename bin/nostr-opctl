@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""nostr-opctl — control the Nostr-native operation chain.
+
+Drives the operation vertical slice from the shell:
+
+  nostr-opctl request --tool system.version --args '{}' [--agent-sk HEX]
+  nostr-opctl approve <request-id> [--admin-sk HEX]
+  nostr-opctl reject  <request-id> [--admin-sk HEX]
+  nostr-opctl grant   --pubkey HEX --scopes server.read,apps.read
+  nostr-opctl status
+
+`request` signs with --agent-sk (or NOSTRHOST_AGENT_SK, else the operator
+key); `approve`/`reject`/`grant` sign with --admin-sk (or the operator key).
+`status` reads the chain back from the control relay and prints a table.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any
+
+from yunohost.nostr_identity import IdentityError
+from yunohost.nostr_operations import (
+    CHAIN_KINDS,
+    OperationError,
+    _control_relay,
+    approve_operation,
+    grant_capability,
+    known_tools,
+    reject_operation,
+    request_operation,
+)
+
+EXIT_OK = 0
+EXIT_ERR = 1
+
+_STATES = {2200: "REQUESTED", 2201: "APPROVED", 2202: "REJECTED", 2203: "EXECUTING", 2204: "DONE"}
+
+
+def _agent_sk(args) -> str | None:
+    if getattr(args, "agent_sk", None):
+        return args.agent_sk
+    return None
+
+
+def cmd_request(args) -> int:
+    try:
+        args_dict = json.loads(args.args) if args.args else {}
+    except json.JSONDecodeError as exc:
+        print(f"error: --args must be JSON: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    try:
+        event = request_operation(args.tool, args_dict, requester_sk=_agent_sk(args))
+    except (OperationError, IdentityError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(f"published request {event['id']} kind {event['kind']} tool={args.tool}")
+    print(f"  request-id: {event['id']}")
+    return EXIT_OK
+
+
+def cmd_approve(args) -> int:
+    event = approve_operation(args.request_id, admin_sk=args.admin_sk, note=args.note)
+    print(f"published approval {event['id'][:16]}… kind {event['kind']} for {args.request_id[:16]}…")
+    return EXIT_OK
+
+
+def cmd_reject(args) -> int:
+    event = reject_operation(args.request_id, admin_sk=args.admin_sk, reason=args.reason)
+    print(f"published rejection {event['id'][:16]}… kind {event['kind']} for {args.request_id[:16]}…")
+    return EXIT_OK
+
+
+def cmd_grant(args) -> int:
+    scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
+    event = grant_capability(args.pubkey, scopes, admin_sk=args.admin_sk)
+    print(f"published capability grant {event['id'][:16]}… kind {event['kind']} for {args.pubkey[:16]}… scopes={scopes}")
+    return EXIT_OK
+
+
+def cmd_status(_args) -> int:
+    events = fetch_chain(_control_relay(None))
+    if not events:
+        print("no chain events on the control relay")
+        return EXIT_OK
+    by_request: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        by_request.setdefault(_e_tag(ev) or ev["id"], []).append(ev)
+    for request_id, chain in sorted(by_request.items()):
+        print(f"request {request_id}")
+        for ev in sorted(chain, key=lambda e: e["created_at"]):
+            state = _STATES.get(ev["kind"], "?")
+            short = (ev.get("content") or "")[:80]
+            print(f"  {state:<10} {ev['pubkey'][:16]}… {short}")
+    return EXIT_OK
+
+
+def fetch_chain(relay_url: str, kinds: list[int] | None = None, timeout: float = 3.0) -> list[dict[str, Any]]:
+    """REQ the chain kinds on the control relay; return stored events."""
+    import time
+
+    from websockets.sync.client import connect
+
+    kinds = kinds or CHAIN_KINDS
+    events: list[dict[str, Any]] = []
+    with connect(relay_url) as ws:
+        sub_id = "nostrhost-opctl-" + "".join(__import__("secrets").token_hex(2))
+        ws.send(json.dumps(["REQ", sub_id, {"kinds": kinds}]))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                msg = json.loads(ws.recv(timeout=0.5))
+            except TimeoutError:
+                continue
+            if msg[0] == "EVENT":
+                events.append(msg[2])
+            elif msg[0] == "EOSE":
+                break
+    return events
+
+
+def _e_tag(event: dict[str, Any]) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == "e" and len(tag) > 1:
+            return tag[1]
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nostr-opctl")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    req = sub.add_parser("request", help="publish a kind-2200 operation request")
+    req.add_argument("--tool", required=True, choices=known_tools())
+    req.add_argument("--args", default="{}", help="JSON args object")
+    req.add_argument("--agent-sk", default=None, help="requester secret key (hex)")
+
+    appr = sub.add_parser("approve", help="publish a kind-2201 approval")
+    appr.add_argument("request_id")
+    appr.add_argument("--admin-sk", default=None)
+    appr.add_argument("--note", default=None)
+
+    rej = sub.add_parser("reject", help="publish a kind-2202 rejection")
+    rej.add_argument("request_id")
+    rej.add_argument("--admin-sk", default=None)
+    rej.add_argument("--reason", default=None)
+
+    grant = sub.add_parser("grant", help="publish a kind-31100 capability grant")
+    grant.add_argument("--pubkey", required=True, help="subject pubkey (64-hex)")
+    grant.add_argument("--scopes", required=True, help="comma-separated scopes, e.g. server.read,apps.read")
+    grant.add_argument("--admin-sk", default=None)
+
+    sub.add_parser("status", help="print the current chain from the relay")
+
+    args = parser.parse_args(argv)
+    try:
+        return {"request": cmd_request, "approve": cmd_approve, "reject": cmd_reject, "grant": cmd_grant, "status": cmd_status}[
+            args.command
+        ](args)
+    except (OperationError, IdentityError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

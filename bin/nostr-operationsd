@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""nostr-operationsd — operation executor daemon.
+
+Subscribes to the operation chain (kinds 2200–2204) and capability grants
+(kind 31100) on the local control relay and executes authorised, approved
+requests against the safe read-only tool registry, publishing execution
+started (2203) and result (2204) events as the server key.
+
+Run as root. Config via /etc/nostrhost/operator.toml or NOSTRHOST_* env vars.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from yunohost.nostr_operationsd import run
+
+if __name__ == "__main__":
+    sys.exit(run())
