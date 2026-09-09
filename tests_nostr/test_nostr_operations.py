@@ -49,7 +49,7 @@ class FakeTransport:
 
 
 def test_registry_has_the_safe_tools():
-    assert known_tools() == ["app.list", "service.control", "service.restart", "service.status", "system.version"]
+    assert known_tools() == ["app.list", "app.remove", "service.control", "service.restart", "service.status", "system.version"]
     assert tool_spec("system.version").scope == "server.read"
     assert tool_spec("app.list").scope == "apps.read"
     assert tool_spec("service.status").scope == "services.read"

@@ -150,18 +150,21 @@ def test_apply_executes_registry_tools_and_marks_unknown_manual(tmp_path: Path):
     changed["services"] = {"dnsmasq.toml": {"status": "dead", "type": "system"}}
     changed["apps"] = dict(good["apps"])
     changed["apps"]["new_app_ynh.toml"] = {"label": "New", "version": "1.0", "status": "running"}
+    changed["identities"] = {"matt.toml": {"fullname": "Matt2", "groups": ["all_users", "admins"]}}
     repo.commit(changed, op_event_id="f" * 64, phase="post", health="failed")
     plan = build_rollback_plan(repo)
 
     assert tool_spec("service.control") is not None   # registry-backed -> auto
-    assert tool_spec("app.remove") is None            # not in registry -> manual
+    assert tool_spec("app.remove") is not None         # registry-backed -> auto
     backend = ExecBackend()
     report = apply_rollback_plan(plan, backend=backend, approve=True)
 
     by_section = {e["step"]["section"]: e for e in report}
     assert by_section["services"]["status"] == "executed"
-    assert backend.calls[0][0] == "service.control"
-    assert by_section["apps"]["status"] == "manual"
+    assert by_section["apps"]["status"] == "executed"
+    assert by_section["identities"]["status"] == "manual"  # credential-rotation, no tool
+    executed_tools = [c[0] for c in backend.calls]
+    assert "service.control" in executed_tools and "app.remove" in executed_tools
     assert plan["approved"] is True and plan["_ok"] is True
 
 

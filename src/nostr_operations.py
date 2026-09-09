@@ -16,10 +16,13 @@ The executor (nostr_operationsd) enforces the state machine and authorisation;
 this module provides the authoring side (what the CLI/tests sign and publish)
 and the safe-tool registry the executor runs against.
 
-Phase 3 posture: only read-only tools are in the default registry; every tool
-requires an admin approval before execution. Scopes use the nostrhost-policy
-vocabulary (server.read / apps.read / services.read) so grants (kind 31100)
-stay meaningful across the stack.
+Phase 3 posture: the registry is read-only tools plus a deliberately small set
+of bounded write tools (``service.restart``, ``service.control``,
+``app.remove``) that are single-target by construction and approval-gated;
+every write requires an admin approval before execution. Scopes use the
+nostrhost-policy vocabulary (server.read / apps.read / apps.write /
+services.read / services.write) so grants (kind 31100) stay meaningful across
+the stack.
 
 Heavy dependencies are imported lazily; transport and keys are injectable for
 tests, mirroring nostr_identity.py.
@@ -55,6 +58,7 @@ CHAIN_KINDS = (
 # write-capable operations (approval-gated on top of the scope).
 SCOPE_SERVER_READ = "server.read"
 SCOPE_APPS_READ = "apps.read"
+SCOPE_APPS_WRITE = "apps.write"
 SCOPE_SERVICES_READ = "services.read"
 SCOPE_SERVICES_WRITE = "services.write"
 
@@ -88,6 +92,25 @@ def _safe_app_list(**args: Any) -> dict[str, Any]:
     from yunohost.app import app_list
 
     return app_list(**args)
+
+
+def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[str, Any]:
+    """Remove one installed app — the rollback reverse-action for the
+    package-install change class.
+
+    Bounded by construction: a single app id (never a list) and an explicit
+    purge flag; no other args. The engine additionally requires the
+    ``apps.write`` scope and admin approval, so removal stays an audited,
+    signed chain step and can never happen through a repository change."""
+    app = str(app or "").strip()
+    if args:
+        raise OperationError(f"app.remove does not accept extra args: {sorted(args)}")
+    if not app:
+        raise OperationError("app.remove requires a non-empty 'app'")
+    from yunohost.app import app_remove
+
+    app_remove(app, purge=bool(purge))
+    return {"app": app, "purge": bool(purge)}
 
 
 def _safe_service_status(**args: Any) -> dict[str, Any]:
@@ -155,6 +178,12 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_app_list,
         scope=SCOPE_APPS_READ,
         description="list installed applications",
+    ),
+    "app.remove": ToolSpec(
+        name="app.remove",
+        handler=_safe_app_remove,
+        scope=SCOPE_APPS_WRITE,
+        description="remove one installed app (rollback reverse-action, write operation)",
     ),
     "service.status": ToolSpec(
         name="service.status",

@@ -359,6 +359,17 @@ def test_service_restart_handler_argument_validation():
         _safe_service_restart(name="nginx", extra="boom")
 
 
+def test_app_remove_handler_argument_validation():
+    """The rollback app-removal handler is bounded: single app id, explicit
+    purge flag, no extra args."""
+    from yunohost.nostr_operations import OperationError, _safe_app_remove
+
+    with pytest.raises(OperationError):
+        _safe_app_remove()  # no app
+    with pytest.raises(OperationError):
+        _safe_app_remove(app="hello_nostr_ynh", extra="boom")
+
+
 def test_subscribe_authenticates_via_nip42_then_reads(monkeypatch):
     """On an AUTH challenge the daemon signs kind 22242, waits for the auth
     OK, re-sends the REQ, and only then processes the replay — so protected
