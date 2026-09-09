@@ -252,3 +252,61 @@ def test_bootstrap_tool_writes_distinct_keys(tmp_path, monkeypatch):
     # force regenerates
     monkeypatch.setattr("sys.argv", argv + ["--force"])
     assert rc["main"]() == 0
+
+
+def test_publish_to_relay_nip42_handshake(tmp_path, monkeypatch):
+    """publish_to_relay answers a NIP-42 AUTH challenge with a kind-22242
+    event (relay + challenge tags) and re-sends the original event."""
+    import asyncio
+    import threading
+    import time
+
+    import websockets
+
+    from yunohost.nostr_identity import _sign_event, publish_to_relay
+
+    sk, pk = new_key()
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_SK", sk)
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "none.toml"))
+
+    event = _sign_event(sk, pk, 2200, json.dumps({"tool": "system.version", "args": {}}), [])
+    auth_seen = {"n": 0}
+
+    async def handler(ws):
+        authed = {"v": False}
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg[0] == "AUTH":
+                auth_seen["n"] += 1
+                assert msg[1]["kind"] == 22242
+                assert any(t[0] == "challenge" and t[1] == "challenge-xyz" for t in msg[1]["tags"])
+                assert any(t[0] == "relay" for t in msg[1]["tags"])
+                authed["v"] = True
+                await ws.send(json.dumps(["OK", msg[1]["id"], True, "auth ok"]))
+            elif msg[0] == "EVENT":
+                if not authed["v"]:
+                    await ws.send(json.dumps(["AUTH", "challenge-xyz"]))
+                else:
+                    await ws.send(json.dumps(["OK", event["id"], True, "accepted"]))
+
+    ports: list[int] = []
+    done = threading.Event()
+
+    async def serve():
+        async with websockets.serve(handler, "127.0.0.1", 0) as srv:
+            ports.append(srv.sockets[0].getsockname()[1])
+            while not done.is_set():
+                await asyncio.sleep(0.1)
+
+    def run_server():
+        asyncio.run(serve())
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    while not ports:
+        time.sleep(0.05)
+
+    publish_to_relay(f"ws://127.0.0.1:{ports[0]}", event)
+    done.set()
+    t.join(timeout=5)
+    assert auth_seen["n"] == 1

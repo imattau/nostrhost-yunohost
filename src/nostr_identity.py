@@ -253,6 +253,28 @@ def _read_operator_config() -> dict[str, Any]:
         return tomllib.load(fh)
 
 
+# --------------------------------------------------------------------------- #
+# NIP-42 client auth (kind 22242) for the control relay
+
+AUTH_KIND = 22242
+
+
+def default_auth() -> tuple[str, str] | None:
+    """The key a headless client authenticates relay connections with: the
+    operator (a relay admin, always allowlisted). None when the node is not
+    bootstrapped yet (no operator to authenticate as)."""
+    try:
+        cfg = _operator_config()
+    except IdentityError:
+        return None
+    return cfg.operator_sk, cfg.operator_pubkey
+
+
+def _sign_auth_event(sk: str, pubkey: str, relay_url: str, challenge: str, sub_id: str = "") -> dict[str, Any]:
+    """Build and sign a NIP-42 kind-22242 AUTH event for a relay challenge."""
+    return _sign_event(sk, pubkey, AUTH_KIND, sub_id, [["relay", relay_url], ["challenge", challenge]])
+
+
 def link_identity(
     username: str,
     pubkey_or_npub: str,
@@ -293,18 +315,75 @@ def revoke_identity(
     return event
 
 
-def publish_to_relay(relay_url: str, event: dict[str, Any]) -> None:
-    """Publish an event to the control relay over raw NIP-01 WebSocket."""
+def _wait_auth_ok(ws: Any, auth_id: str, deadline: float) -> None:
+    """Drain messages until the relay acknowledges the AUTH event. The relay
+    applies the authenticated pubkey in a per-message goroutine, so a client
+    must not re-send its EVENT/REQ until the AUTH OK arrives (otherwise the
+    re-send races the auth state and is still rejected as unauthenticated)."""
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise IdentityError("relay did not acknowledge the AUTH event")
+        ack = json.loads(ws.recv(timeout=remaining))
+        if ack[0] == "OK" and ack[1] == auth_id:
+            return
+
+
+async def _wait_auth_ok_async(ws: Any, auth_id: str, timeout: float = 10.0) -> None:
+    """Async counterpart of :func:`_wait_auth_ok` for the daemon subscribe
+    loops (websockets async client)."""
+    import asyncio
+
+    deadline = time.time() + timeout
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise IdentityError("relay did not acknowledge the AUTH event")
+        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+        if ack[0] == "OK" and ack[1] == auth_id:
+            return
+
+
+def publish_to_relay(relay_url: str, event: dict[str, Any], timeout: float = 10.0) -> None:
+    """Publish an event to the control relay over raw NIP-01 WebSocket.
+
+    If the relay requires NIP-42 auth for the event's kind, it answers the
+    first attempt with ``["AUTH", <challenge>]`` (and a rejection): this
+    client signs a kind-22242 AUTH event with the operator key (via
+    :func:`default_auth`), waits for its acknowledgement, then re-sends the
+    event (ignoring the pre-auth rejection). Without a configured operator it
+    cannot authenticate and any rejection raises immediately."""
+    import time
+
     from websockets.sync.client import connect
 
+    auth = default_auth()
     with connect(relay_url) as ws:
         ws.send(json.dumps(["EVENT", event]))
+        authed = False
+        pending_rejection = False
+        deadline = time.time() + timeout
         while True:
-            msg = json.loads(ws.recv())
-            if msg[0] == "OK":
-                if msg[1] == event["id"] and msg[2] is True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise IdentityError(f"relay did not acknowledge event {event['id'][:16]} within {timeout}s")
+            msg = json.loads(ws.recv(timeout=remaining))
+            if msg[0] == "AUTH":
+                if auth is not None and not authed:
+                    challenge = msg[1] if len(msg) > 1 else ""
+                    auth_event = _sign_auth_event(auth[0], auth[1], relay_url, challenge)
+                    ws.send(json.dumps(["AUTH", auth_event]))
+                    _wait_auth_ok(ws, auth_event["id"], deadline)
+                    authed = True
+                    ws.send(json.dumps(["EVENT", event]))  # re-send after auth
+                continue
+            if msg[0] == "OK" and msg[1] == event["id"]:
+                if msg[2] is True:
                     return
-                raise IdentityError(f"relay rejected event: {msg[3]}")
+                if auth is None or (authed and pending_rejection):
+                    raise IdentityError(f"relay rejected event: {msg[3]}")
+                pending_rejection = True  # pre-auth rejection; the AUTH follows
+                continue
 
 
 def _build_identity_event(

@@ -98,21 +98,36 @@ def cmd_status(_args) -> int:
 
 
 def fetch_chain(relay_url: str, kinds: list[int] | None = None, timeout: float = 3.0) -> list[dict[str, Any]]:
-    """REQ the chain kinds on the control relay; return stored events."""
+    """REQ the chain kinds on the control relay; return stored events.
+
+    Handles the NIP-42 AUTH challenge (control kinds are protected by
+    default), authenticating the connection as the operator."""
     import time
 
     from websockets.sync.client import connect
+
+    from yunohost.nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
 
     kinds = kinds or CHAIN_KINDS
     events: list[dict[str, Any]] = []
     with connect(relay_url) as ws:
         sub_id = "nostrhost-opctl-" + "".join(__import__("secrets").token_hex(2))
-        ws.send(json.dumps(["REQ", sub_id, {"kinds": kinds}]))
+        req = json.dumps(["REQ", sub_id, {"kinds": kinds}])
+        ws.send(req)
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 msg = json.loads(ws.recv(timeout=0.5))
             except TimeoutError:
+                continue
+            if msg[0] == "AUTH":
+                auth = default_auth()
+                if auth is not None:
+                    challenge = msg[1] if len(msg) > 1 else ""
+                    auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                    ws.send(json.dumps(["AUTH", auth_ev]))
+                    _wait_auth_ok(ws, auth_ev["id"], deadline)
+                    ws.send(req)  # re-send the REQ now that the connection is authed
                 continue
             if msg[0] == "EVENT":
                 events.append(msg[2])

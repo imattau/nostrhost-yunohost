@@ -357,3 +357,92 @@ def test_service_restart_handler_argument_validation():
         _safe_service_restart()  # no name
     with pytest.raises(OperationError):
         _safe_service_restart(name="nginx", extra="boom")
+
+
+def test_subscribe_authenticates_via_nip42_then_reads(monkeypatch):
+    """On an AUTH challenge the daemon signs kind 22242, waits for the auth
+    OK, re-sends the REQ, and only then processes the replay — so protected
+    kinds (NIP-42 restored) don't get missed (the live-after-EOSE + auth race
+    seen on the VM where the projector missed an identity event)."""
+    import asyncio
+    import websockets
+
+    from yunohost.nostr_operationsd import subscribe_loop
+    from yunohost.nostr_identity import _sign_auth_event, default_auth as _real_default_auth
+
+    h = Harness()
+    h.grant(["server.read"])
+    request_ev, _ = h.request("system.version")
+    approval_ev = build_approval(h.admin_sk, h.admin_pk, request_ev["id"])
+
+    sk, pk = new_key()
+    monkeypatch.setattr(
+        "yunohost.nostr_operationsd.default_auth", lambda: (sk, pk)
+    )
+    sent = []
+    auth_ev_id = {"id": None}
+
+    class FakeWS:
+        def __init__(self):
+            self._msgs = [
+                ["AUTH", "challenge-read"],
+                "__AUTH_OK__",
+                ["EVENT", "s", request_ev],
+                ["EOSE", "s"],
+                ["EVENT", "s", approval_ev],
+            ]
+            self._i = 0
+            self.auth_event = None
+
+        async def send(self, data):
+            sent.append(json.loads(data))
+            if sent[-1][0] == "AUTH":
+                self.auth_event = sent[-1][1]
+
+        async def _next(self):
+            if self._i >= len(self._msgs):
+                await asyncio.sleep(3600)
+            m = self._msgs[self._i]
+            self._i += 1
+            if m == "__AUTH_OK__":
+                return json.dumps(["OK", self.auth_event["id"], True, "auth ok"])
+            return json.dumps(m)
+
+        async def recv(self):
+            return await self._next()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self._next()
+
+    fake = FakeWS()
+
+    def fake_connect(url):
+        return fake
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    async def drive():
+        task = asyncio.create_task(subscribe_loop("ws://x", engine=h.engine))
+        try:
+            await asyncio.wait_for(task, timeout=1.0)
+        except asyncio.TimeoutError:
+            pass  # daemon loop never returns by design
+
+    asyncio.run(drive())
+
+    assert fake.auth_event is not None
+    assert fake.auth_event["kind"] == 22242
+    assert any(t[0] == "challenge" and t[1] == "challenge-read" for t in fake.auth_event["tags"])
+    # REQ was re-sent after auth
+    assert any(m[0] == "REQ" for m in sent)
+    assert h.engine.state(request_ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("system.version", {})]

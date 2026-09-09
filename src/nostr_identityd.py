@@ -31,7 +31,10 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _operator_config,
     _require_bootstrapped,
+    _sign_auth_event,
     _store,
+    _wait_auth_ok_async,
+    default_auth,
 )
 
 logger = logging.getLogger("nostr-identityd")
@@ -165,6 +168,17 @@ async def subscribe_loop(
                 replaying = True
                 async for raw in ws:
                     msg = json.loads(raw)
+                    if msg[0] == "AUTH":
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth = default_auth()
+                        if auth is not None:
+                            auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                            await ws.send(json.dumps(["AUTH", auth_ev]))
+                            await _wait_auth_ok_async(ws, auth_ev["id"])
+                            replay = []
+                            replaying = True
+                            await ws.send(json.dumps(["REQ", sub_id, filter]))
+                        continue
                     if msg[0] == "EVENT":
                         if replaying:
                             replay.append(msg[2])
