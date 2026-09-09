@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nostrhost-state — the durable semantic configuration-state CLI (Stage A).
+"""nostrhost-state — the durable semantic configuration-state CLI (Stage B).
 
 Manages the ngit / NIP-34-aligned state repository that records *desired*
 configuration, linked to the Nostr operation events that changed it:
@@ -11,6 +11,15 @@ configuration, linked to the Nostr operation events that changed it:
   nostrhost-state diff <from> [<to>]         semantic diff between revisions
   nostrhost-state status                     revision + known-good + dirty?
   nostrhost-state announce                   publish the NIP-34 repo event
+  nostrhost-state rollback plan [--from K] [--to C] [--json] [--restic ID]
+  nostrhost-state rollback apply <plan.json> [--approve]
+
+`rollback plan` generates a change-class-aware assisted rollback plan (from
+the latest known-good revision to the current state by default); `rollback
+apply` executes a saved plan through the operation chain — automatic steps
+run only when their reverse tool is in the operation registry, data steps
+restore the linked Restic snapshot, everything else is reported as manual and
+is never auto-executed. Execution requires `--approve`.
 
 The repository lives at $NOSTRHOST_STATE_DIR (default /var/lib/nostrhost/state)
 and its git identity is the server pubkey from /etc/nostrhost/operator.toml.
@@ -108,6 +117,59 @@ def cmd_announce(_args) -> int:
     return EXIT_OK
 
 
+def cmd_rollback_plan(args) -> int:
+    from yunohost.nostr_rollback import RollbackError, build_rollback_plan, render_plan, write_plan
+
+    repo = default_repo()
+    try:
+        plan = build_rollback_plan(repo, from_rev=args.frm, to_rev=args.to, restic_snapshot=args.restic)
+    except RollbackError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    if args.json or args.out:
+        text = json.dumps(plan, indent=2, sort_keys=True)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+            print(f"plan written to {args.out} (review, then `rollback apply {args.out} --approve`)")
+            return EXIT_OK
+        print(text)
+        return EXIT_OK
+    print(render_plan(plan))
+    print("(save with --out and execute with `rollback apply <plan> --approve`)")
+    return EXIT_OK
+
+
+def cmd_rollback_apply(args) -> int:
+    from yunohost.nostr_rollback import RollbackError, read_plan
+
+    try:
+        plan = read_plan(args.plan)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: cannot read plan: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    if not args.approve:
+        print("error: rollback plan not approved — re-run with --approve", file=sys.stderr)
+        return EXIT_ERR
+
+    from yunohost.nostr_operationsd import YnhExecutorBackend
+    from yunohost.nostr_restic import restic_client
+    from yunohost.nostr_rollback import apply_rollback_plan
+
+    backend = YnhExecutorBackend()
+    restic = restic_client() if plan.get("restic_snapshot") else None
+    try:
+        report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True)
+    except RollbackError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    for entry in report:
+        step = entry["step"]
+        print(f"  {entry['status']:<9} {step['section']}/{step['file']}  {entry.get('detail', '')}")
+    ok = all(e["status"] in ("executed", "restored", "manual", "skipped") for e in report) and plan.get("_ok", True)
+    return EXIT_OK if ok else EXIT_ERR
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nostrhost-state")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -127,6 +189,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="revision + known-good + dirty state")
     sub.add_parser("announce", help="publish the NIP-34 repository announcement")
 
+    rb = sub.add_parser("rollback", help="assisted rollback (Stage B)")
+    rbsub = rb.add_subparsers(dest="rollback_command", required=True)
+    plan = rbsub.add_parser("plan", help="generate a change-class-aware rollback plan")
+    plan.add_argument("--from", dest="frm", default=None, help="from revision (default: latest known-good)")
+    plan.add_argument("--to", dest="to", default=None, help="to revision (default: HEAD)")
+    plan.add_argument("--restic", default=None, help="override linked restic snapshot id")
+    plan.add_argument("--json", action="store_true", help="print the plan as JSON")
+    plan.add_argument("--out", default=None, help="write the plan to a file")
+    ap = rbsub.add_parser("apply", help="execute a saved rollback plan (requires --approve)")
+    ap.add_argument("plan", help="path to a plan file written by `rollback plan --out`")
+    ap.add_argument("--approve", action="store_true", help="approve and execute the plan")
+
     args = parser.parse_args(argv)
     try:
         needs_operator = args.command != "export"
@@ -134,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
             from yunohost.nostr_identity import _require_bootstrapped
 
             _require_bootstrapped()
+        if args.command == "rollback":
+            return {"plan": cmd_rollback_plan, "apply": cmd_rollback_apply}[args.rollback_command](args)
         return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce}[args.command](args)
     except (StateError, IdentityError) as exc:
         print(f"error: {exc}", file=sys.stderr)

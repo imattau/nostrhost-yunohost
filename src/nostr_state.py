@@ -449,6 +449,34 @@ class StateRepo:
             return res.stdout
         raise StateError(f"git diff {ref_a} {ref_b} failed: {res.stderr.strip()}")
 
+    def diff_names(self, ref_a: str, ref_b: str) -> list[tuple[str, str]]:
+        """Structured per-file change list between two revisions.
+
+        Returns ``(status, path)`` tuples with ``status`` in A/M/D (add,
+        modify, delete) — the input the rollback planner classifies.
+        """
+        res = subprocess.run(
+            ["git", "-C", str(self.path), "diff", "--no-renames", "--name-status", ref_a, ref_b, "--", "."],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            raise StateError(f"git diff --name-status {ref_a} {ref_b} failed: {res.stderr.strip()}")
+        out: list[tuple[str, str]] = []
+        for line in res.stdout.splitlines():
+            if "\t" in line:
+                status, path = line.split("\t", 1)
+                if status in ("A", "M", "D"):
+                    out.append((status, path))
+        return out
+
+    def show(self, rev: str, path: str) -> str:
+        """Read one file at a revision (e.g. a manifest for restic linkage)."""
+        res = subprocess.run(["git", "-C", str(self.path), "show", f"{rev}:{path}"], capture_output=True, text=True)
+        if res.returncode != 0:
+            raise StateError(f"git show {rev}:{path} failed: {res.stderr.strip()}")
+        return res.stdout
+
 
 def _op_id_from_message(subject: str) -> str | None:
     marker = "op="
@@ -568,3 +596,13 @@ def default_repo() -> StateRepo:
     _require_bootstrapped()
     cfg = _operator_config()
     return StateRepo(state_dir_from_env(), cfg.server_pubkey)
+
+
+def default_recorder(repo: StateRepo | None = None) -> StateRecorder:
+    """The production recorder: semantic snapshots plus, when a restic config
+    exists, an automatic data snapshot before data-affecting operations. A
+    missing/empty restic config degrades to a config-only recorder (the hook
+    returns ""), so backups are additive, never a hard dependency."""
+    from .nostr_restic import restic_snapshot_hook
+
+    return StateRecorder(repo or default_repo(), restic_hook=restic_snapshot_hook())

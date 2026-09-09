@@ -116,6 +116,29 @@ def _safe_service_restart(name: str = "", **args: Any) -> dict[str, Any]:
     return {"service": name, "status": service_status(name)["status"]}
 
 
+def _safe_service_control(name: str = "", action: str = "", **args: Any) -> dict[str, Any]:
+    """Bounded service control (start/stop/restart one named service).
+
+    The reverse-action primitive for the rollback planner's runtime-setting
+    class, and the same risk posture as ``service.restart``: a single, known
+    service name and a fixed action vocabulary, approval-gated on top of the
+    ``services.write`` scope."""
+    name = str(name or "").strip()
+    action = str(action or "").strip()
+    if args:
+        raise OperationError(f"service.control does not accept extra args: {sorted(args)}")
+    if not name:
+        raise OperationError("service.control requires a non-empty 'name'")
+    if action not in ("start", "stop", "restart"):
+        raise OperationError("service.control action must be one of: start, stop, restart")
+    from yunohost.service import _get_services, service_restart, service_start, service_status, service_stop
+
+    if name not in _get_services():
+        raise OperationError(f"unknown service {name!r}")
+    {"start": service_start, "stop": service_stop, "restart": service_restart}[action](name)
+    return {"service": name, "action": action, "status": service_status(name)["status"]}
+
+
 # The default registry: read-only tools plus one minimal write operation
 # (service.restart). Read tools are safe by construction; the write tool is
 # safe by gating — `services.write` scope + admin approval on top of the
@@ -144,6 +167,12 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_service_restart,
         scope=SCOPE_SERVICES_WRITE,
         description="restart one named service (write operation)",
+    ),
+    "service.control": ToolSpec(
+        name="service.control",
+        handler=_safe_service_control,
+        scope=SCOPE_SERVICES_WRITE,
+        description="start/stop/restart one named service (rollback reverse-action)",
     ),
 }
 

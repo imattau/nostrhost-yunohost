@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""nostrhost-restic — the Restic data-recovery client (Stage B).
+
+Snapshots application/filesystem data and links the snapshot id into the
+state layer's manifest when run through the operation recorder. Configuration
+lives in /etc/nostrhost/restic.toml (root-only):
+
+  [repo / password / paths / binary / host / tag / restore_target]
+
+  nostrhost-restic snapshot                snapshot configured data paths
+  nostrhost-restic snapshots [--tag T]     list data snapshots
+  nostrhost-restic restore <id> [--target D] [--include PATH]...
+  nostrhost-restic check                   verify repository integrity
+
+The password is passed to restic via RESTIC_PASSWORD, never on argv. Run as
+root (repository access + data paths).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+from yunohost.nostr_restic import ResticError, load_restic_config, restic_client
+
+EXIT_OK = 0
+EXIT_ERR = 1
+
+
+def _client() -> object:
+    return restic_client()
+
+
+def cmd_snapshot(args) -> int:
+    client = _client()
+    sid = client.snapshot(list(args.paths) if args.paths else None, tag=args.tag or None, host=args.host or None)
+    print(f"snapshot created: {sid}")
+    return EXIT_OK
+
+
+def cmd_snapshots(args) -> int:
+    client = _client()
+    snaps = client.snapshots(tag=args.tag or None, host=args.host or None)
+    if args.json:
+        print(json.dumps(snaps, indent=2, sort_keys=True))
+        return EXIT_OK
+    for snap in snaps:
+        print(
+            f"{str(snap.get('id') or '')[:16]}  {str(snap.get('time') or '')}  "
+            f"tags={','.join(snap.get('tags') or []) or '-'}  {','.join(snap.get('paths') or [])}"
+        )
+    if not snaps:
+        print("no snapshots")
+    return EXIT_OK
+
+
+def cmd_restore(args) -> int:
+    client = _client()
+    try:
+        client.restore(args.id, args.target, list(args.include) if args.include else None)
+    except ResticError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(f"restored {args.id[:16]} to {args.target}")
+    return EXIT_OK
+
+
+def cmd_check(_args) -> int:
+    client = _client()
+    try:
+        client.check()
+    except ResticError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print("repository OK")
+    return EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nostrhost-restic")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    snap = sub.add_parser("snapshot", help="snapshot the configured (or given) data paths")
+    snap.add_argument("paths", nargs="*", default=None, help="override configured paths")
+    snap.add_argument("--tag", default=None)
+    snap.add_argument("--host", default=None)
+
+    lst = sub.add_parser("snapshots", help="list data snapshots")
+    lst.add_argument("--tag", default=None)
+    lst.add_argument("--host", default=None)
+    lst.add_argument("--json", action="store_true")
+
+    rst = sub.add_parser("restore", help="restore one snapshot under --target")
+    rst.add_argument("id", help="snapshot id")
+    rst.add_argument("--target", default=None, help="restore target (default from config: /)")
+    rst.add_argument("--include", action="append", default=None, help="limit restore to a path (repeatable)")
+
+    sub.add_parser("check", help="verify repository integrity")
+
+    args = parser.parse_args(argv)
+    try:
+        cfg = load_restic_config()
+        if cfg is None:
+            print(
+                "error: no restic config at /etc/nostrhost/restic.toml "
+                "(set NOSTRHOST_RESTIC_CONFIG to override)",
+                file=sys.stderr,
+            )
+            return EXIT_ERR
+        if getattr(args, "target", None) is None and args.command == "restore":
+            args.target = cfg.restore_target
+        return {
+            "snapshot": cmd_snapshot,
+            "snapshots": cmd_snapshots,
+            "restore": cmd_restore,
+            "check": cmd_check,
+        }[args.command](args)
+    except ResticError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
