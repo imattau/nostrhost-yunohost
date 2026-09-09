@@ -34,7 +34,9 @@ def _client() -> object:
 
 def cmd_snapshot(args) -> int:
     client = _client()
-    sid = client.snapshot(list(args.paths) if args.paths else None, tag=args.tag or None, host=args.host or None)
+    cfg = load_restic_config()
+    paths = list(args.paths) if args.paths else list(cfg.paths)
+    sid = client.snapshot(paths, tag=args.tag or None, host=args.host or None)
     print(f"snapshot created: {sid}")
     return EXIT_OK
 

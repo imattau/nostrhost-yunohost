@@ -152,10 +152,12 @@ def cmd_rollback_apply(args) -> int:
         print("error: rollback plan not approved — re-run with --approve", file=sys.stderr)
         return EXIT_ERR
 
+    from yunohost.nostr_identity import _init_headless_yunohost
     from yunohost.nostr_operationsd import YnhExecutorBackend
     from yunohost.nostr_restic import restic_client
     from yunohost.nostr_rollback import apply_rollback_plan
 
+    _init_headless_yunohost()  # the tool handlers need moulinette's op logger
     backend = YnhExecutorBackend()
     restic = restic_client() if plan.get("restic_snapshot") else None
     try:
@@ -165,8 +167,24 @@ def cmd_rollback_apply(args) -> int:
         return EXIT_ERR
     for entry in report:
         step = entry["step"]
-        print(f"  {entry['status']:<9} {step['section']}/{step['file']}  {entry.get('detail', '')}")
+        fname = step["file"].split("/", 1)[-1]
+        print(f"  {entry['status']:<9} {step['section']}/{fname}  {entry.get('detail', '')}")
     ok = all(e["status"] in ("executed", "restored", "manual", "skipped") for e in report) and plan.get("_ok", True)
+    if ok:
+        # Re-validation seam: record the post-rollback state so the repo shows
+        # what the rollback did. It is NOT auto-marked known-good — the
+        # operator validates health, then moves the tag with `commit --known-good`.
+        from yunohost.nostr_state import YunohostBackend, export_state
+
+        rev = default_repo().commit(
+            export_state(YunohostBackend()),
+            op_event_id="",
+            phase="post",
+            known_good=False,
+            health="passed",
+            message=f"rollback to {plan['from'][:16]}",
+        )
+        print(f"recorded post-rollback state: {rev[:16]} (validate health, then `nostrhost-state commit --known-good --health passed`)")
     return EXIT_OK if ok else EXIT_ERR
 
 

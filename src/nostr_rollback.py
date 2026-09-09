@@ -244,8 +244,9 @@ def render_plan(plan: dict[str, Any]) -> str:
         f"  restic snapshot: {plan['restic_snapshot'] or '(none)'}",
     ]
     for step in plan["steps"]:
+        fname = step["file"].split("/", 1)[-1]
         lines.append(
-            f"  - {step['section']}/{step['file']}  {step['action']} "
+            f"  - {step['section']}/{fname}  {step['action']} "
             f"[{step['change_class']}/{step['reversibility']}] reverse={step.get('reverse', 'manual')}"
             + (f" tool={step['tool']}" if step.get("tool") else " (manual)")
         )
@@ -290,7 +291,7 @@ def apply_rollback_plan(
                 elif restic is None:
                     entry.update(status="blocked", detail="restore required but no restic client provided")
                 else:
-                    restic.restore(plan["restic_snapshot"], "/", include=[step["file"]])
+                    restic.restore(plan["restic_snapshot"], "/")
                     entry.update(status="restored", detail=f"snapshot {plan['restic_snapshot'][:16]}")
             elif step["automatic"] and step.get("tool"):
                 from .nostr_operations import tool_spec
