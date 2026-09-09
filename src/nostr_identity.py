@@ -262,10 +262,12 @@ AUTH_KIND = 22242
 def default_auth() -> tuple[str, str] | None:
     """The key a headless client authenticates relay connections with: the
     operator (a relay admin, always allowlisted). None when the node is not
-    bootstrapped yet (no operator to authenticate as)."""
+    bootstrapped yet, or when the caller cannot read the root-only operator
+    config (e.g. the portal service) - NIP-42 auth is only needed for
+    protected kinds, so a non-protected publish still works without it."""
     try:
         cfg = _operator_config()
-    except IdentityError:
+    except (IdentityError, OSError):
         return None
     return cfg.operator_sk, cfg.operator_pubkey
 

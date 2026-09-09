@@ -112,12 +112,23 @@ def portalapi(debug: bool, host: str, port: int) -> NoReturn:
     # FIXME : is this the logdir we want ? (yolo to work around permission issue)
     init_logging(interface="portalapi", debug=debug, logdir="/var/log")
 
+    # Passwordless Nostr sign-in (§8): public challenge + login routes. They
+    # are registered via moulinette's `routes` kwarg, which skips the
+    # default authenticator (these are unauthenticated by design).
+    from .nostr_login import challenge_route, login_route
+
+    nostr_routes = {
+        ("GET", "/nostr/challenge"): challenge_route,
+        ("POST", "/nostr/login"): login_route,
+    }
+
     ret = moulinette.api(
         host=host,
         port=port,
         actionsmap="/usr/share/yunohost/actionsmap-portal.yml",
         locales_dir="/usr/share/yunohost/locales/",
         allowed_cors_origins=allowed_cors_origins,
+        routes=nostr_routes,
         umask=0o022,
     )
     sys.exit(ret)

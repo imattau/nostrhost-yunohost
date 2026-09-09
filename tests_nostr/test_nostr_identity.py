@@ -223,13 +223,30 @@ def test_bootstrapped_state(tmp_path, monkeypatch):
     _require_bootstrapped()  # no raise
 
 
+def test_default_auth_degrades_on_unreadable_config(tmp_path, monkeypatch):
+    """A non-root caller (portal service) that cannot read the root-only
+    operator config must get None from default_auth, not a PermissionError -
+    NIP-42 auth is optional for non-protected kinds."""
+    from yunohost.nostr_identity import default_auth
+
+    cfg = tmp_path / "operator.toml"
+    cfg.write_text('operator_sk = "' + "0" * 64 + '"\n')
+    cfg.chmod(0o000)
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg))
+    monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
+
+    assert default_auth() is None
+
+
 def test_bootstrap_tool_writes_distinct_keys(tmp_path, monkeypatch):
     """nostrhost-bootstrap writes server + operator keys (distinct, root-only
     mode), refuses overwrite, and --force regenerates."""
     import runpy
 
     cfg_path = tmp_path / "operator.toml"
+    notice_path = tmp_path / "portal.toml"
     monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+    monkeypatch.setenv("NOSTRHOST_NOTICE_CONFIG", str(notice_path))
     monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
     monkeypatch.setattr("os.geteuid", lambda: 0)
 
@@ -246,6 +263,11 @@ def test_bootstrap_tool_writes_distinct_keys(tmp_path, monkeypatch):
     assert cfg.operator_sk == "2" * 64
     assert cfg.admins == ("3" * 64,)
     assert (cfg_path.stat().st_mode & 0o777) == 0o600
+
+    # the portal's dedicated notice key is written separately (group-readable)
+    assert notice_path.exists()
+    assert "notice_sk" in notice_path.read_text()
+    assert (notice_path.stat().st_mode & 0o777) == 0o640
 
     # refusing overwrite
     assert rc["main"]() == 1
