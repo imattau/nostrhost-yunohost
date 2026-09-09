@@ -102,12 +102,14 @@ class OperationEngine:
         server_sk: str,
         admins: tuple[str, ...] | list[str],
         backend: ExecutorBackend | None = None,
+        state: Any = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
         self._server_pubkey = _derive_pubkey(server_sk)
         self._admins = tuple(admins)
         self._backend = backend or YnhExecutorBackend()
+        self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
 
@@ -263,12 +265,16 @@ class OperationEngine:
             return
         self._publish(build_execution_started(self._server_sk, self._server_pubkey, record.request_id))
         logger.info("executing %s: %s", record.request_id[:16], record.tool)
+        if self._state is not None:
+            self._state.pre(record.request_id, record.tool, record.args)
         try:
             result = self._backend.execute(record.tool, record.args)
             body: dict[str, Any] = {"ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001 - a failed tool is a 2204, not a crash
             logger.error("execution of %s failed: %s", record.tool, exc)
             body = {"ok": False, "error": str(exc)}
+        if self._state is not None:
+            self._state.post(record.request_id, record.tool, body["ok"], body)
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, **body))
         record.state = next_state(record.state, KIND_EXECUTION_RESULT, ok=body["ok"])
         record.result = body
@@ -408,6 +414,22 @@ def run() -> None:
     _require_bootstrapped()
     cfg = _operator_config()
     engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins)
+    try:
+        from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
+
+        state = StateRecorder(
+            StateRepo(state_dir_from_env(), cfg.server_pubkey),
+            capabilities=lambda: {pk: sorted(sc) for pk, sc in engine.scopes.items()},
+        )
+        engine = OperationEngine(
+            publish=lambda ev: _publish_default(cfg.control_relay, ev),
+            server_sk=cfg.server_sk,
+            admins=cfg.admins,
+            state=state,
+        )
+    except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
+        logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
+        engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins)
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))
     except KeyboardInterrupt:

@@ -33,7 +33,7 @@ from pathlib import Path
 
 DEFAULT_RELAY = "ws://127.0.0.1:4848"
 OPERATOR_CONFIG = "/etc/nostrhost/operator.toml"
-RELAY_KINDS = [2200, 2201, 2202, 2203, 2204, 31100, 31102]
+RELAY_KINDS = [2200, 2201, 2202, 2203, 2204, 31100, 31102, 30617]
 
 CONTROL_KIND_HELP = """
 Once the relay is running, both pubkeys must be allowlisted writers on it:

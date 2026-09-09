@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""nostrhost-state — the durable semantic configuration-state CLI (Stage A).
+
+Manages the ngit / NIP-34-aligned state repository that records *desired*
+configuration, linked to the Nostr operation events that changed it:
+
+  nostrhost-state export                     print the current semantic state
+  nostrhost-state commit [--operation ID] [--phase pre|post]
+                        [--known-good] [--restic ID] [--health passed]
+  nostrhost-state history [-n 20]            list state commits (op-linked)
+  nostrhost-state diff <from> [<to>]         semantic diff between revisions
+  nostrhost-state status                     revision + known-good + dirty?
+  nostrhost-state announce                   publish the NIP-34 repo event
+
+The repository lives at $NOSTRHOST_STATE_DIR (default /var/lib/nostrhost/state)
+and its git identity is the server pubkey from /etc/nostrhost/operator.toml.
+Run as root (git identity + relay access); `export` is read-only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+from yunohost.nostr_identity import IdentityError
+from yunohost.nostr_state import StateError, announce_state_repository, default_repo, export_state, state_dir_from_env
+from yunohost.nostr_state import YunohostBackend
+
+EXIT_OK = 0
+EXIT_ERR = 1
+
+
+def cmd_export(_args) -> int:
+    try:
+        tree = export_state(YunohostBackend())
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: export failed: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(json.dumps(tree, indent=2, sort_keys=True, default=str))
+    return EXIT_OK
+
+
+def cmd_commit(args) -> int:
+    repo = default_repo()
+    try:
+        tree = export_state(YunohostBackend())
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: export failed: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    rev = repo.commit(
+        tree,
+        op_event_id=args.operation or "",
+        phase=args.phase or "",
+        known_good=bool(args.known_good),
+        restic_snapshot=args.restic or "",
+        health=args.health or "pending",
+    )
+    print(f"committed state snapshot: {rev}")
+    return EXIT_OK
+
+
+def cmd_history(args) -> int:
+    repo = default_repo()
+    for entry in repo.history(args.n):
+        kg = " known-good" if entry["known_good"] else ""
+        op = f" op={entry['op_event_id'][:16]}…" if entry.get("op_event_id") else ""
+        print(f"{entry['revision'][:16]}  {entry['message']}{op}{kg}")
+    if not repo.history(args.n):
+        print("no state history yet")
+    return EXIT_OK
+
+
+def cmd_diff(args) -> int:
+    repo = default_repo()
+    to_ref = args.to or repo.revision() or ""
+    if not to_ref:
+        print("error: no state revisions yet", file=sys.stderr)
+        return EXIT_ERR
+    try:
+        diff = repo.diff(args.frm, to_ref)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(diff or "(no difference)")
+    return EXIT_OK
+
+
+def cmd_status(_args) -> int:
+    repo = default_repo()
+    rev = repo.revision() or "(none)"
+    kg = repo.known_good_revision() or "(none)"
+    dirty = "dirty" if repo.is_dirty() else "clean"
+    print(f"state repository : {state_dir_from_env()}")
+    print(f"revision         : {rev[:16]} ({dirty})")
+    print(f"known-good       : {kg[:16]}")
+    return EXIT_OK
+
+
+def cmd_announce(_args) -> int:
+    try:
+        event = announce_state_repository()
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(f"published NIP-34 repository announcement {event['id'][:16]}… kind {event['kind']}")
+    print(f"  repo: nostr://{event['pubkey']}/nostrhost-state")
+    return EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nostrhost-state")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("export", help="print the current semantic state as JSON")
+    cmt = sub.add_parser("commit", help="commit a snapshot of the current state")
+    cmt.add_argument("--operation", default=None, help="linked Nostr operation event id")
+    cmt.add_argument("--phase", default=None, choices=["pre", "post", "manual"])
+    cmt.add_argument("--known-good", action="store_true", help="mark this snapshot known-good")
+    cmt.add_argument("--restic", default=None, help="linked Restic snapshot id")
+    cmt.add_argument("--health", default=None, choices=["passed", "failed", "pending"])
+    hist = sub.add_parser("history", help="list state commits")
+    hist.add_argument("-n", type=int, default=20)
+    dff = sub.add_parser("diff", help="semantic diff between state revisions")
+    dff.add_argument("frm", help="from revision (hex) or 'HEAD~1'")
+    dff.add_argument("to", nargs="?", default=None, help="to revision (default HEAD)")
+    sub.add_parser("status", help="revision + known-good + dirty state")
+    sub.add_parser("announce", help="publish the NIP-34 repository announcement")
+
+    args = parser.parse_args(argv)
+    try:
+        needs_operator = args.command != "export"
+        if needs_operator:
+            from yunohost.nostr_identity import _require_bootstrapped
+
+            _require_bootstrapped()
+        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce}[args.command](args)
+    except (StateError, IdentityError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
