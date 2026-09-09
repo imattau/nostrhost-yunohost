@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""nostr-identityd — identity projector daemon.
+
+Subscribes to identity-definition events (kind 31102) on the local control
+relay and materialises the pubkey ↔ YunoHost-account mapping + LDAP
+compatibility account.
+
+Run as root (the account backend calls the fork's user machinery). Config via
+/etc/nostrhost/operator.toml or NOSTRHOST_* environment variables.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from yunohost.nostr_identityd import run
+
+if __name__ == "__main__":
+    sys.exit(run())

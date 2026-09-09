@@ -12,6 +12,12 @@ requires-python = ">=3.11"
 # These dependencies might not be up to date, please see debian/control instead
 dependencies = [
     "moulinette @ git+https://github.com/yunohost/moulinette@dev",
+    # NostrHost derivative identity layer (roadmap §4 / Phase 3):
+    # nostr-identity / nostr-identityd author and project identity events on
+    # the local control relay (kind 31102) over raw NIP-01 WebSocket.
+    "nostrhost-auth @ git+https://github.com/imattau/nostrhost-auth@main",
+    "coincurve>=21.0.0",
+    "websockets>=12.0",
     "bottle",
     "cryptography",
     # "dbus-python",

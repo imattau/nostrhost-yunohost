@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""nostr-identity-admin — admin provisioning for Nostr-native identities.
+
+Authors identity-definition events (kind 31102) on the local control relay
+as the operator; the identity projector materialises the mapping and the LDAP
+compatibility account.
+
+Usage:
+  nostr-identity-admin link   --username <user> --pubkey <npub|hex> [--signer-type TYPE] [--label LABEL]
+  nostr-identity-admin revoke --pubkey <npub|hex>
+  nostr-identity-admin list
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from yunohost.nostr_identity import (
+    IdentityError,
+    link_identity,
+    list_identities,
+    revoke_identity,
+)
+
+EXIT_OK = 0
+EXIT_ERR = 1
+
+
+def _format(identity) -> str:
+    state = "enabled" if identity.enabled else "revoked"
+    label = f" label={identity.label!r}" if identity.label else ""
+    return (
+        f"  #{identity.identity_id} {identity.username:<16} {identity.pubkey[:16]}…"
+        f" signer={identity.signer_type}{label} [{state}]"
+    )
+
+
+def cmd_link(args) -> int:
+    event = link_identity(
+        args.username,
+        args.pubkey,
+        signer_type=args.signer_type,
+        label=args.label,
+    )
+    print(f"published identity event {event['id'][:16]}… (kind {event['kind']}) for {args.pubkey[:16]}… -> {args.username}")
+    return EXIT_OK
+
+
+def cmd_revoke(args) -> int:
+    event = revoke_identity(args.pubkey)
+    print(f"published revocation {event['id'][:16]}… for {args.pubkey[:16]}…")
+    return EXIT_OK
+
+
+def cmd_list(_args) -> int:
+    identities = list_identities()
+    if not identities:
+        print("no identities")
+        return EXIT_OK
+    for identity in identities:
+        print(_format(identity))
+    return EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nostr-identity-admin")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    link = sub.add_parser("link", help="link a pubkey to a YunoHost account")
+    link.add_argument("--username", required=True)
+    link.add_argument("--pubkey", required=True, help="npub1… or 64-hex pubkey")
+    link.add_argument("--signer-type", default="unknown", choices=("nip07", "nip46", "passkey", "unknown"))
+    link.add_argument("--label", default=None)
+
+    revoke = sub.add_parser("revoke", help="revoke a linked pubkey")
+    revoke.add_argument("--pubkey", required=True, help="npub1… or 64-hex pubkey")
+
+    sub.add_parser("list", help="list identities")
+
+    args = parser.parse_args(argv)
+    try:
+        return {"link": cmd_link, "revoke": cmd_revoke, "list": cmd_list}[args.command](args)
+    except IdentityError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
