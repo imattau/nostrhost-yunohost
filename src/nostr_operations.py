@@ -50,10 +50,13 @@ CHAIN_KINDS = (
     KIND_EXECUTION_RESULT,
 )
 
-# Scope names (nostrhost-policy vocabulary) for the safe read-only tools.
+# Scope names (nostrhost-policy vocabulary). Read scopes cover the safe
+# read-only tools; write scopes gate the minimal control executor's
+# write-capable operations (approval-gated on top of the scope).
 SCOPE_SERVER_READ = "server.read"
 SCOPE_APPS_READ = "apps.read"
 SCOPE_SERVICES_READ = "services.read"
+SCOPE_SERVICES_WRITE = "services.write"
 
 
 class OperationError(ValueError):
@@ -93,8 +96,30 @@ def _safe_service_status(**args: Any) -> dict[str, Any]:
     return service_status(**args)
 
 
-# The default registry: read-only, approval-gated. Safe by construction —
-# nothing here can mutate server state.
+def _safe_service_restart(name: str = "", **args: Any) -> dict[str, Any]:
+    """The minimal WRITE operation: restart one named service.
+
+    Bounded by construction: a single, known service name (never a list),
+    no extra args. The engine additionally requires both the `services.write`
+    scope and admin approval, so the executor stays the only path to machine
+    state and every write is an audited, signed chain step."""
+    name = str(name or "").strip()
+    if args:
+        raise OperationError(f"service.restart does not accept extra args: {sorted(args)}")
+    if not name:
+        raise OperationError("service.restart requires a non-empty 'name'")
+    from yunohost.service import _get_services, service_restart, service_status
+
+    if name not in _get_services():
+        raise OperationError(f"unknown service {name!r}")
+    service_restart(name)
+    return {"service": name, "status": service_status(name)["status"]}
+
+
+# The default registry: read-only tools plus one minimal write operation
+# (service.restart). Read tools are safe by construction; the write tool is
+# safe by gating — `services.write` scope + admin approval on top of the
+# chain, and it is bounded to a single known service name.
 TOOLS: dict[str, ToolSpec] = {
     "system.version": ToolSpec(
         name="system.version",
@@ -113,6 +138,12 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_service_status,
         scope=SCOPE_SERVICES_READ,
         description="status of running services",
+    ),
+    "service.restart": ToolSpec(
+        name="service.restart",
+        handler=_safe_service_restart,
+        scope=SCOPE_SERVICES_WRITE,
+        description="restart one named service (write operation)",
     ),
 }
 

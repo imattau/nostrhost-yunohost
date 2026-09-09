@@ -322,3 +322,38 @@ def test_subscribe_processes_live_events_after_eose(monkeypatch):
     asyncio.run(drive())
     assert h.engine.state(request_ev["id"]) == OpState.SUCCEEDED
     assert h.backend.calls == [("system.version", {})]
+
+
+def test_write_tool_requires_write_scope():
+    """service.restart (a write op) must be rejected without services.write."""
+    h = Harness()
+    h.grant(["services.read"])  # read scope is not enough
+    ev, handled = h.request("service.restart", args={"name": "nginx"})
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert h.backend.calls == []
+
+
+def test_write_tool_requires_approval_then_executes():
+    h = Harness()
+    h.grant(["services.write"])
+    ev, handled = h.request("service.restart", args={"name": "dnsmasq"})
+    request_id = ev["id"]
+    assert handled
+    assert h.engine.state(request_id) == OpState.REQUESTED  # approval-gated
+    assert h.backend.calls == []
+    assert h.approve(request_id)
+    assert h.engine.state(request_id) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "dnsmasq"})]
+    results = h.events_by_kind(2204)
+    assert results[0]["pubkey"] == h.server_pk  # executed by the server key
+
+
+def test_service_restart_handler_argument_validation():
+    """The write handler rejects malformed args before touching services."""
+    from yunohost.nostr_operations import OperationError, _safe_service_restart
+
+    with pytest.raises(OperationError):
+        _safe_service_restart()  # no name
+    with pytest.raises(OperationError):
+        _safe_service_restart(name="nginx", extra="boom")

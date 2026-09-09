@@ -48,11 +48,12 @@ class FakeTransport:
         self.events.append(event)
 
 
-def test_registry_has_the_safe_read_only_tools():
-    assert known_tools() == ["app.list", "service.status", "system.version"]
+def test_registry_has_the_safe_tools():
+    assert known_tools() == ["app.list", "service.restart", "service.status", "system.version"]
     assert tool_spec("system.version").scope == "server.read"
     assert tool_spec("app.list").scope == "apps.read"
     assert tool_spec("service.status").scope == "services.read"
+    assert tool_spec("service.restart").scope == "services.write"
     for name, spec in TOOLS.items():
         assert spec.handler is not None
         assert spec.require_approval is True  # nothing auto-runs in Phase 3
