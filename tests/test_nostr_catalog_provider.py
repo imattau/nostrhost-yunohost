@@ -66,3 +66,10 @@ def test_load_native_catalog_prefer_marks_exact_passing_attestation(tmp_path, mo
     path.write_text(json.dumps({"entries": [{"declaration": declaration}], "attestations": [{"attestation": attestation}]}))
     monkeypatch.setenv("NOSTRHOST_CATALOG_ATTESTATION_MODE", "prefer")
     assert load_native_catalog(path)["hello_nostr"]["nostr_verified"] is True
+
+
+def test_native_backend_is_explicitly_selectable(monkeypatch):
+    from yunohost import app_catalog
+
+    monkeypatch.setenv("NOSTRHOST_CATALOG_BACKEND", "nostr")
+    assert app_catalog.NATIVE_CATALOG_MODE_ENV == "NOSTRHOST_CATALOG_BACKEND"

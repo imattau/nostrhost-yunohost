@@ -38,6 +38,7 @@ APPS_CATALOG_LOGOS = "/usr/share/yunohost/applogos"
 APPS_CATALOG_CONF = "/etc/yunohost/apps_catalog.yml"
 APPS_CATALOG_API_VERSION = 3
 NATIVE_CATALOG_STATE = "/var/lib/nostrhost/catalogue.json"
+NATIVE_CATALOG_MODE_ENV = "NOSTRHOST_CATALOG_BACKEND"
 APPS_CATALOG_DEFAULT_URL = "https://app.yunohost.org/default"
 DEFAULT_APPS_CATALOG_LIST: list[dict[Literal["id", "url"], str]] = [
     {"id": "default", "url": APPS_CATALOG_DEFAULT_URL}
@@ -307,7 +308,17 @@ def _load_apps_catalog() -> AppCatalog:
 
     merged_catalog: AppCatalog = {"apps": {}, "categories": [], "antifeatures": []}
 
-    for apps_catalog_id in [L["id"] for L in _read_apps_catalog_list()]:
+    from .nostr_catalog_provider import load_native_catalog
+
+    native_catalog = load_native_catalog(native_state)
+    backend_mode = os.environ.get(NATIVE_CATALOG_MODE_ENV, "nostr").strip().lower()
+    if backend_mode not in {"nostr", "merge", "legacy"}:
+        backend_mode = "nostr"
+    # Nostr is the default provider when its trusted projection is available;
+    # legacy remains a safe compatibility fallback until the first sync.
+    legacy_catalog_ids = [] if backend_mode == "nostr" and native_catalog else [L["id"] for L in _read_apps_catalog_list()]
+
+    for apps_catalog_id in legacy_catalog_ids:
         # Let's load the json from cache for this catalog
         cache_file = Path(APPS_CATALOG_CACHE) / (apps_catalog_id + ".json")
 
@@ -361,14 +372,13 @@ def _load_apps_catalog() -> AppCatalog:
         merged_catalog["categories"] += apps_catalog_content.get("categories", [])
         merged_catalog["antifeatures"] += apps_catalog_content.get("antifeatures", [])
 
-    # The native Nostr catalogue is an optional, read-only provider. Its Go
-    # synchronizer has already applied publisher trust and event validation;
-    # preserve configured YunoHost catalogues on duplicate app IDs.
-    from .nostr_catalog_provider import load_native_catalog
-
-    for app, info in load_native_catalog(native_state).items():
-        if app not in merged_catalog["apps"]:
-            merged_catalog["apps"][app] = info
+    # The Go synchronizer has already applied publisher trust and event
+    # validation. In native/merge mode it is authoritative on duplicate IDs;
+    # legacy mode is retained for compatibility and opt-out testing.
+    if backend_mode != "legacy":
+        for app, info in native_catalog.items():
+            if app not in merged_catalog["apps"] or backend_mode == "nostr":
+                merged_catalog["apps"][app] = info
 
     # Save as cache for next call
     _apps_catalog_cache = merged_catalog
