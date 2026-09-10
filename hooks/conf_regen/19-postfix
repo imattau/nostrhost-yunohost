@@ -28,6 +28,10 @@ source /usr/share/yunohost/helpers
 do_pre_regen() {
     pending_dir=$1
 
+    # Postfix is no longer part of the default platform (roadmap §18.2) —
+    # only regenerate its config if it's actually installed (e.g. as an app).
+    ynh_package_is_installed --package=postfix || return 0
+
     cd /usr/share/yunohost/conf/postfix
 
     postfix_dir="${pending_dir}/etc/postfix"
@@ -114,6 +118,8 @@ do_pre_regen() {
 
 do_post_regen() {
     regen_conf_files=$1
+
+    ynh_package_is_installed --package=postfix || return 0
 
     chown postfix /etc/postfix
 

@@ -27,9 +27,7 @@ Depends: python3-all (>= 3.11),
  , openssl, ca-certificates, netcat-openbsd, iproute2
  , slapd, ldap-utils, sudo-ldap, libnss-ldapd, unscd, libpam-ldapd
  , dnsmasq, resolvconf, libnss-myhostname
- , postfix, postfix-ldap, postfix-policyd-spf-perl, postfix-pcre, libsasl2-modules
- , dovecot-core, dovecot-ldap, dovecot-lmtpd, dovecot-managesieved, dovecot-antispam
- , opendkim-tools, opendkim, postsrsd, procmail, mailutils
+ , libsasl2-modules
  , acl
  , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
  , lsb-release, haveged, fake-hwclock, lsof, whois
@@ -52,8 +50,9 @@ Conflicts: iptables-persistent
  , nftables (>= 1.1)
 Description: manageable and configured self-hosting server
  YunoHost aims to make self-hosting accessible to everyone. It configures
- an email, Web and IM server alongside a LDAP base. It also provides
- facilities to manage users, domains, apps and so.
+ a Web server alongside a LDAP base (email is an optional app, not part of
+ the default install). It also provides facilities to manage users,
+ domains, apps and so.
  .
  This package contains YunoHost scripts and binaries to be used by the
  moulinette. It allows one to manage the server with a command-line tool

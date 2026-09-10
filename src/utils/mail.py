@@ -19,13 +19,26 @@
 #
 
 
-from .process import check_output
+import shutil
+
+
+def mail_stack_installed() -> bool:
+    """
+    Whether the (now optional, roadmap §18.2) local mail stack — Postfix,
+    Dovecot, OpenDKIM — is present on this system. Core no longer depends on
+    it: it's installed the same way any other app would be, so any code path
+    that assumes a local mail server (diagnosis, domain regen-conf) must
+    check this first instead of erroring out on missing binaries/services.
+    """
+    return all(shutil.which(b) for b in ("postfix", "dovecot", "opendkim"))
 
 
 def get_pending_mails_nb() -> int:
     """
     Return number of pending mails in queue
     """
+    from .process import check_output
+
     command = (
         'postqueue -p | grep -v "Mail queue is empty" | grep -c "^[A-Z0-9]" || true'
     )

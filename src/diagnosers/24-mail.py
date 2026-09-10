@@ -30,7 +30,7 @@ from ..domain import _get_maindomain, domain_list
 from ..settings import settings_get
 from ..utils.dns import dig
 from ..utils.file_utils import read_yaml
-from ..utils.mail import get_pending_mails_nb
+from ..utils.mail import get_pending_mails_nb, mail_stack_installed
 
 DEFAULT_DNS_BLOCKLIST = "/usr/share/yunohost/dnsbl_list.yml"
 
@@ -43,6 +43,13 @@ class MyDiagnoser(Diagnoser):
     dependencies: list[str] = ["ip"]
 
     def run(self):
+        # Mail is no longer part of the default platform (roadmap §18.2):
+        # this diagnosis category only makes sense once a mail stack has
+        # actually been installed (e.g. as an app), otherwise it's just
+        # false-positive noise about a service that was never meant to run.
+        if not mail_stack_installed():
+            return
+
         self.ehlo_domain = _get_maindomain().lower()
         self.mail_domains = domain_list()["domains"]
         self.ipversions, self.ips = self.get_ips_checked()

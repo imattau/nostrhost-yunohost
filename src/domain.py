@@ -49,6 +49,7 @@ from .utils.file_utils import (
     write_to_json,
     write_to_yaml,
 )
+from .utils.mail import mail_stack_installed
 
 if TYPE_CHECKING:
     from pydantic.typing import AbstractSetIntStr, MappingIntStrAny, cast
@@ -73,6 +74,21 @@ domain_list_cache_timestamp = 0.0
 main_domain_cache: Optional[str] = None
 main_domain_cache_timestamp = 0.0
 DOMAIN_CACHE_DURATION = 15
+
+# regen-conf categories that only apply once a mail stack is actually
+# installed (roadmap §18.2: no longer a core assumption, installed the same
+# way any other app would be).
+MAIL_REGEN_CONF_CATEGORIES = {"postfix", "dovecot", "opendkim"}
+
+
+def _domain_regen_conf_categories(*categories: str) -> list[str]:
+    """Build a regen_conf(names=...) list, dropping the mail categories when
+    no mail stack is installed so domain add/remove/config doesn't fail
+    trying to regenerate config for services that were never installed."""
+    names = list(categories)
+    if not mail_stack_installed():
+        names = [c for c in names if c not in MAIL_REGEN_CONF_CATEGORIES]
+    return names
 
 
 def _get_maindomain() -> str:
@@ -376,14 +392,14 @@ def domain_add(
             # should identify the root of this bug...
             _force_clear_hashes([f"/etc/nginx/conf.d/{domain}.conf"])
             regen_conf(
-                names=[
+                names=_domain_regen_conf_categories(
                     "nginx",
                     "dnsmasq",
                     "postfix",
                     "mdns",
                     "dovecot",
                     "opendkim",
-                ]
+                )
             )
             app_ssowatconf()
 
@@ -571,7 +587,11 @@ def domain_remove(
             f"/etc/nginx/conf.d/{domain}.conf", new_conf=None, save=True
         )
 
-    regen_conf(names=["nginx", "dnsmasq", "postfix", "mdns", "opendkim"])
+    regen_conf(
+        names=_domain_regen_conf_categories(
+            "nginx", "dnsmasq", "postfix", "mdns", "opendkim"
+        )
+    )
     app_ssowatconf()
 
     hook_callback("post_domain_remove", args=[domain])
@@ -956,7 +976,9 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
             stuff_to_regen_conf = set()
             if "mail_in" in next_settings or "mail_out" in next_settings:
                 stuff_to_regen_conf.update(
-                    {"nginx", "postfix", "dovecot", "opendkim", "dnsmasq"}
+                    _domain_regen_conf_categories(
+                        "nginx", "postfix", "dovecot", "opendkim", "dnsmasq"
+                    )
                 )
 
             if stuff_to_regen_conf:
