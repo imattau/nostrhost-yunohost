@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -140,6 +140,24 @@ def test_postgres_provider_uses_parameterized_existence_query():
     result = PostgresProvider(connection_factory=lambda: connection).inspect({"name": "example_db"})
     assert result == {"name": "example_db", "exists": False}
     assert connection.cursor_obj.call[1] == ("example_db",)
+
+
+def test_database_provider_dispatches_mysql_without_postgres_fallback():
+    class Cursor:
+        def execute(self, query, args=None): self.call = (query, args)
+        def fetchone(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    class Connection:
+        def __init__(self): self.cursor_obj = Cursor()
+        def cursor(self): return self.cursor_obj
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    connection = Connection()
+    provider = DatabaseProvider(mysql_connection_factory=lambda: connection)
+    result = provider.apply(provider.plan({"type": "mysql", "name": "example_db"})[0])
+    assert result == {"name": "example_db", "changed": True}
+    assert connection.cursor_obj.call == ("CREATE DATABASE `example_db`", None)
 
 
 def test_caddy_provider_validates_and_loads_json():

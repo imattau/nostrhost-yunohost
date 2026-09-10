@@ -636,6 +636,68 @@ class PostgresProvider:
         return [Operation("database.remove", name, {"name": name}, risk="high", reverse="database.ensure", summary=f"remove PostgreSQL database {name}")]
 
 
+class MySQLProvider(PostgresProvider):
+    """Native MySQL/MariaDB database provider using a DB-API driver."""
+
+    def _connection(self) -> Any:
+        if self.connection_factory:
+            return self.connection_factory()
+        try:
+            import pymysql
+        except ImportError as exc:  # pragma: no cover - optional Debian runtime dependency
+            raise ProviderError("PyMySQL is required for native MySQL resources") from exc
+        return pymysql.connect(database="mysql", autocommit=True)
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = self._name(desired.get("name") or "nostrhost")
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s", (name,))
+            return {"name": name, "exists": cursor.fetchone() is not None}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        name = self._name(desired.get("name") or "nostrhost")
+        return [Operation("database.ensure", name, {"type": "mysql", "name": name, "backup": desired.get("backup", True)}, risk="high", reverse="database.remove", summary=f"ensure MySQL database {name}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        name = self._name(operation.args["name"])
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(f"CREATE DATABASE `{name}`")
+        return {"name": name, "changed": True}
+
+
+class DatabaseProvider:
+    """Dispatch database resources to their explicitly selected DB-API driver."""
+
+    resource_type = "database"
+
+    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None) -> None:
+        self.providers = {
+            "postgresql": PostgresProvider(connection_factory=postgres_connection_factory),
+            "mysql": MySQLProvider(connection_factory=mysql_connection_factory),
+        }
+
+    def _provider(self, desired: dict[str, Any]) -> PostgresProvider | MySQLProvider:
+        try:
+            return self.providers[desired["type"]]
+        except KeyError as exc:
+            raise ProviderError(f"unsupported database type: {desired.get('type')}") from exc
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        return self._provider(desired).inspect(desired, actual)
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return self._provider(desired).plan(desired, actual)
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        return self._provider(operation.args).apply(operation)
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return self._provider(desired).remove(desired)
+
+
 class CaddyProvider:
     resource_type = "web.route"
 
@@ -691,7 +753,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -701,7 +763,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "runtime": RuntimeProvider(command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
-        "database": PostgresProvider(connection_factory=postgres_connection_factory),
+        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
         "port": PortProvider(),
