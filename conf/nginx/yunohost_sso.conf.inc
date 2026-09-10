@@ -24,5 +24,9 @@ location /yunohost/sso/ {
         more_set_headers "Cache-Control: no-store, no-cache, must-revalidate";
     }
 
-    more_set_headers "Content-Security-Policy: upgrade-insecure-requests; default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; img-src 'self' data:;";
+    # NIP-46 remote-signer login lets the user paste a bunker:// URI whose
+    # relay may be any ws/wss endpoint (the portal connects to it from the
+    # browser to perform the NIP-46 handshake), so connect-src must allow
+    # websocket destinations in addition to same-origin API calls.
+    more_set_headers "Content-Security-Policy: upgrade-insecure-requests; default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; img-src 'self' data:;";
 }
