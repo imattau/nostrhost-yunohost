@@ -91,6 +91,22 @@ else:
     logger = getLogger("yunohost.app")
 
 
+def _reject_native_catalog_lifecycle(app: str, action: str) -> None:
+    """Keep native catalogue entries out of the legacy script lifecycle."""
+    if not isinstance(app, str) or not app or os.path.sep in app or app.startswith((".", "~")):
+        return
+    try:
+        info = _load_apps_catalog().get("apps", {}).get(app, {})
+    except Exception:  # catalogue availability must not break legacy paths
+        return
+    if info.get("source") == "nostr" or info.get("install_mode") == "native":
+        raise YunohostValidationError(
+            f"{action} for native package {app!r} must use the signed resource-engine "
+            "package.plan/package.reconcile operation",
+            raw_msg=True,
+        )
+
+
 PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
 APP_FILES_TO_COPY = [
     "manifest.json",
@@ -585,6 +601,7 @@ def app_change_url(
         path -- New path at which the application will be move
 
     """
+    _reject_native_catalog_lifecycle(app, "change_url")
     from .hook import hook_callback, hook_exec_with_script_debug_if_failure
     from .service import service_reload_or_restart
     from .utils.form import DomainOption, WebPathOption
@@ -768,6 +785,9 @@ def app_upgrade(
         # Abort if any of those app is in fact not installed..
         for app_ in requested_targets:
             _assert_is_installed(app_)
+
+    for app_ in requested_targets:
+        _reject_native_catalog_lifecycle(app_, "upgrade")
 
     # Check if disk space available
     if free_space_in_directory("/") <= 512 * 1000 * 1000:
@@ -1336,6 +1356,7 @@ def app_install(
         no_remove_on_failure -- Debug option to avoid removing the app on a failed installation
         force -- Do not ask for confirmation when installing experimental / low-quality apps
     """
+    _reject_native_catalog_lifecycle(app, "install")
 
     from .hook import (
         hook_add,
@@ -1701,6 +1722,7 @@ def app_remove(
         purge -- Remove with all app data
         force_workdir -- Special var to force the working directoy to use, in context such as remove-after-failed-upgrade or remove-after-failed-restore
     """
+    _reject_native_catalog_lifecycle(app, "remove")
     from .domain import _get_raw_domain_settings, domain_config_set, domain_list
     from .hook import hook_callback, hook_exec, hook_remove
     from .permission import (
