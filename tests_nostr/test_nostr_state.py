@@ -118,6 +118,19 @@ def test_state_repo_restic_linkage(tmp_path: Path):
     assert manifest["backup"]["required"] is True
 
 
+def test_state_repo_bundle_round_trip(tmp_path: Path):
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    revision = repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+    bundle = repo.create_bundle(tmp_path / "replica" / "state.bundle")
+
+    assert bundle.stat().st_mode & 0o777 == 0o600
+    assert revision in StateRepo.verify_bundle(bundle)
+    restored = StateRepo.restore_bundle(bundle, tmp_path / "restored")
+    restored_repo = StateRepo(restored, "a" * 64)
+    assert restored_repo.revision() == revision
+    assert restored_repo.known_good_revision() == revision
+
+
 def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     """The engine's automatic snapshot hook: a full chain produces a pre and
     a post commit, the post one linked to the request and known-good."""

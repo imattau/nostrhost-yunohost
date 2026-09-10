@@ -51,6 +51,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -354,6 +355,49 @@ class StateRepo:
         self._git(["config", "user.name", "nostrhost-state"])
         self._git(["config", "user.email", f"{self.server_pubkey}@nostrhost"])
 
+    def create_bundle(self, output: str | Path) -> Path:
+        """Export every repository ref as a portable, private Git bundle."""
+        self.ensure()
+        destination = Path(output)
+        if destination.exists():
+            raise StateError(f"bundle already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "-C", str(self.path), "bundle", "create", str(destination), "--all"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise StateError(f"git bundle create failed: {result.stderr.strip()}")
+        destination.chmod(0o600)
+        return destination
+
+    @staticmethod
+    def verify_bundle(bundle: str | Path) -> str:
+        """Verify a portable bundle and return Git's verification output."""
+        bundle_path = Path(bundle).resolve()
+        with tempfile.TemporaryDirectory(prefix="nostrhost-bundle-verify-") as directory:
+            subprocess.run(["git", "-C", directory, "init", "-q"], check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                ["git", "-C", directory, "bundle", "verify", str(bundle_path)],
+                capture_output=True,
+                text=True,
+            )
+        if result.returncode != 0:
+            raise StateError(f"git bundle verify failed: {result.stderr.strip() or result.stdout.strip()}")
+        return result.stdout
+
+    @staticmethod
+    def restore_bundle(bundle: str | Path, destination: str | Path) -> Path:
+        """Clone a verified bundle into a new recovery repository."""
+        target = Path(destination)
+        if target.exists():
+            raise StateError(f"recovery destination already exists: {target}")
+        result = subprocess.run(["git", "clone", "--no-hardlinks", str(bundle), str(target)], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise StateError(f"git bundle restore failed: {result.stderr.strip()}")
+        return target
+
     def _render(self, tree: dict[str, dict[str, dict[str, Any]]]) -> None:
         # Remove stale files so a snapshot is an exact render of the tree.
         for stale in self.path.glob("*.toml"):
@@ -575,13 +619,30 @@ def build_repository_announcement(
 def announce_state_repository(
     control_relay: str | None = None,
     transport: Callable[[str, dict[str, Any]], None] | None = None,
+    relays: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Publish the server's state-repository announcement to the control relay
-    (signed by the server key; NIP-42-authenticated by the operator)."""
+    """Publish the announcement to the local and configured external relays.
+
+    The control relay is always first and remains mandatory. External relay
+    failures are reported after all targets have been attempted.
+    """
     _require_bootstrapped()
     cfg = _operator_config()
     event = build_repository_announcement(cfg.server_sk, cfg.server_pubkey)
-    (transport or publish_to_relay)(cfg.control_relay, event)
+    targets = [control_relay or cfg.control_relay]
+    for relay in relays or []:
+        if relay and relay not in targets:
+            targets.append(relay)
+    publisher = transport or publish_to_relay
+    failures: list[tuple[str, Exception]] = []
+    for relay in targets:
+        try:
+            publisher(relay, event)
+        except Exception as exc:  # noqa: BLE001 - report fan-out failures after all attempts
+            failures.append((relay, exc))
+    if failures:
+        failed = ", ".join(f"{relay}: {exc}" for relay, exc in failures)
+        raise StateError(f"repository announcement failed on {len(failures)} relay(s): {failed}")
     return event
 
 

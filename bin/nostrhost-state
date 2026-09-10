@@ -11,6 +11,8 @@ configuration, linked to the Nostr operation events that changed it:
   nostrhost-state diff <from> [<to>]         semantic diff between revisions
   nostrhost-state status                     revision + known-good + dirty?
   nostrhost-state announce                   publish the NIP-34 repo event
+  nostrhost-state replicate [--output PATH]  export a portable recovery bundle
+  nostrhost-state restore BUNDLE DESTINATION verify and restore a bundle
   nostrhost-state rollback plan [--from K] [--to C] [--json] [--restic ID]
   nostrhost-state rollback apply <plan.json> [--approve]
 
@@ -30,10 +32,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from yunohost.nostr_identity import IdentityError
-from yunohost.nostr_state import StateError, announce_state_repository, default_repo, export_state, state_dir_from_env
+from yunohost.nostr_state import StateError, StateRepo, announce_state_repository, default_repo, export_state, state_dir_from_env
 from yunohost.nostr_state import YunohostBackend
 
 EXIT_OK = 0
@@ -106,14 +109,41 @@ def cmd_status(_args) -> int:
     return EXIT_OK
 
 
-def cmd_announce(_args) -> int:
+def cmd_announce(args) -> int:
     try:
-        event = announce_state_repository()
+        relays = args.relay or [value.strip() for value in os.environ.get("NOSTRHOST_STATE_RELAYS", "").split(",") if value.strip()]
+        event = announce_state_repository(relays=relays)
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR
-    print(f"published NIP-34 repository announcement {event['id'][:16]}… kind {event['kind']}")
+    print(f"published NIP-34 repository announcement {event['id'][:16]}… kind {event['kind']} to local and configured relays")
     print(f"  repo: nostr://{event['pubkey']}/nostrhost-state")
+    return EXIT_OK
+
+
+def cmd_replicate(args) -> int:
+    output = args.output or os.environ.get("NOSTRHOST_STATE_BUNDLE", "/var/lib/nostrhost/state-replica.bundle")
+    try:
+        bundle = default_repo().create_bundle(output)
+        verification = StateRepo.verify_bundle(bundle)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(f"created verified state bundle: {bundle}")
+    for line in verification.splitlines():
+        if line.startswith("The bundle contains") or line.startswith("The bundle requires"):
+            print(line)
+    return EXIT_OK
+
+
+def cmd_restore(args) -> int:
+    try:
+        StateRepo.verify_bundle(args.bundle)
+        target = StateRepo.restore_bundle(args.bundle, args.destination)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    print(f"restored verified state bundle to: {target}")
     return EXIT_OK
 
 
@@ -205,7 +235,13 @@ def main(argv: list[str] | None = None) -> int:
     dff.add_argument("frm", help="from revision (hex) or 'HEAD~1'")
     dff.add_argument("to", nargs="?", default=None, help="to revision (default HEAD)")
     sub.add_parser("status", help="revision + known-good + dirty state")
-    sub.add_parser("announce", help="publish the NIP-34 repository announcement")
+    announce = sub.add_parser("announce", help="publish the NIP-34 repository announcement")
+    announce.add_argument("--relay", action="append", default=[], help="additional external relay (repeatable; or use NOSTRHOST_STATE_RELAYS)")
+    replicate = sub.add_parser("replicate", help="export a portable verified state bundle")
+    replicate.add_argument("--output", help="bundle path (or NOSTRHOST_STATE_BUNDLE)")
+    restore = sub.add_parser("restore", help="verify and restore a state bundle")
+    restore.add_argument("bundle")
+    restore.add_argument("destination")
 
     rb = sub.add_parser("rollback", help="assisted rollback (Stage B)")
     rbsub = rb.add_subparsers(dest="rollback_command", required=True)
@@ -228,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             _require_bootstrapped()
         if args.command == "rollback":
             return {"plan": cmd_rollback_plan, "apply": cmd_rollback_apply}[args.rollback_command](args)
-        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce}[args.command](args)
+        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce, "replicate": cmd_replicate, "restore": cmd_restore}[args.command](args)
     except (StateError, IdentityError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR
