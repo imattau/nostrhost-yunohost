@@ -4,13 +4,17 @@ i18n = "domain_config"
 [feature]
 
     [feature.mail]
+        # Mail is no longer part of the default platform (roadmap §18.2): a
+        # domain shouldn't advertise MX/SPF/DKIM/DMARC DNS records for a
+        # mail server that was never installed. Off by default; a mail app
+        # install (or a user who wants local mail) turns these on explicitly.
         [feature.mail.mail_out]
         type = "boolean"
-        default = 1
+        default = 0
 
         [feature.mail.mail_in]
         type = "boolean"
-        default = 1
+        default = 0
 
     [feature.app]
         [feature.app.default_app]

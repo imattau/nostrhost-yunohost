@@ -687,16 +687,25 @@ def _load_diagnoser(diagnoser_name):
 def _email_diagnosis_issues():
     from .domain import _get_maindomain
 
+    issues = diagnosis_show(issues=True)["reports"]
+    if not issues:
+        return
+
+    from .nostr_notify import SEVERITY_WARNING, publish_notice
+
+    issue_count = sum(len(report.get("items", [])) for report in issues)
+    publish_notice(
+        "diagnosis",
+        SEVERITY_WARNING,
+        f"Automatic diagnosis found {issue_count} issue(s); see the 'Diagnosis' section in the webadmin.",
+    )
+
     maindomain = _get_maindomain()
     from_ = f"diagnosis@{maindomain} (Automatic diagnosis on {maindomain})"
     to_ = "root"
     subject_ = f"Issues found by automatic diagnosis on {maindomain}"
 
     disclaimer = "The automatic diagnosis on your YunoHost server identified some issues on your server. You will find a description of the issues below. You can manage those issues in the 'Diagnosis' section in your webadmin."
-
-    issues = diagnosis_show(issues=True)["reports"]
-    if not issues:
-        return
 
     content = _dump_human_readable_reports(issues)
 

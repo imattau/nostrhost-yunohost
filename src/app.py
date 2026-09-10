@@ -2666,6 +2666,14 @@ def app_dismiss_notification(app: str, name: Literal["post_install", "post_upgra
 def regen_mail_app_user_config_for_dovecot_and_postfix(
     only: Literal["dovecot", "postfix"] | None = None,
 ) -> None:
+    # Dovecot/postfix are no longer part of the default platform (roadmap
+    # §18.2): an app requesting the "mail" resource only works once a mail
+    # stack has actually been installed (e.g. as its own app).
+    from .utils.mail import mail_stack_installed
+
+    if not mail_stack_installed():
+        return
+
     dovecot = True if only in [None, "dovecot"] else False
     postfix = True if only in [None, "postfix"] else False
 

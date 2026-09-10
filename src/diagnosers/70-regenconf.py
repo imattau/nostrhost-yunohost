@@ -25,6 +25,14 @@ from ..diagnosis import Diagnoser
 from ..regenconf import _calculate_hash, _get_regenconf_infos
 from ..settings import settings_get
 from ..utils.file_utils import read_file
+from ..utils.mail import mail_stack_installed
+
+# regen-conf categories that only apply once a mail stack is actually
+# installed (roadmap §18.2: no longer a core assumption). Once
+# postfix/dovecot/opendkim are removed, their tracked conffiles are gone
+# too, so comparing against the last known hash would otherwise report
+# every one of them as "manually modified".
+MAIL_REGEN_CONF_CATEGORIES = {"postfix", "dovecot", "opendkim"}
 
 
 class MyDiagnoser(Diagnoser):
@@ -81,7 +89,10 @@ class MyDiagnoser(Diagnoser):
             )
 
     def manually_modified_files(self):
+        mail_installed = mail_stack_installed()
         for category, infos in _get_regenconf_infos().items():
+            if category in MAIL_REGEN_CONF_CATEGORIES and not mail_installed:
+                continue
             for path, hash_ in infos["conffiles"].items():
                 if hash_ != _calculate_hash(path):
                     yield {"path": path, "category": category}
