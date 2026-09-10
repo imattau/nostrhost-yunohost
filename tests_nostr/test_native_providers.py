@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -271,6 +271,17 @@ def test_timer_provider_disables_and_removes_units(tmp_path: Path):
     assert not (tmp_path / "example.timer").exists()
     assert not (tmp_path / "example.service").exists()
     assert calls[-1] == (["systemctl", "disable", "--now", "example.timer"], {"check": True})
+
+
+def test_json_state_provider_unregisters_state_atomically(tmp_path: Path):
+    provider = JsonStateProvider(state_dir=tmp_path, resource_type="backup")
+    ensure = provider.plan({"name": "example", "paths": ["/var/lib/example"]})[0]
+    provider.apply(ensure)
+    target = tmp_path / "example.json"
+    assert target.is_file() and '"paths"' in target.read_text()
+    remove = provider.remove({"name": "example"})[0]
+    assert provider.apply(remove)["changed"]
+    assert not target.exists()
 
 
 def test_port_provider_checks_bind_availability():

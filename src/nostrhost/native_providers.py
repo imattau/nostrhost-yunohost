@@ -8,6 +8,7 @@ bounded implementation with ``/`` as its root.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import grp
 import pwd
@@ -567,16 +568,36 @@ class JsonStateProvider:
         self.state_dir = state_dir
         self.resource_type = resource_type
 
+    def _target(self, operation: Operation) -> Path:
+        name = _safe_name(operation.resource.replace(":", "-"))
+        return self.state_dir / f"{name}.json"
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        resource = desired.get("resource", self.resource_type)
+        name = _safe_name(str(desired.get("name", resource)).replace(":", "-"))
+        target = self.state_dir / f"{name}.json"
+        return {"state": str(target), "exists": target.is_file()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation(f"{self.resource_type}.register", desired["name"], desired, reverse=f"{self.resource_type}.unregister", summary=f"register {self.resource_type} state")]
+
     def apply(self, operation: Operation) -> dict[str, Any]:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        name = _safe_name(operation.resource.replace(":", "-"))
-        target = self.state_dir / f"{name}.json"
+        target = self._target(operation)
+        if operation.name.endswith(".unregister") or operation.name.endswith(".remove"):
+            target.unlink(missing_ok=True)
+            return {"state": str(target), "changed": True}
         temporary = target.with_suffix(".tmp")
-        import json
         temporary.write_text(json.dumps(operation.args, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o640)
         temporary.replace(target)
         return {"state": str(target), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation(f"{self.resource_type}.unregister", desired["name"], desired, reverse=f"{self.resource_type}.register", summary=f"unregister {self.resource_type} state")]
 
 
 class AptProvider:
