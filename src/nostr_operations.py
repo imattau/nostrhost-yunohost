@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -44,6 +45,9 @@ KIND_OPERATION_REJECTION = 2202
 KIND_EXECUTION_STARTED = 2203
 KIND_EXECUTION_RESULT = 2204
 KIND_CAPABILITY = 31100
+KIND_DELEGATION = 27236
+KIND_DELEGATION_REVOCATION = 27237
+DELEGATION_MAX_LIFETIME = 30 * 24 * 3600
 
 CHAIN_KINDS = (
     KIND_OPERATION_REQUEST,
@@ -62,6 +66,7 @@ SCOPE_APPS_WRITE = "apps.write"
 SCOPE_SERVICES_READ = "services.read"
 SCOPE_SERVICES_WRITE = "services.write"
 SCOPE_STATE_WRITE = "state.write"
+KNOWN_SCOPES = frozenset({SCOPE_SERVER_READ, SCOPE_APPS_READ, SCOPE_APPS_WRITE, SCOPE_SERVICES_READ, SCOPE_SERVICES_WRITE, SCOPE_STATE_WRITE})
 
 
 class OperationError(ValueError):
@@ -280,6 +285,10 @@ def _e_tag(request_id: str) -> list[list[str]]:
     return [["e", request_id]]
 
 
+def _is_hex64(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
 def _json_default(obj: Any) -> Any:
     """JSON-serialise non-primitive values found in tool results (service
     status carries datetimes, sets, …) so the signed 2204 content builds."""
@@ -346,6 +355,28 @@ def build_capability(
     """Build (without publishing) a kind-31100 capability grant for a subject."""
     content = json.dumps({"type": type_, "scopes": scopes}, default=_json_default)
     return _sign_event(admin_sk, admin_pubkey, KIND_CAPABILITY, content, [["d", subject_pubkey]])
+
+
+def build_delegation(
+    delegator_sk: str, delegator_pubkey: str, delegate_pubkey: str,
+    server_pubkey: str, scopes: list[str], expires_at: int,
+) -> dict[str, Any]:
+    """Build a server-scoped, expiring kind-27236 delegation event."""
+    now = int(time.time())
+    if not scopes or any(scope not in KNOWN_SCOPES for scope in scopes):
+        raise OperationError("delegation scopes must be known and non-empty")
+    if expires_at <= now or expires_at - now > DELEGATION_MAX_LIFETIME:
+        raise OperationError("delegation expiry must be in the future and within 30 days")
+    tags = [["p", delegate_pubkey], ["server", server_pubkey], ["expiry", str(expires_at)]]
+    tags.extend([["scope", scope] for scope in scopes])
+    return _sign_event(delegator_sk, delegator_pubkey, KIND_DELEGATION, "", tags)
+
+
+def build_delegation_revocation(delegator_sk: str, delegator_pubkey: str, delegation_id: str) -> dict[str, Any]:
+    """Build a kind-27237 revocation for a delegation event."""
+    if not _is_hex64(delegation_id):
+        raise OperationError("delegation id must be 64-hex")
+    return _sign_event(delegator_sk, delegator_pubkey, KIND_DELEGATION_REVOCATION, "", [["e", delegation_id]])
 
 
 def _admin_keys(admin_sk: str | None, control_relay: str | None) -> tuple[str, str]:
@@ -416,6 +447,37 @@ def grant_capability(
     """Publish a kind-31100 capability grant for `subject_pubkey` as an admin."""
     sk, pubkey = _admin_keys(admin_sk, control_relay)
     event = build_capability(sk, pubkey, subject_pubkey, type_, scopes)
+    (transport or publish_to_relay)(_control_relay(control_relay), event)
+    return event
+
+
+def delegate_capability(
+    delegate_pubkey: str,
+    scopes: list[str],
+    expires_at: int,
+    *,
+    delegator_sk: str | None = None,
+    server_pubkey: str | None = None,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish a signed, server-scoped delegation from the selected key."""
+    cfg = _operator_config(delegator_sk, control_relay)
+    event = build_delegation(cfg.operator_sk, cfg.operator_pubkey, delegate_pubkey, server_pubkey or cfg.server_pubkey, scopes, expires_at)
+    (transport or publish_to_relay)(_control_relay(control_relay), event)
+    return event
+
+
+def revoke_delegation(
+    delegation_id: str,
+    *,
+    delegator_sk: str | None = None,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish a signed revocation for a delegation event."""
+    cfg = _operator_config(delegator_sk, control_relay)
+    event = build_delegation_revocation(cfg.operator_sk, cfg.operator_pubkey, delegation_id)
     (transport or publish_to_relay)(_control_relay(control_relay), event)
     return event
 

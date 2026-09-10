@@ -8,6 +8,8 @@ Drives the operation vertical slice from the shell:
   nostr-opctl approve <request-id> [--admin-sk HEX]
   nostr-opctl reject  <request-id> [--admin-sk HEX]
   nostr-opctl grant   --pubkey HEX --scopes server.read,apps.read
+  nostr-opctl delegate --pubkey HEX --scopes apps.read --expires-at UNIX [--delegator-sk HEX]
+  nostr-opctl revoke-delegation DELEGATION_EVENT_ID [--delegator-sk HEX]
   nostr-opctl status
 
 `request` signs with --agent-sk (or NOSTRHOST_AGENT_SK, else the operator
@@ -28,9 +30,11 @@ from yunohost.nostr_operations import (
     OperationError,
     _control_relay,
     approve_operation,
+    delegate_capability,
     grant_capability,
     known_tools,
     reject_operation,
+    revoke_delegation,
     request_operation,
 )
 
@@ -86,6 +90,19 @@ def cmd_grant(args) -> int:
     scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
     event = grant_capability(args.pubkey, scopes, admin_sk=args.admin_sk)
     print(f"published capability grant {event['id'][:16]}… kind {event['kind']} for {args.pubkey[:16]}… scopes={scopes}")
+    return EXIT_OK
+
+
+def cmd_delegate(args) -> int:
+    scopes = [s.strip() for s in args.scopes.split(",") if s.strip()]
+    event = delegate_capability(args.pubkey, scopes, args.expires_at, delegator_sk=args.delegator_sk)
+    print(f"published delegation {event['id']} kind {event['kind']} for {args.pubkey[:16]}… scopes={scopes}")
+    return EXIT_OK
+
+
+def cmd_revoke_delegation(args) -> int:
+    event = revoke_delegation(args.delegation_id, delegator_sk=args.delegator_sk)
+    print(f"published delegation revocation {event['id'][:16]}… kind {event['kind']} for {args.delegation_id[:16]}…")
     return EXIT_OK
 
 
@@ -177,6 +194,16 @@ def main(argv: list[str] | None = None) -> int:
     grant.add_argument("--scopes", required=True, help="comma-separated scopes, e.g. server.read,apps.read")
     grant.add_argument("--admin-sk", default=None)
 
+    delegate = sub.add_parser("delegate", help="publish a signed expiring delegation")
+    delegate.add_argument("--pubkey", required=True, help="delegate pubkey (64-hex)")
+    delegate.add_argument("--scopes", required=True, help="comma-separated scopes")
+    delegate.add_argument("--expires-at", type=int, required=True, help="expiry as Unix timestamp")
+    delegate.add_argument("--delegator-sk", default=None, help="delegator secret key (hex)")
+
+    revoke_del = sub.add_parser("revoke-delegation", help="revoke a delegation event")
+    revoke_del.add_argument("delegation_id")
+    revoke_del.add_argument("--delegator-sk", default=None, help="delegator secret key (hex)")
+
     sub.add_parser("status", help="print the current chain from the relay")
 
     args = parser.parse_args(argv)
@@ -186,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             from yunohost.nostr_identity import _require_bootstrapped
 
             _require_bootstrapped()
-        return {"request": cmd_request, "approve": cmd_approve, "reject": cmd_reject, "grant": cmd_grant, "status": cmd_status}[
+        return {"request": cmd_request, "approve": cmd_approve, "reject": cmd_reject, "grant": cmd_grant, "delegate": cmd_delegate, "revoke-delegation": cmd_revoke_delegation, "status": cmd_status}[
             args.command
         ](args)
     except (OperationError, IdentityError) as exc:

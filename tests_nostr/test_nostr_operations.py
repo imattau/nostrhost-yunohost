@@ -20,6 +20,8 @@ from yunohost.nostr_operations import (
     approve_operation,
     build_approval,
     build_capability,
+    build_delegation,
+    build_delegation_revocation,
     build_execution_result,
     build_execution_started,
     build_operation_request,
@@ -99,6 +101,20 @@ def test_capability_event_shape():
     assert ev["kind"] == KIND_CAPABILITY
     assert ["d", agent] in ev["tags"]
     assert json.loads(ev["content"]) == {"type": "agent", "scopes": ["server.read", "apps.read"]}
+
+
+def test_delegation_event_shape_and_revocation():
+    import time
+
+    sk, pk = new_key()
+    delegate = "b" * 64
+    ev = build_delegation(sk, pk, delegate, "c" * 64, ["apps.read"], int(time.time()) + 3600)
+    assert ev["kind"] == 27236
+    assert ["p", delegate] in ev["tags"]
+    assert ["server", "c" * 64] in ev["tags"]
+    assert ["scope", "apps.read"] in ev["tags"]
+    rev = build_delegation_revocation(sk, pk, ev["id"])
+    assert rev["kind"] == 27237 and ["e", ev["id"]] in rev["tags"]
 
 
 def test_request_operation_publishes_via_transport():

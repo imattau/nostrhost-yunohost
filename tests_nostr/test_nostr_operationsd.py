@@ -20,6 +20,8 @@ from coincurve import PublicKeyXOnly
 from yunohost.nostr_operations import (
     build_approval,
     build_capability,
+    build_delegation,
+    build_delegation_revocation,
     build_execution_result,
     build_execution_started,
     build_operation_request,
@@ -410,6 +412,29 @@ def test_rollback_apply_full_chain_granted_and_approved():
     assert body["ok"] is True
     steps = body["result"]["steps"]
     assert steps[0]["status"] == "executed"
+
+
+def test_delegation_authorizes_subset_and_revocation_removes_access():
+    import time
+
+    h = Harness()
+    h.grant(["apps.read"])
+    delegate_sk, delegate_pk = new_key()
+    delegation = build_delegation(
+        h.agent_sk, h.agent_pk, delegate_pk, h.server_pk, ["apps.read"], int(time.time()) + 3600
+    )
+    assert h.engine.handle_event(delegation)
+
+    request = build_operation_request(delegate_sk, delegate_pk, "app.list", {})
+    assert h.engine.handle_event(request)
+    assert h.engine.state(request["id"]) == OpState.REQUESTED
+    assert h.approve(request["id"])
+    assert h.engine.state(request["id"]) == OpState.SUCCEEDED
+
+    assert h.engine.handle_event(build_delegation_revocation(h.agent_sk, h.agent_pk, delegation["id"]))
+    denied = build_operation_request(delegate_sk, delegate_pk, "app.list", {"after_revoke": True})
+    assert h.engine.handle_event(denied)
+    assert h.engine.state(denied["id"]) == OpState.REJECTED
 
 
 def test_rollback_apply_denied_without_state_scope():

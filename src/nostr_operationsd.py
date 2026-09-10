@@ -26,9 +26,11 @@ Phase 3 posture: read-only tools only, admin-gated, loopback relay.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -43,6 +45,10 @@ from .nostr_identity import (
 )
 from .nostr_operations import (
     KIND_CAPABILITY,
+    KIND_DELEGATION,
+    KIND_DELEGATION_REVOCATION,
+    KNOWN_SCOPES,
+    DELEGATION_MAX_LIFETIME,
     KIND_OPERATION_APPROVAL,
     KIND_OPERATION_REJECTION,
     KIND_OPERATION_REQUEST,
@@ -114,6 +120,8 @@ class OperationEngine:
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
+        self.delegations: dict[str, dict[str, Any]] = {}
+        self.revoked_delegations: set[str] = set()
 
     # -- event intake ------------------------------------------------------ #
 
@@ -130,6 +138,10 @@ class OperationEngine:
             return self.handle_execution(event)
         if kind == KIND_CAPABILITY:
             return self.handle_capability(event)
+        if kind == KIND_DELEGATION:
+            return self.handle_delegation(event)
+        if kind == KIND_DELEGATION_REVOCATION:
+            return self.handle_delegation_revocation(event)
         return False
 
     # -- chain handlers ---------------------------------------------------- #
@@ -249,12 +261,60 @@ class OperationEngine:
         logger.info("capability for %s: %s", subject[:16], sorted(self.scopes[subject]))
         return True
 
+    def handle_delegation(self, event: dict[str, Any]) -> bool:
+        try:
+            _verify_delegation_event(event)
+            delegate = next(t[1] for t in event.get("tags", []) if len(t) >= 2 and t[0] == "p")
+            server = next(t[1] for t in event.get("tags", []) if len(t) >= 2 and t[0] == "server")
+            expiry = int(next(t[1] for t in event.get("tags", []) if len(t) >= 2 and t[0] == "expiry"))
+            scopes = {t[1] for t in event.get("tags", []) if len(t) >= 2 and t[0] == "scope"}
+            created_at = int(event["created_at"])
+        except (KeyError, StopIteration, TypeError, ValueError, IndexError):
+            return False
+        if server != self._server_pubkey or not _is_hex64(delegate) or not scopes or not scopes.issubset(KNOWN_SCOPES):
+            return False
+        now = int(time.time())
+        if expiry <= now or expiry - created_at > DELEGATION_MAX_LIFETIME or event["id"] in self.revoked_delegations:
+            return False
+        if not all(self._direct_authorized(event["pubkey"], scope) for scope in scopes):
+            return False
+        self.delegations[event["id"]] = {
+            "delegator": event["pubkey"], "delegate": delegate, "scopes": scopes, "expiry": expiry
+        }
+        return True
+
+    def handle_delegation_revocation(self, event: dict[str, Any]) -> bool:
+        delegation_id = _e_tag(event)
+        if not delegation_id:
+            return False
+        record = self.delegations.get(delegation_id)
+        if record is not None and event.get("pubkey") not in (record["delegator"], *self._admins):
+            return False
+        if record is None and event.get("pubkey") not in self._admins:
+            return False
+        try:
+            _verify_delegation_event(event, revocation=True)
+        except (KeyError, TypeError, ValueError, IndexError):
+            return False
+        self.revoked_delegations.add(delegation_id)
+        self.delegations.pop(delegation_id, None)
+        return True
+
     # -- authorisation + execution ---------------------------------------- #
 
     def _authorized(self, pubkey: str, scope: str) -> bool:
-        if pubkey in self._admins:
+        if self._direct_authorized(pubkey, scope):
             return True
-        return scope in self.scopes[pubkey]
+        now = int(time.time())
+        return any(
+            d["delegate"] == pubkey and scope in d["scopes"] and d["expiry"] > now
+            and self._direct_authorized(d["delegator"], scope)
+            for delegation_id, d in self.delegations.items()
+            if delegation_id not in self.revoked_delegations
+        )
+
+    def _direct_authorized(self, pubkey: str, scope: str) -> bool:
+        return pubkey in self._admins or scope in self.scopes[pubkey]
 
     def _execute(self, record: OperationRecord) -> None:
         if record.state not in (OpState.REQUESTED, OpState.APPROVED):
@@ -330,6 +390,27 @@ def _is_hex64(s: str) -> bool:
     return len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s)
 
 
+def _verify_delegation_event(event: dict[str, Any], *, revocation: bool = False) -> None:
+    from coincurve import PublicKeyXOnly
+
+    if not _is_hex64(str(event.get("id", ""))) or not _is_hex64(str(event.get("pubkey", ""))):
+        raise ValueError("invalid delegation event key")
+    serialized = json.dumps(
+        [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]],
+        separators=(",", ":"), ensure_ascii=False,
+    ).encode()
+    if hashlib.sha256(serialized).hexdigest() != event["id"]:
+        raise ValueError("delegation event id mismatch")
+    if not PublicKeyXOnly(bytes.fromhex(event["pubkey"])).verify(
+        bytes.fromhex(event["sig"]), bytes.fromhex(event["id"])
+    ):
+        raise ValueError("delegation event signature invalid")
+    if revocation and event.get("kind") != KIND_DELEGATION_REVOCATION:
+        raise ValueError("invalid delegation revocation kind")
+    if not revocation and event.get("kind") != KIND_DELEGATION:
+        raise ValueError("invalid delegation kind")
+
+
 # --------------------------------------------------------------------------- #
 # daemon
 
@@ -340,6 +421,8 @@ SUBSCRIBE_KINDS = [
     KIND_EXECUTION_STARTED,
     KIND_EXECUTION_RESULT,
     KIND_CAPABILITY,
+    KIND_DELEGATION,
+    KIND_DELEGATION_REVOCATION,
 ]
 
 # Replay order within the same created_at second: capability grants must be
@@ -350,11 +433,13 @@ SUBSCRIBE_KINDS = [
 # is wrongly re-evaluated before its grant is seen).
 _REPLAY_PRIORITY = {
     KIND_CAPABILITY: 0,
-    KIND_OPERATION_REQUEST: 1,
-    KIND_OPERATION_APPROVAL: 2,
-    KIND_OPERATION_REJECTION: 3,
-    KIND_EXECUTION_STARTED: 4,
-    KIND_EXECUTION_RESULT: 5,
+    KIND_DELEGATION: 1,
+    KIND_DELEGATION_REVOCATION: 2,
+    KIND_OPERATION_REQUEST: 3,
+    KIND_OPERATION_APPROVAL: 4,
+    KIND_OPERATION_REJECTION: 5,
+    KIND_EXECUTION_STARTED: 6,
+    KIND_EXECUTION_RESULT: 7,
 }
 
 
