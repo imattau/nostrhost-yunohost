@@ -690,7 +690,15 @@ class StateRecorder:
         return self._capabilities() if callable(self._capabilities) else self._capabilities
 
     def pre(self, request_id: str, tool: str, args: dict[str, Any], *, actor: str = "") -> str:
-        return self.snapshot(op_event_id=request_id, phase="pre", health="pending", tool=tool, actor=actor, plan_sha256=self._plan_digest(args))
+        return self.snapshot(
+            op_event_id=request_id,
+            phase="pre",
+            health="pending",
+            tool=tool,
+            data_affecting=tool in DATA_AFFECTING_TOOLS,
+            actor=actor,
+            plan_sha256=self._plan_digest(args),
+        )
 
     def post(self, request_id: str, tool: str, ok: bool, result: dict[str, Any], *, actor: str = "", args: dict[str, Any] | None = None) -> str:
         return self.snapshot(

@@ -263,9 +263,20 @@ def test_executor_failure_marks_post_not_known_good(tmp_path: Path):
 
 
 def test_data_affecting_tools_warrant_restic_linkage():
-    for tool in ("app.install", "app.upgrade", "app.remove", "backup.create", "backup.restore"):
+    for tool in ("app.install", "app.upgrade", "app.remove", "package.reconcile", "backup.create", "backup.restore"):
         assert tool in DATA_AFFECTING_TOOLS
     assert "service.restart" not in DATA_AFFECTING_TOOLS
+
+
+def test_native_reconcile_pre_snapshot_requests_restic_link(tmp_path: Path):
+    calls = []
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    recorder = StateRecorder(repo, FakeBackend(), restic_hook=lambda: calls.append("snapshot") or "snap-1")
+    recorder.pre("e" * 64, "package.reconcile", {"plan": {"plan_sha256": "p" * 64}})
+    assert calls == ["snapshot"]
+    manifest = tomllib.loads((tmp_path / "state" / "manifest.toml").read_text())
+    assert manifest["backup"]["restic_snapshot"] == "snap-1"
+    assert manifest["operation"]["plan_sha256"] == "p" * 64
 
 
 def test_repository_announcement_kind_and_tags():

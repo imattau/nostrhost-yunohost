@@ -589,10 +589,12 @@ def run() -> None:
     )
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
+        from .nostr_restic import restic_snapshot_hook
 
         state = StateRecorder(
             StateRepo(state_dir_from_env(), cfg.server_pubkey),
             capabilities=lambda: {pk: sorted(sc) for pk, sc in engine.scopes.items()},
+            restic_hook=restic_snapshot_hook() if restic is not None else None,
         )
         engine = OperationEngine(
             publish=lambda ev: _publish_default(cfg.control_relay, ev),
