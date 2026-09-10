@@ -235,6 +235,7 @@ def plan_package(package: PackageManifest) -> list[Operation]:
         deps += tuple(resource for resource in (f"{app}:runtime", f"{app}:database") if any(op.resource == resource for op in plan))
         deps = deps or (package_op.resource,)
         service = package.service.dict()
+        service["name"] = package.service.name or app
         service["user"] = service.get("user") or (package.user.name if package.user else app)
         plan.append(_op("service.ensure", f"{app}:service", service, deps=deps, risk="medium", reverse="service.remove", summary=f"render service {package.service.name or app}"))
         plan.append(_op("service.enable", f"{app}:service:enable", {"name": package.service.name or app}, deps=(f"{app}:service",), reverse="service.disable", summary="enable service"))
