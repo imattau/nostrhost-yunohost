@@ -86,6 +86,7 @@ class UserResource(BaseModel):
     system: bool = True
     description: str = ""
     home: Path | None = None
+    groups: list[str] = Field(default_factory=list)
 
 
 class DirectoryResource(BaseModel):
@@ -268,7 +269,14 @@ class ServiceResource(BaseModel):
     working_directory: Path | None = None
     restart: Literal["no", "on-failure", "always"] = "on-failure"
     environment: dict[str, str] = Field(default_factory=dict)
+    credentials: dict[str, Path] = Field(default_factory=dict)
     security: ServiceSecurity = Field(default_factory=ServiceSecurity)
+
+    @validator("credentials")
+    def absolute_credentials(cls, value: dict[str, Path]) -> dict[str, Path]:
+        if any(not path.is_absolute() or ".." in PurePosixPath(path).parts for path in value.values()):
+            raise ValueError("service credential paths must be absolute and cannot contain '..'")
+        return value
 
 
 class WebResource(BaseModel):
@@ -289,6 +297,12 @@ class TimerResource(BaseModel):
     on_calendar: str = Field(..., min_length=1)
     exec: str = Field(..., min_length=1)
     persistent: bool = True
+
+    @validator("exec")
+    def absolute_exec(cls, value: str) -> str:
+        if not value.startswith("/") or ".." in PurePosixPath(value).parts:
+            raise ValueError("timer.exec must be an absolute path without '..'")
+        return value
 
 
 class BackupResource(BaseModel):
@@ -453,7 +467,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     user_op: Operation | None = None
     if package.user:
         user = package.user.name or app
-        user_op = _op("system_user.ensure", f"{app}:user", {"name": user, "system": package.user.system, "home": str(package.user.home) if package.user.home else None}, deps=(package_op.resource,), reverse="system_user.remove", summary=f"ensure system user {user}")
+        user_op = _op("system_user.ensure", f"{app}:user", {"name": user, "system": package.user.system, "home": str(package.user.home) if package.user.home else None, "groups": package.user.groups}, deps=(package_op.resource,), reverse="system_user.remove", summary=f"ensure system user {user}")
         plan.append(user_op)
     for name, directory in package.directories.items():
         deps = (user_op.resource,) if user_op else (package_op.resource,)

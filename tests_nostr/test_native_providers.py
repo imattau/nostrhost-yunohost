@@ -377,6 +377,14 @@ def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_
     ]
 
 
+def test_sysusers_provider_declares_requested_groups(tmp_path: Path):
+    provider = SysusersProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    provider.apply(provider.plan({"name": "example", "groups": ["example-workers"]})[0])
+    definition = (tmp_path / "etc/sysusers.d/nostrhost-example.conf").read_text()
+    assert "g example-workers -" in definition
+    assert "u example" in definition
+
+
 def test_sysusers_removal_removes_declaration_without_deleting_account(tmp_path: Path):
     provider = SysusersProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
     ensure = provider.plan({"name": "example"})[0]

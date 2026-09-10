@@ -376,6 +376,13 @@ class SysusersProvider:
             raise ProviderError(f"unsafe system user name: {value!r}")
         return value
 
+    @classmethod
+    def _groups(cls, values: Any) -> list[str]:
+        groups = list(values or [])
+        if any(not re.fullmatch(r"[a-z_][a-z0-9_-]*", group) for group in groups):
+            raise ProviderError("unsafe system group name")
+        return groups
+
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         name = self._name(desired["name"])
         return {"name": name, "definition": (self.definition_dir / f"nostrhost-{name}.conf").is_file()}
@@ -394,7 +401,10 @@ class SysusersProvider:
         file = self.definition_dir / f"nostrhost-{name}.conf"
         home = args.get("home") or f"/var/lib/{name}"
         description = args.get("description") or "NostrHost service account"
-        file.write_text(f'u {name} - "{description}" {home}\n', encoding="utf-8")
+        groups = self._groups(args.get("groups"))
+        lines = [f"g {group} -" for group in groups]
+        lines.append(f'u {name} - "{description}" {home}')
+        file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.command(["systemd-sysusers", str(file)], check=True)
         return {"name": name, "definition": str(file), "changed": True}
 
