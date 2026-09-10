@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -56,6 +56,26 @@ def test_source_provider_rejects_archive_links(tmp_path: Path):
     operation = provider.plan({"url": "https://example.test/unsafe.tar", "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "destination": "/var/lib/example", "extract": True})[0]
     with pytest.raises(ProviderError, match="link or special"):
         provider.apply(operation)
+
+
+def test_runtime_provider_validates_version_with_bounded_arguments():
+    calls = []
+
+    class Result:
+        stdout = "v24.2.0\n"
+        stderr = ""
+
+    provider = RuntimeProvider(command=lambda args, **kwargs: (calls.append((args, kwargs)) or Result()), executable_lookup=lambda name: f"/usr/bin/{name}")
+    operation = provider.plan({"type": "node", "version": "24"})[0]
+    result = provider.apply(operation)
+    assert result["matches"] and result["version"] == "24.2.0"
+    assert calls[0][0] == ["/usr/bin/node", "--version"]
+
+
+def test_runtime_provider_rejects_missing_runtime():
+    provider = RuntimeProvider(executable_lookup=lambda _name: None)
+    with pytest.raises(ProviderError, match="not installed"):
+        provider.apply(provider.plan({"type": "go", "version": "1.24"})[0])
 
 
 def test_service_provider_renders_hardened_unit(tmp_path: Path):

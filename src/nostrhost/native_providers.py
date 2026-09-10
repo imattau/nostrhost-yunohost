@@ -367,6 +367,57 @@ class SourceProvider:
             raise ProviderError("source is not a supported tar or zip archive")
 
 
+class RuntimeProvider:
+    """Validate a declared runtime through its version command.
+
+    Installation is intentionally not hidden behind a provider. Runtime
+    packages are selected by the host policy (usually an apt resource); this
+    provider verifies that the requested executable is actually available.
+    """
+
+    resource_type = "runtime"
+    executables = {"node": "node", "python": "python3", "go": "go", "composer": "composer"}
+
+    def __init__(self, *, command: Callable[..., Any] | None = None, executable_lookup: Callable[[str], str | None] | None = None) -> None:
+        self.command = command or subprocess.run
+        self.executable_lookup = executable_lookup or shutil.which
+
+    def _executable(self, runtime_type: str) -> str:
+        try:
+            name = self.executables[runtime_type]
+        except KeyError as exc:
+            raise ProviderError(f"unsupported runtime: {runtime_type}") from exc
+        executable = self.executable_lookup(name)
+        if not executable:
+            raise ProviderError(f"runtime executable is not installed: {name}")
+        return executable
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        executable = self._executable(desired["type"])
+        result = self.command([executable, "--version"], check=True, capture_output=True, text=True)
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        requested = desired["version"].lstrip("v")
+        versions = re.findall(r"(?<![\d.])\d+(?:\.\d+)*", output)
+        detected = next((version for version in versions if version == requested or version.startswith(f"{requested}.")), None)
+        return {"type": desired["type"], "executable": executable, "version": detected or (versions[0] if versions else None), "matches": detected is not None}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("runtime.ensure", desired["type"], desired, risk="medium", reverse="runtime.remove", summary=f"validate {desired['type']} runtime {desired['version']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        result = self.inspect(operation.args)
+        if not result["matches"]:
+            raise ProviderError(f"runtime version mismatch: requested {operation.args['version']}, detected {result['version']}")
+        result["changed"] = False
+        return result
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return []
+
+
 class ServiceProvider:
     resource_type = "service"
 
@@ -647,6 +698,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
+        "runtime": RuntimeProvider(command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
         "database": PostgresProvider(connection_factory=postgres_connection_factory),
