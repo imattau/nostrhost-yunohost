@@ -240,3 +240,55 @@ def login_route():
         return handle_login(event, domain=host)
     except LoginError as e:
         raise HTTPResponse(str(e), 401)
+
+
+def auth_request_route():
+    """Validate the portal session for NGINX ``auth_request`` consumers.
+
+    The endpoint deliberately returns no user content: a successful response
+    is only an authorization signal, with the identity exposed through the
+    compatibility headers expected by YunoHost applications.  The portal
+    authenticator remains the single source of truth for cookie, host,
+    allow-list, and session-file validation.
+    """
+    from bottle import HTTPResponse, response
+
+    from .authenticators.ldap_ynhuser import Authenticator
+
+    try:
+        infos = Authenticator().get_session_cookie()
+    except Exception:
+        raise HTTPResponse(status=401)
+
+    username = infos.get("user")
+    if not isinstance(username, str) or not username:
+        raise HTTPResponse(status=401)
+
+    response.headers["X-Remote-User"] = username
+    for header, key in (
+        ("X-Remote-Email", "email"),
+        ("X-Remote-Fullname", "fullname"),
+    ):
+        value = infos.get(key)
+        if isinstance(value, str) and value:
+            response.headers[header] = value
+
+    # A session may predate Nostr linking, and the identity database may not
+    # be readable during early boot.  Neither case should turn valid portal
+    # authentication into a 5xx response.
+    try:
+        from .nostr_identity import resolve_username
+
+        identity = next(iter(resolve_username(username)), None)
+        if identity is not None:
+            response.headers["X-Nostr-Pubkey"] = identity.pubkey
+            try:
+                from nostrhost_auth.identity.npub import hex_to_npub
+
+                response.headers["X-Nostr-Npub"] = hex_to_npub(identity.pubkey)
+            except Exception:
+                logger.debug("unable to encode linked identity for %s", username)
+    except Exception:
+        logger.debug("unable to resolve linked identity for %s", username)
+
+    return HTTPResponse(status=204)

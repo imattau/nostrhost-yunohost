@@ -2086,6 +2086,10 @@ def app_ssowatconf() -> None:
         permissions[perm_name] = {
             "users": perm_info["corresponding_users"],
             "auth_header": auth_header,
+            # Applications opt into the staged NGINX auth_request migration
+            # explicitly; the default keeps the legacy SSOwat validator.
+            "auth_request": perm_info.get("auth_request", False)
+            not in [False, "False", "false", "0", 0, None],
             "public": "visitors" in perm_info["allowed"],
             "uris": uris,
         }
@@ -2161,6 +2165,9 @@ def app_ssowatconf() -> None:
         "cookie_secret_file": "/etc/yunohost/.ssowat_cookie_secret",
         "session_folder": "/var/cache/yunohost-portal/sessions",
         "cookie_name": "yunohost.portal",
+        # Keep the legacy Lua validator as the default until NGINX auth_request
+        # ordering is enabled for the generated application locations.
+        "auth_request": False,
         "redirected_urls": redirected_urls,
         "domain_portal_urls": domain_portal_dict,
         "permissions": permissions,

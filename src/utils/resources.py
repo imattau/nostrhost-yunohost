@@ -584,6 +584,7 @@ class PermissionsResource(AppResource):
     - `show_tile`: (default: `true` if `url` is defined) Wether or not a tile should be displayed for that permission in the user portal
     - `allowed`: (default: nobody) The group initially allowed to access this perm, if `init_{perm}_permission` is not defined in the manifest questions. Note that the admin may tweak who is allowed/unallowed on that permission later on, this is only meant to **initialize** the permission.
     - `auth_header`: (default: `true`) Define for the URL of this permission, if SSOwat pass the authentication header to the application. Default is true
+    - `auth_request`: (default: `false`) Opt this permission into the staged NGINX auth_request migration. The app's NGINX location must include the NostrHost auth-request parameters.
     - `protected`: (default: `false`) Define if this permission is protected. If it is protected the administrator won't be able to add or remove the visitors group of this permission. Defaults to 'false'.
     - `additional_urls`: (default: none) List of additional URL for which access will be allowed/forbidden
 
@@ -615,6 +616,7 @@ class PermissionsResource(AppResource):
         "url": None,
         "additional_urls": [],
         "auth_header": True,
+        "auth_request": False,
         "allowed": None,
         "show_tile": None,  # To be automagically set to True by default if an url is defined and show_tile not provided
         "protected": False,
@@ -632,6 +634,13 @@ class PermissionsResource(AppResource):
             ):
                 raise YunohostError(
                     f"In manifest, for permission '{perm}', 'auth_header' should be a boolean",
+                    raw_msg=True,
+                )
+            if "auth_request" in infos and not isinstance(
+                infos.get("auth_request"), bool
+            ):
+                raise YunohostError(
+                    f"In manifest, for permission '{perm}', 'auth_request' should be a boolean",
                     raw_msg=True,
                 )
             if "show_tile" in infos and not isinstance(infos.get("show_tile"), bool):
@@ -753,6 +762,14 @@ class PermissionsResource(AppResource):
                 auth_header=infos["auth_header"],
                 sync_perm=False,
             )
+
+            # Persist the staged auth_request opt-in alongside the permission
+            # so app_ssowatconf can emit it into the policy projection.
+            stored_permissions = self.get_setting("_permissions") or {}
+            stored_permissions.setdefault(perm, {})["auth_request"] = infos[
+                "auth_request"
+            ]
+            self.set_setting("_permissions", stored_permissions)
 
         _sync_permissions_with_ldap()
         app_ssowatconf()

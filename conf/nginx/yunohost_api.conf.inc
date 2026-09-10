@@ -37,6 +37,20 @@ location /yunohost/portalapi/ {
     error_page 502 /yunohost/portalapi/error/502;
 }
 
+# Internal authentication subrequest for the NostrHost compatibility bridge.
+# Keep this endpoint unreachable from the public network and bypass legacy
+# SSOwat for this one request: the portal API performs the canonical session
+# cookie, host, allow-list, and session-file checks.
+location = /yunohost/portalapi/nostr/auth-request {
+    internal;
+    access_by_lua off;
+    proxy_pass http://127.0.0.1:6788/nostr/auth-request;
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-URI $request_uri;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+}
+
 
 # Yunohost admin output complete 502 error page, so use only plain text.
 location = /yunohost/portalapi/error/502 {

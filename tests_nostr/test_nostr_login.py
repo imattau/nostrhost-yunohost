@@ -17,6 +17,7 @@ from yunohost.nostr_identity import _sign_event, _store
 from yunohost.nostr_login import (
     LOGIN_ACTION,
     LoginError,
+    auth_request_route,
     create_portal_session,
     handle_login,
     issue_challenge,
@@ -94,6 +95,45 @@ def fake_ldap_ynhuser(monkeypatch):
 def test_issue_challenge_returns_nonce():
     nonce = issue_challenge(domain=DOMAIN)
     assert isinstance(nonce, str) and len(nonce) >= 32
+
+
+def test_auth_request_returns_compatibility_headers(monkeypatch):
+    class FakeAuthenticator:
+        def get_session_cookie(self):
+            return {
+                "user": "matt",
+                "email": "matt@example.test",
+                "fullname": "Matt Example",
+            }
+
+    mod = types.ModuleType("yunohost.authenticators.ldap_ynhuser")
+    mod.Authenticator = FakeAuthenticator
+    monkeypatch.setitem(sys.modules, "yunohost.authenticators.ldap_ynhuser", mod)
+
+    from bottle import response
+
+    response.headers.clear()
+    result = auth_request_route()
+
+    assert result.status_code == 204
+    assert response.headers["X-Remote-User"] == "matt"
+    assert response.headers["X-Remote-Email"] == "matt@example.test"
+    assert response.headers["X-Remote-Fullname"] == "Matt Example"
+
+
+def test_auth_request_rejects_invalid_session(monkeypatch):
+    class FakeAuthenticator:
+        def get_session_cookie(self):
+            raise RuntimeError("expired")
+
+    mod = types.ModuleType("yunohost.authenticators.ldap_ynhuser")
+    mod.Authenticator = FakeAuthenticator
+    monkeypatch.setitem(sys.modules, "yunohost.authenticators.ldap_ynhuser", mod)
+
+    with pytest.raises(Exception) as exc_info:
+        auth_request_route()
+
+    assert exc_info.value.status_code == 401
 
 
 def test_handle_login_success(rec, tmp_path):

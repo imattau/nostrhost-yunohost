@@ -112,14 +112,15 @@ def portalapi(debug: bool, host: str, port: int) -> NoReturn:
     # FIXME : is this the logdir we want ? (yolo to work around permission issue)
     init_logging(interface="portalapi", debug=debug, logdir="/var/log")
 
-    # Passwordless Nostr sign-in (§8): public challenge + login routes. They
-    # are registered via moulinette's `routes` kwarg, which skips the
-    # default authenticator (these are unauthenticated by design).
-    from .nostr_login import challenge_route, login_route
+    # Passwordless Nostr sign-in (§8) and the internal auth-request bridge.
+    # They are registered via moulinette's `routes` kwarg, which skips the
+    # default authenticator; only challenge/login are public by design.
+    from .nostr_login import auth_request_route, challenge_route, login_route
 
     nostr_routes = {
         ("GET", "/nostr/challenge"): challenge_route,
         ("POST", "/nostr/login"): login_route,
+        ("GET", "/nostr/auth-request"): auth_request_route,
     }
 
     ret = moulinette.api(
