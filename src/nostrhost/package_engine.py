@@ -439,7 +439,10 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
             and (not operation.args.get("group") or actual.get("group") == operation.args["group"])
         )
     if operation.name == "package.apt.ensure":
-        return set(operation.args.get("packages", [])) <= set(actual.get("installed", []))
+        packages = operation.args.get("packages")
+        if packages is None and operation.args.get("package"):
+            packages = [operation.args["package"]]
+        return bool(packages) and set(packages) <= set(actual.get("installed", []))
     if operation.name == "runtime.ensure":
         return actual.get("matches") is True
     if operation.name == "config.ensure":

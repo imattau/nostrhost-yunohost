@@ -163,6 +163,32 @@ def test_reconciliation_skips_verified_cached_source(tmp_path: Path):
     assert _operation_satisfied(operation, provider.inspect(desired))
 
 
+def test_reconciliation_does_not_skip_uninstalled_single_apt_package():
+    from nostrhost.native_providers import AptProvider
+
+    class Package:
+        def __init__(self, installed: bool):
+            self.is_installed = installed
+
+    class Cache:
+        def __init__(self, installed: bool):
+            self.package = Package(installed)
+
+        def __contains__(self, name: str):
+            return name == "ffmpeg"
+
+        def __getitem__(self, name: str):
+            assert name == "ffmpeg"
+            return self.package
+
+    operation = Operation("package.apt.ensure", "example:apt:ffmpeg", {"package": "ffmpeg"})
+    absent = AptProvider(cache_factory=lambda: Cache(False))
+    present = AptProvider(cache_factory=lambda: Cache(True))
+
+    assert not _operation_satisfied(operation, absent.inspect(operation.args))
+    assert _operation_satisfied(operation, present.inspect(operation.args))
+
+
 def test_reconciliation_skips_unchanged_extracted_source(tmp_path: Path):
     import hashlib
     import tarfile
