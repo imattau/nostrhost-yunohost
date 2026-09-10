@@ -22,9 +22,11 @@ Signature parsing/verification and challenge binding are delegated to
 the same job) rather than reimplemented here.
 """
 
+import base64
 import json
 import logging
 import os
+import re
 import time
 
 logger = logging.getLogger("nostrhost-login")
@@ -80,7 +82,12 @@ def create_portal_session(username: str, *, domain: str | None = None) -> None:
     """
     from bottle import request
 
-    from .authenticators.ldap_ynhuser import Authenticator, encrypt, user_is_allowed_on_domain
+    from .authenticators.ldap_ynhuser import (
+        Authenticator,
+        _host_domain,
+        encrypt,
+        user_is_allowed_on_domain,
+    )
     from .utils.misc import random_ascii
 
     host = request.get_header("host")
@@ -89,7 +96,7 @@ def create_portal_session(username: str, *, domain: str | None = None) -> None:
     if not domain:
         raise LoginError("missing Host header")
 
-    if not user_is_allowed_on_domain(username, domain):
+    if not user_is_allowed_on_domain(username, _host_domain(domain)):
         raise LoginError("user is not allowed on this domain")
 
     infos = _user_infos_for_session(username)
@@ -242,36 +249,114 @@ def login_route():
         raise HTTPResponse(str(e), 401)
 
 
-def auth_request_route():
-    """Validate the portal session for NGINX ``auth_request`` consumers.
+def _load_ssowat_permissions(conf_path="/etc/ssowat/conf.json") -> dict:
+    """Permission map from the SSOwat-generated conf (same data SSOwat uses).
 
-    The endpoint deliberately returns no user content: a successful response
-    is only an authorization signal, with the identity exposed through the
-    compatibility headers expected by YunoHost applications.  The portal
-    authenticator remains the single source of truth for cookie, host,
-    allow-list, and session-file validation.
+    The Caddy ``forward_auth`` decision must agree with what the legacy nginx
+    path enforces; reading the generated conf guarantees parity. When SSOwat is
+    retired this is re-pointed at the semantic permission state.
     """
-    from bottle import HTTPResponse, response
-
-    from .authenticators.ldap_ynhuser import Authenticator
-
     try:
-        infos = Authenticator().get_session_cookie()
-    except Exception:
-        raise HTTPResponse(status=401)
+        with open(conf_path) as f:
+            conf = json.load(f)
+        permissions = conf.get("permissions") or {}
+        return permissions if isinstance(permissions, dict) else {}
+    except Exception as e:
+        logger.warning("unable to read ssowat conf %s: %s", conf_path, e)
+        return {}
 
-    username = infos.get("user")
-    if not isinstance(username, str) or not username:
-        raise HTTPResponse(status=401)
 
-    response.headers["X-Remote-User"] = username
+def _match_permission(permissions: dict, full_url: str):
+    """Longest-matching permission for ``host + uri`` (mirrors ssowat access.lua).
+
+    Returns ``(permission_id, permission_info)`` or ``None``. ``re:`` prefixes
+    are treated as anchored regular expressions; plain prefixes are matched
+    from the start of the URL.
+    """
+    best = None
+    best_len = -1
+    for name, info in permissions.items():
+        for prefix in info.get("uris") or []:
+            if not isinstance(prefix, str):
+                continue
+            if prefix.startswith("re:"):
+                pattern = prefix[3:]
+                if not pattern.startswith("^"):
+                    pattern = "^" + pattern
+                m = re.match(pattern, full_url)
+                match_len = m.end() if m else -1
+            elif full_url.startswith(prefix):
+                match_len = len(prefix)
+            else:
+                match_len = -1
+            if match_len > best_len:
+                best_len = match_len
+                best = (name, info)
+    return best
+
+
+def _portal_redirect(proto: str, host: str, uri: str, *, logged_in: bool) -> str:
+    """Redirect location matching ssowat access.lua: login callback or deny."""
+    portal = f"{proto}://{host}/yunohost/sso/"
+    if logged_in:
+        return f"{portal}?msg=access_denied"
+    back = base64.urlsafe_b64encode(f"{proto}://{host}{uri}".encode()).decode()
+    return f"{portal}?r={back}"
+
+
+def _authorize(
+    permissions: dict,
+    full_url: str,
+    proto: str,
+    host: str,
+    uri: str,
+    username: str | None,
+) -> tuple[str, str | None]:
+    """Full authorization decision for a Caddy ``forward_auth`` subrequest.
+
+    Mirrors ssowat access.lua sections 3-4 + 6:
+      - no matching permission -> deny (redirect to the portal)
+      - public permission      -> allow (no identity headers needed)
+      - protected permission   -> cookie auth + allowed-users check; allow with
+        identity headers, or redirect (login callback / access-denied)
+    """
+    perm = _match_permission(permissions, full_url)
+    if perm is None:
+        return ("redirect", _portal_redirect(proto, host, uri, logged_in=(username is not None)))
+    _name, info = perm
+    if info.get("public"):
+        return ("allow", None)
+    if username is None:
+        return ("redirect", _portal_redirect(proto, host, uri, logged_in=False))
+    if username in (info.get("users") or []):
+        return ("allow", "identity")
+    return ("redirect", _portal_redirect(proto, host, uri, logged_in=True))
+
+
+def _identity_headers(infos, username: str) -> dict[str, str]:
+    """Identity headers the auth front end copies to the app.
+
+    Every header is always present (empty when unknown) so a ``copy_headers``
+    front end unconditionally overwrites any client-supplied copy -- spoofing
+    protection equivalent to the nginx ``proxy_set_header`` bridge. Headers
+    must be returned on the response object itself: bottle drops headers set on
+    the global ``response`` when a route returns a fresh ``HTTPResponse``.
+    """
+    infos = infos or {}
+    headers = {
+        "X-Remote-User": username,
+        "X-Remote-Email": "",
+        "X-Remote-Fullname": "",
+        "X-Nostr-Pubkey": "",
+        "X-Nostr-Npub": "",
+    }
     for header, key in (
         ("X-Remote-Email", "email"),
         ("X-Remote-Fullname", "fullname"),
     ):
         value = infos.get(key)
-        if isinstance(value, str) and value:
-            response.headers[header] = value
+        if isinstance(value, str):
+            headers[header] = value
 
     # A session may predate Nostr linking, and the identity database may not
     # be readable during early boot.  Neither case should turn valid portal
@@ -281,14 +366,69 @@ def auth_request_route():
 
         identity = next(iter(resolve_username(username)), None)
         if identity is not None:
-            response.headers["X-Nostr-Pubkey"] = identity.pubkey
+            headers["X-Nostr-Pubkey"] = identity.pubkey
             try:
                 from nostrhost_auth.identity.npub import hex_to_npub
 
-                response.headers["X-Nostr-Npub"] = hex_to_npub(identity.pubkey)
+                headers["X-Nostr-Npub"] = hex_to_npub(identity.pubkey)
             except Exception:
                 logger.debug("unable to encode linked identity for %s", username)
     except Exception:
         logger.debug("unable to resolve linked identity for %s", username)
 
-    return HTTPResponse(status=204)
+    return headers
+
+
+def auth_request_route():
+    """Authorize a portal-session request for ``auth_request`` front ends.
+
+    Two modes, selected by whether the caller forwarded the original URI:
+
+    - Caddy ``forward_auth`` (``X-Forwarded-Uri`` present): the full
+      authorization decision -- permission matching, allowed users/groups,
+      public routes, and the redirect-to-portal outcome -- plus the identity
+      headers the front end copies to the application.
+    - Legacy nginx ``auth_request`` (no ``X-Forwarded-Uri``): cookie-only
+      validation, the nginx/SSOwat path performs the permission check itself.
+
+    The endpoint deliberately returns no user content: a successful response
+    is only an authorization signal, with the identity exposed through the
+    compatibility headers expected by YunoHost applications.
+    """
+    from bottle import HTTPResponse, request
+
+    from .authenticators.ldap_ynhuser import Authenticator, _host_domain
+
+    fwd_uri = request.get_header("X-Forwarded-Uri")
+
+    try:
+        infos = Authenticator().get_session_cookie()
+    except Exception:
+        infos = None
+    username = (infos or {}).get("user") if isinstance(infos, dict) else None
+    if not isinstance(username, str) or not username:
+        username = None
+
+    if fwd_uri is not None:
+        host = request.get_header("X-Forwarded-Host") or request.get_header("host") or ""
+        proto = request.get_header("X-Forwarded-Proto") or "https"
+        match_uri = fwd_uri.split("?", 1)[0]
+        # Permission URIs in the SSOwat conf are bare DNS names (no port).
+        action, detail = _authorize(
+            _load_ssowat_permissions(),
+            _host_domain(host) + match_uri,
+            proto,
+            host,
+            fwd_uri,
+            username,
+        )
+        if action == "redirect":
+            raise HTTPResponse(status=302, headers={"Location": detail})
+        if action == "allow" and username is not None:
+            return HTTPResponse(status=204, headers=_identity_headers(infos, username))
+        return HTTPResponse(status=204)
+
+    if username is None:
+        raise HTTPResponse(status=401)
+
+    return HTTPResponse(status=204, headers=_identity_headers(infos, username))

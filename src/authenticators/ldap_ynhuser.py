@@ -50,6 +50,24 @@ SESSION_FOLDER = Path("/var/cache/yunohost-portal/sessions")
 SESSION_VALIDITY = 3 * 24 * 3600  # 3 days
 
 
+def _host_domain(host: str) -> str:
+    """Strip a ``:port`` suffix from a Host header value.
+
+    The session cookie Domain attribute and the JWT ``host`` claim must be a
+    bare DNS name: browsers reject ports in the Domain attribute, and nginx
+    SSOwat compares the claim to ``$host`` (port-stripped). The portal can be
+    served on a non-default port (e.g. Caddy on 8443 during the nginx->Caddy
+    transition) while ``window.location.host`` still carries the port.
+    """
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    head, _, tail = host.rpartition(":")
+    if tail.isdigit():
+        return head
+    return host
+
+
 @cache
 def SESSION_SECRET() -> str:
     # Only load this once actually requested to avoid boring issues like
@@ -242,7 +260,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
                 "ou=users", f"uid={username}", attrs=["cn", "mail"]
             )[0]
 
-        if not user_is_allowed_on_domain(username, request.get_header("host")):
+        if not user_is_allowed_on_domain(username, _host_domain(request.get_header("host"))):
             raise YunohostAuthenticationError("unable_authenticate")
 
         return {
@@ -266,7 +284,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         # (eg because the user gets deleted, or password gets changed)
         # User hashing not really meant for security, just to sort of anonymize/pseudonymize the session file name
         infos["id"] = short_hash(infos["user"]) + random_ascii(20)
-        infos["host"] = request.get_header("host")
+        infos["host"] = _host_domain(request.get_header("host"))
 
         is_dev = Path("/etc/yunohost/.portal-api-allowed-cors-origins").exists()
 
@@ -277,7 +295,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
             httponly=True,
             path="/",
             samesite="lax" if not is_dev else None,
-            domain=f".{request.get_header('host')}",
+            domain=f".{_host_domain(request.get_header('host'))}",
             max_age=SESSION_VALIDITY
             - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
         )
@@ -303,7 +321,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         if not infos:
             raise YunohostAuthenticationError("unable_authenticate")
 
-        if infos["host"] != request.get_header("host"):
+        if infos["host"] != _host_domain(request.get_header("host")):
             raise YunohostAuthenticationError("unable_authenticate")
 
         if not user_is_allowed_on_domain(infos["user"], infos["host"]):
@@ -330,7 +348,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
             httponly=True,
             path="/",
             samesite="lax" if not is_dev else None,
-            domain=f".{request.get_header('host')}",
+            domain=f".{_host_domain(request.get_header('host'))}",
             max_age=SESSION_VALIDITY
             - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
         )
