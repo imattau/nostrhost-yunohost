@@ -828,7 +828,11 @@ class JsonStateProvider:
         resource = desired.get("resource", self.resource_type)
         name = _safe_name(str(desired.get("name", resource)).replace(":", "-"))
         target = self.state_dir / f"{name}.json"
-        return {"state": str(target), "exists": target.is_file()}
+        result = {"state": str(target), "exists": target.is_file()}
+        if target.is_file():
+            result["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+        result["desired_sha256"] = hashlib.sha256(json.dumps(desired, indent=2, sort_keys=True, default=str).encode()).hexdigest()
+        return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation(f"{self.resource_type}.register", desired["name"], desired, reverse=f"{self.resource_type}.unregister", summary=f"register {self.resource_type} state")]

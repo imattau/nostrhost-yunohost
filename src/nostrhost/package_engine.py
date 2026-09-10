@@ -278,8 +278,51 @@ class PolicyResource(BaseModel):
         return value
 
 
+class SettingField(BaseModel):
+    type: Literal["string", "integer", "number", "boolean", "enum"]
+    default: Any = None
+    choices: list[str] = Field(default_factory=list)
+    secret: bool = False
+
+    @root_validator
+    def valid_field(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if values.get("type") == "enum" and not values.get("choices"):
+            raise ValueError("enum settings require choices")
+        if values.get("type") != "enum" and values.get("choices"):
+            raise ValueError("only enum settings may declare choices")
+        return values
+
+
 class SettingResource(BaseModel):
+    fields: dict[str, SettingField] = Field(default_factory=dict)
     values: dict[str, Any] = Field(default_factory=dict)
+
+    @root_validator
+    def validate_values(cls, values: dict[str, Any]) -> dict[str, Any]:
+        fields = values.get("fields", {})
+        settings = values.get("values", {})
+        for name, definition in fields.items():
+            if name not in settings and definition.default is not None:
+                settings[name] = definition.default
+        unknown = set(settings) - set(fields)
+        if unknown and fields:
+            raise ValueError("settings values must be declared in settings.fields: " + ", ".join(sorted(unknown)))
+        for name, definition in fields.items():
+            if name not in settings:
+                continue
+            value = settings[name]
+            valid = {
+                "string": isinstance(value, str),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+                "boolean": isinstance(value, bool),
+                "enum": isinstance(value, str) and value in definition.choices,
+            }[definition.type]
+            if not valid:
+                raise ValueError(f"setting {name} does not match declared type {definition.type}")
+            if definition.secret:
+                raise ValueError(f"secret setting {name} must use a secret resource")
+        return values
 
 
 class SecretResource(BaseModel):
@@ -421,12 +464,12 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     if package.timer:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
-    if package.settings.values:
-        plan.append(_op("settings.ensure", f"{app}:settings", {"values": package.settings.values}, deps=(package_op.resource,), summary="ensure typed application settings"))
+    if package.settings.values or package.settings.fields:
+        plan.append(_op("settings.ensure", f"{app}:settings", {"name": app, "fields": {name: field.dict() for name, field in package.settings.fields.items()}, "values": package.settings.values}, deps=(package_op.resource,), summary="ensure typed application settings"))
     for name, secret in package.secrets.items():
         plan.append(_op("secret.ensure", f"{app}:secret:{name}", {"name": name, "generate": secret.generate, "length": secret.length}, deps=(package_op.resource,), risk="high", reverse="secret.remove", summary=f"ensure secret {name}"))
     if package.backup:
-        plan.append(_op("backup.register", f"{app}:backup", {"paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), summary="register backup resources"))
+        plan.append(_op("backup.register", f"{app}:backup", {"name": app, "paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), summary="register backup resources"))
     for name, policy in package.policies.items():
         plan.append(_op("policy.ensure", f"{app}:policy:{name}", policy.dict(), deps=(package_op.resource,), risk="medium", reverse="policy.remove", summary=f"install {policy.type} policy {policy.name}"))
     for name, hook in package.hooks.items():
@@ -552,7 +595,10 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
     if operation.name == "secret.ensure":
         return actual.get("exists") is True
     if operation.name in {"settings.ensure", "backup.register"}:
-        return actual.get("exists") is True
+        return actual.get("exists") is True and (
+            operation.name != "settings.ensure"
+            or actual.get("sha256") == actual.get("desired_sha256")
+        )
     if operation.name == "system_user.ensure":
         return actual.get("definition") is True
     return False

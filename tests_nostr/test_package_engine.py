@@ -126,6 +126,30 @@ def test_all_declared_domains_are_plannable():
     assert {"settings.ensure", "secret.ensure", "backup.register", "hook.python.ensure"} <= set(names)
 
 
+def test_settings_are_typed_and_defaults_are_materialized():
+    raw = {
+        "app": {"id": "example", "version": "1"},
+        "settings": {
+            "fields": {
+                "port": {"type": "integer", "default": 8090},
+                "mode": {"type": "enum", "choices": ["safe", "fast"]},
+            },
+            "values": {"mode": "safe"},
+        },
+    }
+    package = PackageManifest.parse_obj(raw)
+    assert package.settings.values["port"] == 8090
+    operation = next(operation for operation in plan_package(package) if operation.name == "settings.ensure")
+    assert operation.args["values"] == {"mode": "safe", "port": 8090}
+
+
+def test_settings_reject_wrong_type_and_plaintext_secret():
+    with pytest.raises(ValueError, match="does not match declared type"):
+        PackageManifest.parse_obj({"app": {"id": "example", "version": "1"}, "settings": {"fields": {"port": {"type": "integer"}}, "values": {"port": "8090"}}})
+    with pytest.raises(ValueError, match="secret resource"):
+        PackageManifest.parse_obj({"app": {"id": "example", "version": "1"}, "settings": {"fields": {"token": {"type": "string", "secret": True}}, "values": {"token": "plaintext"}}})
+
+
 def test_apply_preflights_native_provider_coverage():
     plan = plan_package(PackageManifest.parse_obj(example()))
     with pytest.raises(PackageError, match="native providers are unavailable"):
