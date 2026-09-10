@@ -60,6 +60,15 @@ def test_service_provider_rejects_unsafe_unit_names(tmp_path: Path):
         provider.apply(operation)
 
 
+def test_service_provider_uses_bounded_systemctl_arguments(tmp_path: Path):
+    calls = []
+    provider = ServiceProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    operation = provider.plan({"name": "example", "exec": "/bin/true"})[0]
+    operation = operation.__class__("service.start", operation.resource, {"name": "example"})
+    assert provider.apply(operation)["action"] == "start"
+    assert calls == [(["systemctl", "start", "example"], {"check": True})]
+
+
 def test_native_executor_dispatches_only_registered_provider(tmp_path: Path):
     executor = NativeOperationExecutor(native_providers(root=tmp_path, unit_dir=tmp_path))
     operation = DirectoryProvider(root=tmp_path).plan({"path": "/opt/example", "mode": 0o750})[0]

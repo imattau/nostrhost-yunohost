@@ -159,6 +159,10 @@ class ServiceProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         args = operation.args
         name = _safe_name(args.get("name") or operation.resource.split(":")[-1])
+        action = operation.name.rsplit(".", 1)[-1]
+        if action in {"enable", "disable", "start", "stop", "restart"}:
+            self.command(["systemctl", action, name], check=True)
+            return {"service": name, "action": action, "changed": True}
         self.unit_dir.mkdir(parents=True, exist_ok=True)
         unit = self.render_unit(name, args)
         destination = self.unit_dir / f"{name}.service"
