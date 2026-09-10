@@ -80,6 +80,14 @@ class YnhExecutorBackend(ExecutorBackend):
         spec = tool_spec(tool)
         if spec is None:
             raise ValueError(f"unknown tool {tool!r}")
+        if tool == "package.reconcile":
+            from nostrhost.native_providers import NativeOperationExecutor, native_providers
+            from .nostr_operations import _safe_package_reconcile
+
+            return _safe_package_reconcile(
+                **args,
+                _executor=NativeOperationExecutor(native_providers()),
+            )
         return spec.handler(**args)
 
 

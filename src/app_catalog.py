@@ -90,10 +90,21 @@ def app_catalog(
         )
 
         if not full:
-            catalog["apps"][app] = {
+            compact_info = {
                 "description": infos["manifest"]["description"],
                 "level": infos["level"],
             }
+            if infos.get("source") == "nostr":
+                # Keep the handoff visible to Admin/Portal consumers. A
+                # native entry must be planned through the signed resource
+                # engine, not silently sent to yunohost.app's script path.
+                compact_info.update({
+                    "source": "nostr",
+                    "install_mode": "native",
+                    "operation_tool": "package.plan",
+                    "native": infos.get("native", {}),
+                })
+            catalog["apps"][app] = compact_info
 
     _catalog: AppCatalog = {"apps": catalog["apps"]}
 

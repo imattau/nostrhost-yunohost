@@ -100,10 +100,13 @@ def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[st
         raise OperationError(f"invalid native package: {exc}") from exc
 
 
-def _safe_package_reconcile(plan: dict[str, Any] | list[dict[str, Any]] | None = None, **args: Any) -> dict[str, Any]:
+def _safe_package_reconcile(
+    plan: dict[str, Any] | list[dict[str, Any]] | None = None,
+    _executor: Any = None,
+    **args: Any,
+) -> dict[str, Any]:
     if args or not isinstance(plan, (dict, list)) or not plan:
         raise OperationError("package.reconcile requires a native plan envelope")
-    from nostrhost.native_providers import NativeOperationExecutor, native_providers
     from nostrhost.package_engine import apply_reconciled_plan, operation_from_dict, validate_plan_envelope
 
     if isinstance(plan, dict):
@@ -119,7 +122,15 @@ def _safe_package_reconcile(plan: dict[str, Any] | list[dict[str, Any]] | None =
         operations = [operation_from_dict(item) for item in plan]
         plan_digest = ""
         legacy = True
-    results = apply_reconciled_plan(operations, NativeOperationExecutor(native_providers()))
+    if _executor is None:
+        # Direct calls remain available for local recovery/debug tooling. The
+        # signed control-plane path supplies the executor from
+        # YnhExecutorBackend, keeping provider construction out of request
+        # handling and making the authority boundary explicit.
+        from nostrhost.native_providers import NativeOperationExecutor, native_providers
+
+        _executor = NativeOperationExecutor(native_providers())
+    results = apply_reconciled_plan(operations, _executor)
     return {"operations": len(results), "results": results, "plan_sha256": plan_digest, "legacy_plan": legacy}
 
 

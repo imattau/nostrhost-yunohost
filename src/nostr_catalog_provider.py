@@ -90,6 +90,25 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
     return apps
 
 
+def native_catalog_coordinate(app_id: str, path: str | Path | None = None) -> dict[str, Any] | None:
+    """Return signed package provenance for the resource-engine handoff."""
+    entry = load_native_catalog(path).get(app_id)
+    if not entry or not isinstance(entry.get("native"), dict):
+        return None
+    native = entry["native"]
+    return {
+        "app_id": native.get("app_id", app_id),
+        "version": native.get("version"),
+        "repository": native.get("repository"),
+        "revision": native.get("revision"),
+        "package_path": native.get("package_path", "package.toml"),
+        "manifest_sha256": native.get("manifest_sha256", ""),
+        "content_sha256": native.get("content_sha256", ""),
+        "architectures": native.get("architectures", []),
+        "event_id": native.get("event_id", ""),
+    }
+
+
 def _has_passing_attestation(declaration: dict[str, Any], attestations: Any) -> bool:
     """Match persisted daemon attestations to the complete declaration identity."""
     if not isinstance(attestations, list):
