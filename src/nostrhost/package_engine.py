@@ -169,7 +169,7 @@ class ConfigFileResource(BaseModel):
 
 
 class RuntimeResource(BaseModel):
-    type: Literal["node", "python", "go", "composer"]
+    type: Literal["node", "python", "go", "composer", "php"]
     version: str = Field(..., min_length=1)
     prefix: Path | None = None
 
@@ -177,6 +177,26 @@ class RuntimeResource(BaseModel):
     def absolute_prefix(cls, value: Path | None) -> Path | None:
         if value is not None and (not value.is_absolute() or ".." in PurePosixPath(value).parts):
             raise ValueError("runtime prefixes must be absolute and cannot contain '..'")
+        return value
+
+
+class PhpFpmResource(BaseModel):
+    version: str = Field(..., min_length=1)
+    socket: Path
+    user: str
+    group: str
+    max_children: int = Field(10, gt=0, le=10000)
+
+    @validator("socket")
+    def absolute_socket(cls, value: Path) -> Path:
+        if not value.is_absolute() or ".." in PurePosixPath(value).parts:
+            raise ValueError("PHP-FPM sockets must be absolute and cannot contain '..'")
+        return value
+
+    @validator("user", "group")
+    def safe_identity(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", value):
+            raise ValueError("PHP-FPM user and group must be safe system identities")
         return value
 
 
@@ -343,6 +363,7 @@ class PackageManifest(BaseModel):
     app: AppResource
     sources: dict[str, SourceResource] = Field(default_factory=dict, alias="source")
     runtime: RuntimeResource | None = None
+    fpm: PhpFpmResource | None = None
     packages: PackagesResource = Field(default_factory=PackagesResource)
     ports: PortsResource = Field(default_factory=PortsResource)
     user: UserResource | None = None
@@ -439,6 +460,9 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("config.ensure", f"{app}:config:{name}", config_args, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
     if package.runtime:
         plan.append(_op("runtime.ensure", f"{app}:runtime", package.runtime.dict(), deps=(package_op.resource,), risk="medium", reverse="runtime.remove", summary=f"ensure {package.runtime.type} {package.runtime.version}"))
+    if package.fpm:
+        deps = (f"{app}:runtime",) if package.runtime else (package_op.resource,)
+        plan.append(_op("fpm.ensure", f"{app}:fpm", {**package.fpm.dict(), "app": app}, deps=deps, risk="medium", reverse="fpm.remove", summary=f"configure PHP-FPM pool {app}"))
     if package.database:
         plan.append(_op("database.ensure", f"{app}:database", package.database.dict(), deps=(package_op.resource,), risk="high", reverse="database.remove", summary=f"ensure {package.database.type} database"))
     if package.service:
@@ -479,6 +503,8 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
 
 def validate_package(package: PackageManifest) -> PackageManifest:
     """Apply cross-resource safety checks after Pydantic field validation."""
+    if package.fpm and (not package.runtime or package.runtime.type != "php" or package.runtime.version != package.fpm.version):
+        raise PackageError("fpm requires a matching php runtime resource")
     if package.service:
         executable = package.service.exec
         if not executable.startswith("/") or ".." in PurePosixPath(executable).parts:

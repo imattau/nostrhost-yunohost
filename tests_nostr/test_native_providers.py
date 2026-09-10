@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -94,6 +94,18 @@ def test_runtime_provider_rejects_missing_runtime():
     provider = RuntimeProvider(executable_lookup=lambda _name: None)
     with pytest.raises(ProviderError, match="not installed"):
         provider.apply(provider.plan({"type": "go", "version": "1.24"})[0])
+
+
+def test_fpm_provider_renders_owned_pool_and_reloads_matching_service(tmp_path: Path):
+    calls = []
+    provider = FpmProvider(root=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    desired = {"app": "example", "version": "8.2", "socket": "/run/php/example.sock", "user": "example", "group": "example", "max_children": 12}
+    provider.apply(provider.plan(desired)[0])
+    target = tmp_path / "etc/php/8.2/fpm/pool.d/nostrhost-example.conf"
+    assert target.is_file() and "pm.max_children = 12" in target.read_text()
+    assert calls == [(["systemctl", "reload", "php8.2-fpm"], {"check": True})]
+    provider.apply(provider.remove(desired)[0])
+    assert not target.exists()
 
 
 def test_service_provider_renders_hardened_unit(tmp_path: Path):

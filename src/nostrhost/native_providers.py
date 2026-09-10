@@ -586,7 +586,7 @@ class RuntimeProvider:
     """
 
     resource_type = "runtime"
-    executables = {"node": "node", "python": "python3", "go": "go", "composer": "composer"}
+    executables = {"node": "node", "python": "python3", "go": "go", "composer": "composer", "php": "php"}
 
     def __init__(self, *, command: Callable[..., Any] | None = None, executable_lookup: Callable[[str], str | None] | None = None) -> None:
         self.command = command or subprocess.run
@@ -626,6 +626,66 @@ class RuntimeProvider:
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return []
+
+
+class FpmProvider:
+    """Render an owned PHP-FPM pool and reload only its matching service."""
+
+    resource_type = "fpm"
+
+    def __init__(self, *, root: Path = Path("/"), command: Callable[..., Any] | None = None) -> None:
+        self.root = root
+        self.command = command or subprocess.run
+
+    @staticmethod
+    def _version(value: str) -> str:
+        if not re.fullmatch(r"\d+(?:\.\d+){1,2}", value):
+            raise ProviderError(f"unsafe PHP-FPM version: {value!r}")
+        return value
+
+    def _target(self, desired: dict[str, Any]) -> Path:
+        version = self._version(desired["version"])
+        name = _safe_name(str(desired.get("app", desired.get("name", "nostrhost"))))
+        return _target(self.root, f"/etc/php/{version}/fpm/pool.d/nostrhost-{name}.conf")
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        target = self._target(desired)
+        return {"path": str(target), "exists": target.is_file(), "sha256": hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None, "desired_sha256": hashlib.sha256(self.render(desired).encode()).hexdigest()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("fpm.ensure", desired.get("app", "nostrhost"), desired, risk="medium", reverse="fpm.remove", summary="render PHP-FPM pool")]
+
+    def render(self, args: dict[str, Any]) -> str:
+        return "\n".join([
+            f"[{_safe_name(str(args.get('app', 'nostrhost')))}]",
+            f"user = {args['user']}",
+            f"group = {args['group']}",
+            f"listen = {args['socket']}",
+            f"pm = ondemand",
+            f"pm.max_children = {args.get('max_children', 10)}",
+            "",
+        ])
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        target = self._target(operation.args)
+        version = self._version(operation.args["version"])
+        service = f"php{version}-fpm"
+        if operation.name == "fpm.remove":
+            target.unlink(missing_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_text(self.render(operation.args), encoding="utf-8")
+            os.chmod(temporary, 0o640)
+            temporary.replace(target)
+        self.command(["systemctl", "reload", service], check=True)
+        return {"path": str(target), "service": service, "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("fpm.remove", desired.get("app", "nostrhost"), desired, risk="medium", reverse="fpm.ensure", summary="remove PHP-FPM pool")]
 
 
 class ServiceProvider:
@@ -1249,6 +1309,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "runtime": RuntimeProvider(command=command),
+        "fpm": FpmProvider(root=root, command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
         "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, mongo_client_factory=mongo_client_factory, redis_client_factory=redis_client_factory, credential_reader=credential_reader),
