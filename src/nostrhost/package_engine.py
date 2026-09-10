@@ -121,6 +121,12 @@ class HealthResource(BaseModel):
     timeout: int = Field(10, gt=0, le=300)
 
 
+class TimerResource(BaseModel):
+    on_calendar: str = Field(..., min_length=1)
+    exec: str = Field(..., min_length=1)
+    persistent: bool = True
+
+
 class BackupResource(BaseModel):
     paths: list[Path] = Field(default_factory=list)
     database: bool = False
@@ -155,6 +161,7 @@ class PackageManifest(BaseModel):
     service: ServiceResource | None = None
     web: WebResource | None = None
     health: HealthResource | None = None
+    timer: TimerResource | None = None
     backup: BackupResource | None = None
     settings: SettingResource = Field(default_factory=SettingResource)
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
@@ -246,6 +253,9 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     if package.health:
         deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else (package_op.resource,))
         plan.append(_op("health.http.check", f"{app}:health", package.health.dict(), deps=deps, risk="low", reversible=False, summary="check application health"))
+    if package.timer:
+        deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
+        plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
     if package.settings.values:
         plan.append(_op("settings.ensure", f"{app}:settings", {"values": package.settings.values}, deps=(package_op.resource,), summary="ensure typed application settings"))
     for name, secret in package.secrets.items():

@@ -295,6 +295,85 @@ class ServiceProvider:
         return "\n".join(lines)
 
 
+class TimerProvider:
+    """Render a systemd service/timer pair and activate it with systemctl."""
+
+    def __init__(self, *, unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> None:
+        self.unit_dir = unit_dir
+        self.command = command or subprocess.run
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = _safe_name(desired.get("name", "nostrhost-timer"))
+        return {"timer": str(self.unit_dir / f"{name}.timer"), "exists": (self.unit_dir / f"{name}.timer").is_file()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("timer.ensure", desired.get("name", "nostrhost-timer"), desired, risk="medium", reverse="timer.remove", summary="render and enable systemd timer")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        name = _safe_name(args.get("name") or operation.resource.split(":")[-1])
+        self.unit_dir.mkdir(parents=True, exist_ok=True)
+        (self.unit_dir / f"{name}.service").write_text(f"[Unit]\nDescription=NostrHost timer action {name}\n\n[Service]\nType=oneshot\nExecStart={args['exec']}\n", encoding="utf-8")
+        timer = self.unit_dir / f"{name}.timer"
+        timer.write_text(f"[Unit]\nDescription=NostrHost timer {name}\n\n[Timer]\nOnCalendar={args['on_calendar']}\nPersistent={'yes' if args.get('persistent', True) else 'no'}\nUnit={name}.service\n\n[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+        self.command(["systemctl", "enable", "--now", f"{name}.timer"], check=True)
+        return {"timer": str(timer), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        name = desired.get("name", "nostrhost-timer")
+        return [Operation("timer.remove", name, {"name": name}, risk="medium", reverse="timer.ensure", summary="remove systemd timer")]
+
+
+class HealthProvider:
+    resource_type = "health"
+
+    def __init__(self, *, client: Any = None) -> None:
+        self.client = client
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        if self.client is None:
+            raise ProviderError("an httpx client is required for native health checks")
+        response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+        return {"status_code": response.status_code, "healthy": response.is_success}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("health.http.check", desired["path"], desired, reversible=False, summary="check HTTP health endpoint")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        result = self.inspect(operation.args)
+        if not result["healthy"]:
+            raise ProviderError(f"health check returned HTTP {result['status_code']}")
+        return result
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return []
+
+
+class JsonStateProvider:
+    """Persist typed settings or backup declarations as semantic state."""
+
+    def __init__(self, *, state_dir: Path, resource_type: str) -> None:
+        self.state_dir = state_dir
+        self.resource_type = resource_type
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        name = _safe_name(operation.resource.replace(":", "-"))
+        target = self.state_dir / f"{name}.json"
+        temporary = target.with_suffix(".tmp")
+        import json
+        temporary.write_text(json.dumps(operation.args, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o640)
+        temporary.replace(target)
+        return {"state": str(target), "changed": True}
+
+
 class AptProvider:
     resource_type = "package.apt"
 
@@ -421,6 +500,8 @@ class NativeOperationExecutor:
         provider = self.providers.get(operation_type)
         if provider is None and operation.name.startswith("package.apt."):
             provider = self.providers.get("package.apt")
+        if provider is None and operation.name.startswith("health.http."):
+            provider = self.providers.get("health")
         if provider is None and operation.name == "package.ensure":
             provider = self.providers.get("package")
         return provider
@@ -435,7 +516,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -446,6 +527,10 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "database": PostgresProvider(connection_factory=postgres_connection_factory),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
+        "timer": TimerProvider(unit_dir=unit_dir, command=command),
+        "health": HealthProvider(client=health_client),
+        "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
+        "backup": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups"), resource_type="backup"),
     }
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)

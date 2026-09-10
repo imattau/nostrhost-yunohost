@@ -74,7 +74,7 @@ def test_native_executor_dispatches_only_registered_provider(tmp_path: Path):
     operation = DirectoryProvider(root=tmp_path).plan({"path": "/opt/example", "mode": 0o750})[0]
     assert executor.execute(operation)["changed"] is True
     with pytest.raises(ProviderError, match="no native provider"):
-        executor.execute(operation.__class__("timer.ensure", "example:timer", {}))
+        executor.execute(operation.__class__("unknown.ensure", "example:unknown", {}))
 
 
 def test_apt_provider_uses_python_apt_shape():
