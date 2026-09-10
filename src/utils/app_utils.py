@@ -670,8 +670,10 @@ def _extract_app(src: str) -> tuple[AppManifest, str]:
         url = app_info["git"]["url"]
         branch = app_info["git"]["branch"]
         revision = str(app_info["git"]["revision"])
+        package_path = app_info["git"].get("path")
         return _extract_app_from_gitrepo(
-            url, branch=branch, revision=revision, app_info=app_info
+            url, branch=branch, revision=revision, app_info=app_info,
+            package_path=package_path,
         )
     # App is a git repo url
     elif _is_app_repo_url(src):
@@ -845,7 +847,8 @@ def _git_clone_light(
 
 
 def _extract_app_from_gitrepo(
-    url: str, branch: str | None = None, revision: str = "HEAD", app_info: dict = {}
+    url: str, branch: str | None = None, revision: str = "HEAD", app_info: dict = {},
+    package_path: str | None = None,
 ) -> tuple[AppManifest, str]:
     extracted_app_folder = _make_tmp_workdir_for_app()
 
@@ -857,6 +860,13 @@ def _extract_app_from_gitrepo(
     else:
         logger.debug(m18n.n("done"))
 
+    if package_path:
+        if os.path.isabs(package_path) or ".." in Path(package_path).parts:
+            raise YunohostValidationError("app_extraction_failed")
+        package_folder = os.path.join(extracted_app_folder, package_path)
+        if not os.path.isdir(package_folder):
+            raise YunohostValidationError("app_extraction_failed")
+        extracted_app_folder = package_folder
     manifest = _get_manifest_of_app(extracted_app_folder)
 
     # Store remote repository info into the returned manifest
@@ -865,6 +875,7 @@ def _extract_app_from_gitrepo(
         "url": url,
         "branch": branch,
         "revision": actual_revision,
+        "path": package_path,
     }
     if revision != "HEAD":
         manifest["lastUpdate"] = app_info.get("lastUpdate")

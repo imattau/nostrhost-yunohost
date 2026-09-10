@@ -30,6 +30,8 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
         raw = json.loads(state_path.read_text())
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
+    if isinstance(raw, dict):
+        raw = raw.get("entries", [])
     if not isinstance(raw, list):
         return {}
 
@@ -56,7 +58,12 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
             },
             "level": -1,
             "state": "working",
-            "git": {"url": repository, "revision": commit},
+            "git": {
+                "url": repository,
+                "branch": "main",
+                "revision": commit,
+                **({"path": declaration["PackagePath"]} if declaration.get("PackagePath") else {}),
+            },
             "repository": "nostrhost",
             "source": "nostr",
         }
