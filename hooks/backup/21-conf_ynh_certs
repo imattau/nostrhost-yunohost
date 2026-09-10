@@ -30,3 +30,9 @@ backup_dir="${1}/conf/ynh/certs"
 
 # Backup certificates
 ynh_backup "/etc/yunohost/certs" "$backup_dir"
+
+# Backup Caddy's storage (ACME accounts, cert store, autosaved routes) so a
+# restore can reuse live certs instead of re-issuing.
+if [ -d /var/lib/caddy ]; then
+    ynh_backup "/var/lib/caddy" "${backup_dir}-caddy"
+fi

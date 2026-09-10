@@ -26,3 +26,9 @@ backup_dir="$1/conf/ynh/certs"
 mkdir -p /etc/yunohost/certs/
 
 cp -a "$backup_dir/." /etc/yunohost/certs/
+
+# Restore Caddy's storage alongside the exported certs.
+if [ -d "${backup_dir}-caddy" ]; then
+    mkdir -p /var/lib/caddy
+    cp -a "${backup_dir}-caddy/." /var/lib/caddy/
+fi
