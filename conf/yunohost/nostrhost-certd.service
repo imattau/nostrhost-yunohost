@@ -1,0 +1,12 @@
+[Unit]
+Description=nostrhost cert export (Caddy -> /etc/yunohost/certs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m yunohost.nostr_certd --once
+Environment=NOSTR_CADDY_STORAGE=/var/lib/caddy
+
+[Install]
+WantedBy=multi-user.target
