@@ -42,6 +42,22 @@ def test_source_provider_rejects_hash_mismatch(tmp_path: Path):
         provider.apply(operation)
 
 
+def test_source_provider_rejects_archive_links(tmp_path: Path):
+    archive = tmp_path / "unsafe.tar"
+    import tarfile
+
+    with tarfile.open(archive, "w") as tar:
+        link = tarfile.TarInfo("link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tar.addfile(link)
+
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(archive.read_bytes()))
+    operation = provider.plan({"url": "https://example.test/unsafe.tar", "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "destination": "/var/lib/example", "extract": True})[0]
+    with pytest.raises(ProviderError, match="link or special"):
+        provider.apply(operation)
+
+
 def test_service_provider_renders_hardened_unit(tmp_path: Path):
     provider = ServiceProvider(unit_dir=tmp_path)
     operation = provider.plan({"name": "example", "exec": "/opt/example/server", "user": "example", "security": {}})[0]

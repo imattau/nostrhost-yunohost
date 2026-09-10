@@ -14,6 +14,7 @@ import pwd
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -340,19 +341,27 @@ class SourceProvider:
 
     @staticmethod
     def _extract(archive: Path, destination: Path) -> None:
+        base = destination.resolve()
+
+        def safe_target(name: str) -> Path:
+            target = (destination / name).resolve()
+            if target != base and base not in target.parents:
+                raise ProviderError("archive contains a path traversal entry")
+            return target
+
         if tarfile.is_tarfile(archive):
             with tarfile.open(archive) as tar:
                 for member in tar.getmembers():
-                    target = (destination / member.name).resolve()
-                    if not str(target).startswith(str(destination.resolve()) + os.sep):
-                        raise ProviderError("archive contains a path traversal entry")
+                    safe_target(member.name)
+                    if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                        raise ProviderError("archive contains a link or special file")
                 tar.extractall(destination)
         elif zipfile.is_zipfile(archive):
             with zipfile.ZipFile(archive) as archive_file:
                 for member in archive_file.infolist():
-                    target = (destination / member.filename).resolve()
-                    if not str(target).startswith(str(destination.resolve()) + os.sep):
-                        raise ProviderError("archive contains a path traversal entry")
+                    safe_target(member.filename)
+                    if stat.S_IFMT(member.external_attr >> 16) != stat.S_IFREG and not member.is_dir():
+                        raise ProviderError("archive contains a link or special file")
                 archive_file.extractall(destination)
         else:
             raise ProviderError("source is not a supported tar or zip archive")
