@@ -606,8 +606,14 @@ class HealthProvider:
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         if self.client is None:
             raise ProviderError("an httpx client is required for native health checks")
-        response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
-        return {"status_code": response.status_code, "healthy": response.is_success}
+        attempts = desired.get("retries", 0) + 1
+        last_status = None
+        for attempt in range(attempts):
+            response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+            last_status = response.status_code
+            if response.is_success:
+                return {"status_code": response.status_code, "healthy": True, "attempts": attempt + 1}
+        return {"status_code": last_status, "healthy": False, "attempts": attempts}
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("health.http.check", desired["path"], desired, reversible=False, summary="check HTTP health endpoint")]

@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -319,6 +319,19 @@ def test_backup_provider_rejects_relative_paths(tmp_path: Path):
     operation = provider.plan({"name": "example", "paths": ["relative/data"]})[0]
     with pytest.raises(ProviderError, match="backup paths"):
         provider.apply(operation)
+
+
+def test_health_provider_retries_with_bounded_attempts():
+    class Response:
+        status_code = 503
+        is_success = False
+    class Client:
+        def __init__(self): self.calls = 0
+        def get(self, path, *, timeout): self.calls += 1; return Response()
+    client = Client()
+    result = HealthProvider(client=client).inspect({"path": "/health", "timeout": 2, "retries": 2})
+    assert result == {"status_code": 503, "healthy": False, "attempts": 3}
+    assert client.calls == 3
 
 
 def test_port_provider_checks_bind_availability():

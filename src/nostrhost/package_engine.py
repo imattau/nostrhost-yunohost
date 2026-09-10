@@ -179,6 +179,7 @@ class HealthResource(BaseModel):
     type: Literal["http"] = "http"
     path: str = "/health"
     timeout: int = Field(10, gt=0, le=300)
+    retries: int = Field(0, ge=0, le=5)
 
 
 class TimerResource(BaseModel):
