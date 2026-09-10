@@ -347,38 +347,76 @@ def test_redis_provider_validates_logical_database_without_mutating_keys():
     assert client.pings == 1
 
 
-def test_caddy_provider_validates_and_loads_json():
-    class Response:
-        def raise_for_status(self): pass
+def test_caddy_provider_ensures_route_via_admin_api():
     class Client:
-        def post(self, path, *, json): self.call = (path, json); return Response()
+        def __init__(self):
+            self.ensured = []
+        def get_config(self):
+            return {"apps": {"http": {}}}
+        def ensure_route(self, route):
+            self.ensured.append(route)
+            return route["@id"]
+        def delete_route(self, route_id):
+            raise AssertionError("delete not expected")
     client = Client()
-    provider = CaddyProvider(client=client, config_builder=lambda args: {"apps": {"http": {"routes": [args]}}})
-    result = provider.apply(provider.plan({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0])
-    assert result["loaded"] and client.call[0] == "/load"
+    provider = CaddyProvider(client=client, config_builder=lambda args: {"@id": "nostrhost-web:" + args["app"], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": args["upstream"]}]}]})
+    result = provider.apply(provider.plan({"domain": "example.test", "upstream": "127.0.0.1:8090", "app": "test"})[0])
+    assert result["ensured"] and result["route_id"] == "nostrhost-web:test"
+    assert client.ensured[0]["@id"] == "nostrhost-web:test"
 
 
-def test_caddy_provider_requires_explicit_route_removal_builder():
-    class Response:
-        def raise_for_status(self): pass
+def test_caddy_provider_removes_route_by_id():
     class Client:
-        def post(self, path, *, json): self.call = (path, json); return Response()
-    provider = CaddyProvider(client=Client(), config_builder=lambda args: {"ensure": args})
-    operation = provider.remove({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0]
-    with pytest.raises(ProviderError, match="removal builder"):
-        provider.apply(operation)
-
-
-def test_caddy_provider_uses_native_route_removal_builder():
-    class Response:
-        def raise_for_status(self): pass
-    class Client:
-        def post(self, path, *, json): self.call = (path, json); return Response()
+        def __init__(self):
+            self.deleted = []
+        def get_config(self):
+            return {"apps": {"http": {}}}
+        def ensure_route(self, route):
+            return route["@id"]
+        def delete_route(self, route_id):
+            self.deleted.append(route_id)
     client = Client()
-    provider = CaddyProvider(client=client, config_builder=lambda args: {"ensure": args}, remove_config_builder=lambda args: {"remove": args["domain"]})
-    operation = provider.remove({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0]
-    assert provider.apply(operation)["loaded"]
-    assert client.call[1] == {"remove": "example.test"}
+    provider = CaddyProvider(client=client, config_builder=lambda args: {"@id": "nostrhost-web:" + args["app"], "handle": []})
+    operation = provider.remove({"domain": "example.test", "upstream": "127.0.0.1:8090", "app": "test"})[0]
+    assert provider.apply(operation)["removed"]
+    assert client.deleted == ["nostrhost-web:test"]
+
+
+def test_build_web_route_reverse_proxy():
+    from nostrhost.caddy_admin import build_web_route
+
+    route = build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "upstream": "127.0.0.1:8123", "auth": "none"})
+    assert route["@id"] == "nostrhost-web:demo"
+    assert route["match"] == [{"host": ["example.test"]}, {"path": ["/demo/*"]}]
+    assert route["handle"] == [
+        {"handler": "rewrite", "strip_path_prefix": "/demo"},
+        {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8123"}]},
+    ]
+
+
+def test_build_web_route_forward_auth_and_file_server():
+    from nostrhost.caddy_admin import build_web_route
+
+    route = build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "file_root": "/var/www/demo", "auth": "nostrhost"})
+    handlers = route["handle"]
+    auth = handlers[0]
+    assert auth["handler"] == "reverse_proxy"
+    assert auth["rewrite"]["uri"] == "/nostr/auth-request"
+    # 2xx handle_response: delete client copies, then re-set from authd
+    headers_routes = [h for h in auth["handle_response"][0]["routes"] if h["handle"][0]["handler"] == "headers"]
+    request_ops = [h["request"] for entry in headers_routes for h in entry["handle"] if "request" in h]
+    assert {"delete": ["X-Remote-User"]} in request_ops
+    # forward_auth runs first (original URI for permission matching), then the
+    # prefix strip, then the static backend.
+    assert handlers[1] == {"handler": "rewrite", "strip_path_prefix": "/demo"}
+    assert handlers[2] == {"handler": "file_server", "root": "/var/www/demo"}
+
+
+def test_build_web_route_rejects_invalid_upstream():
+    from nostrhost.caddy_admin import CaddyError, build_web_route
+
+    with pytest.raises(CaddyError, match="host:port"):
+        build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "upstream": "not-a-port", "auth": "none"})
 
 
 def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_path: Path):

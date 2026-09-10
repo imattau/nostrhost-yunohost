@@ -1453,35 +1453,32 @@ class DatabaseProvider:
 class CaddyProvider:
     resource_type = "web.route"
 
-    def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]], remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> None:
+    def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
         self.client = client
         self.config_builder = config_builder
-        self.remove_config_builder = remove_config_builder
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
-        response = self.client.get("/config")
-        response.raise_for_status()
-        return {"config": response.json()}
+        return {"config": self.client.get_config()}
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
-        return [Operation("web.route.ensure", desired.get("domain") or desired["upstream"], desired, risk="medium", reverse="web.route.remove", summary="validate and load Caddy JSON configuration")]
+        label = desired.get("domain") or desired.get("app") or desired.get("upstream")
+        return [Operation("web.route.ensure", label or "web", desired, risk="medium", reverse="web.route.remove", summary="reconcile Caddy web route")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         if operation.name == "web.route.remove":
-            if self.remove_config_builder is None:
-                raise ProviderError("a Caddy route removal builder is required for native removal")
-            config = self.remove_config_builder(operation.args)
-        else:
-            config = self.config_builder(operation.args)
-        response = self.client.post("/load", json=config)
-        response.raise_for_status()
-        return {"loaded": True, "domain": operation.args.get("domain")}
+            route_id = self.config_builder(operation.args).get("@id")
+            self.client.delete_route(route_id)
+            return {"removed": True, "route_id": route_id}
+        route = self.config_builder(operation.args)
+        route_id = self.client.ensure_route(route)
+        return {"ensured": True, "route_id": route_id}
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
         return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
-        return [Operation("web.route.remove", desired.get("domain") or desired["upstream"], desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
+        label = desired.get("domain") or desired.get("app") or desired.get("upstream")
+        return [Operation("web.route.remove", label or "web", desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
 
 
 class NativeOperationExecutor:
@@ -1535,6 +1532,12 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
     }
+    if caddy_client is None and root == Path("/"):
+        # Real host: talk to the local Caddy admin API with @id-tagged routes.
+        from .caddy_admin import CaddyAdminClient, build_web_route
+
+        caddy_client = CaddyAdminClient()
+        caddy_config_builder = build_web_route
     if caddy_client is not None and caddy_config_builder is not None:
-        providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder, remove_config_builder=caddy_remove_config_builder)
+        providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
     return providers

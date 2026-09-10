@@ -302,9 +302,23 @@ class ServiceResource(BaseModel):
 
 class WebResource(BaseModel):
     domain: str | None = None
-    upstream: str = Field(..., min_length=1)
+    path: str = "/"
+    upstream: str | None = Field(default=None, min_length=1)
+    file_root: str | None = None
     auth: Literal["none", "nostrhost"] = "none"
     https: Literal["automatic", "required", "disabled"] = "automatic"
+
+    @validator("path")
+    def path_starts_with_slash(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("web.path must start with '/'")
+        return value
+
+    @validator("file_root")
+    def absolute_file_root(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or ".." in PurePosixPath(value).parts):
+            raise ValueError("web.file_root must be an absolute path without '..'")
+        return value
 
 
 class HealthResource(BaseModel):
@@ -589,7 +603,8 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("service.start", f"{app}:service:start", {"name": package.service.name or app}, deps=(f"{app}:service:enable",), risk="medium", reverse="service.stop", summary="start service"))
     if package.web:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
-        plan.append(_op("web.route.ensure", f"{app}:web", package.web.dict(), deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
+        web_args = {**package.web.dict(), "app": app}
+        plan.append(_op("web.route.ensure", f"{app}:web", web_args, deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
     for name, permission in package.permissions.items():
         deps = (f"{app}:web",) if package.web else (package_op.resource,)
         permission_args = {**permission.dict(), "app": app, "name": name}
@@ -655,15 +670,18 @@ def validate_package(package: PackageManifest) -> PackageManifest:
         if package.service.working_directory and not package.service.working_directory.is_absolute():
             raise PackageError("service.working_directory must be absolute")
     if package.web:
-        host, separator, port = package.web.upstream.rpartition(":")
-        if not separator or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
-            raise PackageError("web.upstream must be host:port with a valid port")
-        if host not in {"localhost", "127.0.0.1", "::1"}:
-            try:
-                socket.inet_aton(host)
-            except OSError:
-                if not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
-                    raise PackageError("web.upstream host is invalid")
+        if not package.web.upstream and not package.web.file_root:
+            raise PackageError("web resource needs upstream host:port or file_root")
+        if package.web.upstream:
+            host, separator, port = package.web.upstream.rpartition(":")
+            if not separator or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise PackageError("web.upstream must be host:port with a valid port")
+            if host not in {"localhost", "127.0.0.1", "::1"}:
+                try:
+                    socket.inet_aton(host)
+                except OSError:
+                    if not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
+                        raise PackageError("web.upstream host is invalid")
     if package.health and not package.health.path.startswith("/"):
         raise PackageError("health.path must be absolute")
     if package.backup:
