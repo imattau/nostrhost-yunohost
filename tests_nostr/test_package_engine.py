@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.native_providers import NativeOperationExecutor, native_providers
-from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan
+from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan, validate_package
 
 
 def example() -> dict:
@@ -84,6 +84,23 @@ def test_load_package_reports_parse_errors(tmp_path: Path):
     path.write_text("[app]\nid = 'Bad'\nversion = '1'\n")
     with pytest.raises(PackageError):
         load_package(path)
+
+
+def test_semantic_validation_rejects_unsafe_service_and_upstream():
+    invalid = example()
+    invalid["service"]["exec"] = "relative/server"
+    with pytest.raises(PackageError, match="service.exec"):
+        validate_package(PackageManifest.parse_obj(invalid))
+    invalid = example()
+    invalid["web"]["upstream"] = "not a backend"
+    with pytest.raises(PackageError, match="web.upstream"):
+        validate_package(PackageManifest.parse_obj(invalid))
+
+
+def test_semantic_validation_requires_explicit_database_backup_choice():
+    invalid = example() | {"database": {"type": "postgresql"}, "backup": {"paths": ["/var/lib/example"], "database": False}}
+    with pytest.raises(PackageError, match="backup.database"):
+        validate_package(PackageManifest.parse_obj(invalid))
 
 
 def test_all_declared_domains_are_plannable():

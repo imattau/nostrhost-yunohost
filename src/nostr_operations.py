@@ -92,9 +92,9 @@ class ToolSpec:
 def _safe_package_plan(package: dict[str, Any] | None = None, **args: Any) -> list[dict[str, Any]]:
     if args or not isinstance(package, dict):
         raise OperationError("package.plan requires exactly one package object")
-    from nostrhost.package_engine import PackageManifest, plan_package
+    from nostrhost.package_engine import PackageManifest, plan_package, validate_package
 
-    return [operation.json_dict() for operation in plan_package(PackageManifest.parse_obj(package))]
+    return [operation.json_dict() for operation in plan_package(validate_package(PackageManifest.parse_obj(package)))]
 
 
 def _safe_package_reconcile(plan: list[dict[str, Any]] | None = None, **args: Any) -> dict[str, Any]:

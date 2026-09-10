@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import socket
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -336,6 +337,36 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     return plan
 
 
+def validate_package(package: PackageManifest) -> PackageManifest:
+    """Apply cross-resource safety checks after Pydantic field validation."""
+    if package.service:
+        executable = package.service.exec
+        if not executable.startswith("/") or ".." in PurePosixPath(executable).parts:
+            raise PackageError("service.exec must be an absolute path without '..'")
+        if package.service.working_directory and not package.service.working_directory.is_absolute():
+            raise PackageError("service.working_directory must be absolute")
+    if package.web:
+        host, separator, port = package.web.upstream.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise PackageError("web.upstream must be host:port with a valid port")
+        if host not in {"localhost", "127.0.0.1", "::1"}:
+            try:
+                socket.inet_aton(host)
+            except OSError:
+                if not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
+                    raise PackageError("web.upstream host is invalid")
+    if package.health and not package.health.path.startswith("/"):
+        raise PackageError("health.path must be absolute")
+    if package.backup:
+        if any(not path.is_absolute() or ".." in PurePosixPath(path).parts for path in package.backup.paths):
+            raise PackageError("backup paths must be absolute and cannot contain '..'")
+        if package.database and package.backup.database is False:
+            raise PackageError("database resources must opt in or out explicitly in backup.database")
+    if package.service and package.user and package.service.user and package.service.user != (package.user.name or package.app.id):
+        raise PackageError("service.user must match the declared package user")
+    return package
+
+
 def operation_from_dict(value: dict[str, Any]) -> Operation:
     """Restore an executor-neutral operation received over the control plane."""
     required = {"name", "resource", "args"}
@@ -455,7 +486,7 @@ def load_package(path: Path) -> PackageManifest:
     try:
         with path.open("rb") as stream:
             raw = tomllib.load(stream)
-        return PackageManifest.parse_obj(raw)
+        return validate_package(PackageManifest.parse_obj(raw))
     except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
         raise PackageError(f"invalid package {path}: {exc}") from exc
 
