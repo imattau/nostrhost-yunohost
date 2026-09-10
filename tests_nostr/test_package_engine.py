@@ -127,6 +127,18 @@ def test_migration_maps_all_native_declarative_domains():
     assert result["config"]["main"]["content"] == "ok\n"
 
 
+def test_migration_preserves_source_variants_and_user_groups():
+    result = migrate_manifest({
+        "id": "converted",
+        "resources": {
+            "sources": {"main": {"variants": {"amd64": {"url": "https://example.test/a", "sha256": "a" * 64}}}},
+            "system_user": {"username": "converted", "groups": ["video"]},
+        },
+    })
+    assert result["source"]["main"]["variants"]["amd64"]["sha256"] == "a" * 64
+    assert result["user"]["groups"] == ["video"]
+
+
 def test_migration_rejects_imperative_scripts(tmp_path: Path):
     from nostrhost.package_engine import migrate_manifest_file
 
@@ -135,6 +147,17 @@ def test_migration_rejects_imperative_scripts(tmp_path: Path):
     (app / "scripts" / "install").write_text("#!/bin/bash\n")
     (app / "manifest.toml").write_text("id = 'converted'\nversion = '1'\n")
     with pytest.raises(PackageError, match="cannot migrate imperative package scripts"):
+        migrate_manifest_file(app / "manifest.toml", tmp_path / "package.toml")
+
+
+def test_migration_rejects_config_lifecycle_script(tmp_path: Path):
+    from nostrhost.package_engine import migrate_manifest_file
+
+    app = tmp_path / "app"
+    (app / "scripts").mkdir(parents=True)
+    (app / "scripts" / "config").write_text("#!/bin/bash\n")
+    (app / "manifest.toml").write_text("id = 'converted'\nversion = '1'\n")
+    with pytest.raises(PackageError, match="config"):
         migrate_manifest_file(app / "manifest.toml", tmp_path / "package.toml")
 
 

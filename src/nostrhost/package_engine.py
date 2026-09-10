@@ -789,9 +789,22 @@ def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
     if resources.get("apt", {}).get("packages"):
         out["packages"] = {"apt": resources["apt"]["packages"]}
     if resources.get("sources"):
-        out["source"] = {key: {k: v for k, v in value.items() if k in {"url", "sha256", "extract", "destination", "format", "rename", "strip_components", "platform"}} for key, value in resources["sources"].items()}
+        source_fields = {"url", "sha256", "extract", "destination", "format", "rename", "strip_components", "platform"}
+        out["source"] = {}
+        for key, value in resources["sources"].items():
+            entry = {field: value[field] for field in source_fields if field in value}
+            if value.get("variants"):
+                entry["variants"] = {
+                    architecture: {field: variant[field] for field in ("url", "sha256") if field in variant}
+                    for architecture, variant in value["variants"].items()
+                }
+            out["source"][key] = entry
     if resources.get("system_user"):
-        out["user"] = {"name": resources["system_user"].get("username", app_id), "system": True}
+        out["user"] = {
+            "name": resources["system_user"].get("username", app_id),
+            "system": True,
+            "groups": resources["system_user"].get("groups", []),
+        }
     if resources.get("install_dir"):
         out.setdefault("directories", {})["install"] = {"path": resources["install_dir"].get("path", f"/var/www/{app_id}")}
     if resources.get("data_dir"):
@@ -827,7 +840,11 @@ def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
 
 def migrate_manifest_file(source: Path, destination: Path) -> None:
     scripts = source.parent / "scripts"
-    unsupported = [name for name in ("install", "upgrade", "remove", "backup", "restore") if (scripts / name).is_file()]
+    unsupported = [
+        name for name in
+        ("install", "upgrade", "remove", "backup", "restore", "change_url", "config", "check_process", "diagnosis")
+        if (scripts / name).is_file()
+    ]
     if unsupported:
         raise PackageError(
             "cannot migrate imperative package scripts ("
