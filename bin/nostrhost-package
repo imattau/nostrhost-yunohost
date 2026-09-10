@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Validate, plan, and migrate native NostrHost packages."""
+
+import argparse
+import json
+from pathlib import Path
+
+try:
+    from yunohost.nostrhost.package_engine import load_package, migrate_manifest_file, plan_package, schema
+except ModuleNotFoundError:  # source checkout; Debian installs this below yunohost/
+    from nostrhost.package_engine import load_package, migrate_manifest_file, plan_package, schema
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="nostrhost-package")
+    sub = parser.add_subparsers(dest="command", required=True)
+    plan_parser = sub.add_parser("plan")
+    plan_parser.add_argument("package", type=Path)
+    plan_parser.add_argument("--json", action="store_true", dest="as_json")
+    schema_parser = sub.add_parser("schema")
+    schema_parser.add_argument("--json", action="store_true", dest="as_json")
+    migrate = sub.add_parser("migrate")
+    migrate.add_argument("manifest", type=Path)
+    migrate.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.command == "schema":
+        print(json.dumps(schema(), indent=2, sort_keys=True))
+    elif args.command == "migrate":
+        migrate_manifest_file(args.manifest, args.output)
+    else:
+        operations = [operation.json_dict() for operation in plan_package(load_package(args.package))]
+        if args.as_json:
+            print(json.dumps(operations, indent=2, sort_keys=True, default=str))
+        else:
+            for index, operation in enumerate(operations, 1):
+                deps = f" (after {', '.join(operation['depends_on'])})" if operation["depends_on"] else ""
+                print(f"{index:02d} {operation['name']} {operation['resource']}: {operation['summary']}{deps}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

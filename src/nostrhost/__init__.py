@@ -1,0 +1,1 @@
+"""NostrHost-specific YunoHost extensions."""
