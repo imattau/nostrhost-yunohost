@@ -104,7 +104,12 @@ class ConfigFileProvider:
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         target = _target(self.root, desired["destination"])
-        return {"destination": str(target), "exists": target.is_file(), "mode": target.stat().st_mode & 0o7777 if target.exists() else None}
+        result = {"destination": str(target), "exists": target.is_file(), "mode": target.stat().st_mode & 0o7777 if target.exists() else None}
+        if target.is_file():
+            result["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+        if desired.get("content") is not None:
+            result["desired_sha256"] = hashlib.sha256(desired["content"].encode()).hexdigest()
+        return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("config.ensure", desired["destination"], desired, reverse="config.remove", summary=f"render config {desired['destination']}")]
@@ -447,7 +452,12 @@ class ServiceProvider:
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         name = _safe_name(desired.get("name") or "nostrhost-app")
-        return {"unit": str(self.unit_dir / f"{name}.service"), "exists": (self.unit_dir / f"{name}.service").is_file()}
+        unit = self.unit_dir / f"{name}.service"
+        result = {"unit": str(unit), "exists": unit.is_file()}
+        if unit.is_file():
+            result["sha256"] = hashlib.sha256(unit.read_bytes()).hexdigest()
+            result["desired_sha256"] = hashlib.sha256(self.render_unit(name, desired).encode()).hexdigest()
+        return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("service.ensure", desired.get("name", "nostrhost-app"), desired, risk="medium", reverse="service.remove", summary="render hardened systemd service")]

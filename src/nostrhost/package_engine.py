@@ -8,6 +8,7 @@ never mutates the host.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import tomllib
 from dataclasses import asdict, dataclass
@@ -353,6 +354,15 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         return set(operation.args.get("packages", [])) <= set(actual.get("installed", []))
     if operation.name == "runtime.ensure":
         return actual.get("matches") is True
+    if operation.name == "config.ensure":
+        return (
+            actual.get("exists") is True
+            and actual.get("mode") == operation.args.get("mode")
+            and operation.args.get("content") is not None
+            and actual.get("sha256") == hashlib.sha256(operation.args["content"].encode()).hexdigest()
+        )
+    if operation.name == "service.ensure":
+        return actual.get("exists") is True and actual.get("sha256") == actual.get("desired_sha256")
     if operation.name == "database.ensure":
         return actual.get("exists") is True
     if operation.name == "secret.ensure":

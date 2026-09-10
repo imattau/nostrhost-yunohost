@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.native_providers import NativeOperationExecutor, native_providers
-from nostrhost.package_engine import Operation, PackageError, PackageManifest, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan
+from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan
 
 
 def example() -> dict:
@@ -116,3 +116,17 @@ def test_reconciliation_skips_directory_when_observed_state_matches(tmp_path: Pa
     assert [operation.name for operation in pending] == ["package.ensure"]
     assert skipped == ["example:directory:data"]
     assert len(apply_reconciled_plan(plan, executor)) == 1
+
+
+def test_reconciliation_detects_config_and_service_drift(tmp_path: Path):
+    from nostrhost.native_providers import ConfigFileProvider, ServiceProvider
+
+    config = ConfigFileProvider(root=tmp_path)
+    config.apply(config.plan({"destination": "/etc/example.conf", "content": "old\n", "mode": 0o640})[0])
+    desired_config = Operation("config.ensure", "example:config:main", {"destination": "/etc/example.conf", "content": "new\n", "mode": 0o640})
+    assert not _operation_satisfied(desired_config, config.inspect(desired_config.args))
+
+    service = ServiceProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
+    service.apply(service.plan({"name": "example", "exec": "/bin/true"})[0])
+    desired_service = {"name": "example", "exec": "/bin/false"}
+    assert not _operation_satisfied(Operation("service.ensure", "example:service", desired_service), service.inspect(desired_service))
