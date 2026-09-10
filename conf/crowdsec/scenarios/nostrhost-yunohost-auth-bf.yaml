@@ -1,0 +1,39 @@
+# Port of the retired fail2ban [yunohost] jail to CrowdSec, rewritten for
+# Caddy's access-log format (nginx is retired; see docs/CROWDSEC-MIGRATION.md
+# P1).
+#
+# The retired fail2ban filter matched a single line:
+#   ^<HOST> -.*"POST /yunohost/api/login HTTP/\d.\d" 401
+#
+# crowdsecurity/caddy-logs (s01) + crowdsecurity/http-logs (s02) turn a Caddy
+# access entry into evt.Meta.http_path / http_status / http_verb, so the
+# filter below reproduces the fail2ban match directly without a custom
+# parser. Keying on the exact login path keeps this scenario narrow, matching
+# fail2ban's jail, and avoids the broad LePresidente/http-generic-401-bf rule
+# (which matches ANY POST 401).
+#
+# fail2ban semantics ported:
+#   maxretry = 10   (jail inherits [DEFAULT])  -> capacity
+#   findtime = 10m  ([DEFAULT])                -> leakspeed = 600s / 10 = 60s
+#   bantime  = 10m  ([DEFAULT])                -> decision duration set by the
+#                                                bouncer (P4), like all stock
+#                                                crowdsecurity scenarios
+#
+# groupby source_ip keeps the bucket per attacker, matching fail2ban's
+# per-IP counting.
+type: leaky
+name: nostrhost/yunohost-auth-bf
+description: "Detect brute force against the YunoHost web API login (POST /yunohost/api/login)"
+filter: |
+  evt.Meta.log_type == 'http_access-log'
+  && evt.Meta.http_verb == 'POST'
+  && evt.Meta.http_path == '/yunohost/api/login'
+  && evt.Meta.http_status == '401'
+groupby: evt.Meta.source_ip
+capacity: 10
+leakspeed: "60s"
+blackhole: 1m
+labels:
+  service: http
+  type: bf
+  remediation: true
