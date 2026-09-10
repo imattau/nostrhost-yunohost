@@ -80,6 +80,27 @@ def test_migration_maps_declarative_v2_resources():
     assert "hooks" not in result
 
 
+def test_migration_maps_all_native_declarative_domains():
+    result = migrate_manifest({
+        "id": "converted",
+        "version": "2.0",
+        "resources": {
+            "ports": {"main": {"port": 8080}},
+            "permissions": {"main": {"url": "/", "allowed": ["all_users"], "show_tile": True}},
+            "database": {"type": "postgresql", "name": "converted"},
+            "nodejs": {"version": "24"},
+            "config": {"main": {"destination": "/etc/converted.conf", "content": "ok\n"}},
+            "settings": {"values": {"mode": "safe"}},
+            "backup": {"paths": ["/var/lib/converted"], "database": True},
+        },
+    })
+    assert result["ports"] == {"named": {"main": 8080}}
+    assert result["permissions"]["main"]["allowed"] == ["all_users"]
+    assert result["database"]["type"] == "postgresql"
+    assert result["runtime"] == {"type": "node", "version": "24", "prefix": None}
+    assert result["config"]["main"]["content"] == "ok\n"
+
+
 def test_migration_rejects_imperative_scripts(tmp_path: Path):
     from nostrhost.package_engine import migrate_manifest_file
 

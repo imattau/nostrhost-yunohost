@@ -701,13 +701,39 @@ def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
     if resources.get("apt", {}).get("packages"):
         out["packages"] = {"apt": resources["apt"]["packages"]}
     if resources.get("sources"):
-        out["source"] = {key: {k: v for k, v in value.items() if k in {"url", "sha256", "extract"}} for key, value in resources["sources"].items()}
+        out["source"] = {key: {k: v for k, v in value.items() if k in {"url", "sha256", "extract", "destination", "format", "rename", "strip_components", "platform"}} for key, value in resources["sources"].items()}
     if resources.get("system_user"):
         out["user"] = {"name": resources["system_user"].get("username", app_id), "system": True}
     if resources.get("install_dir"):
         out.setdefault("directories", {})["install"] = {"path": resources["install_dir"].get("path", f"/var/www/{app_id}")}
     if resources.get("data_dir"):
         out.setdefault("directories", {})["data"] = {"path": resources["data_dir"].get("path", f"/var/lib/{app_id}"), "backup": True}
+    if resources.get("ports"):
+        ports = {}
+        for name, value in resources["ports"].items():
+            ports[name] = value if isinstance(value, int) else value.get("port")
+        out["ports"] = {"named": {name: port for name, port in ports.items() if port is not None}}
+    if resources.get("permissions"):
+        out["permissions"] = {
+            name: {key: value for key, value in details.items() if key in {"url", "additional_urls", "allowed", "auth_header", "auth_request", "show_tile", "protected"}}
+            for name, details in resources["permissions"].items()
+        }
+    if resources.get("access"):
+        out["access"] = resources["access"]
+    if resources.get("database"):
+        out["database"] = {key: value for key, value in resources["database"].items() if key in {"type", "name", "backup", "users"}}
+    for runtime_type in ("nodejs", "python", "go", "composer", "php"):
+        if resources.get(runtime_type):
+            out["runtime"] = {"type": "node" if runtime_type == "nodejs" else runtime_type, "version": resources[runtime_type]["version"], "prefix": resources[runtime_type].get("prefix")}
+            break
+    if resources.get("config"):
+        out["config"] = {
+            name: {key: value for key, value in details.items() if key in {"destination", "content", "template", "context", "mode", "owner", "group"}}
+            for name, details in resources["config"].items()
+        }
+    for resource_name, native_name in (("service", "service"), ("web", "web"), ("health", "health"), ("timer", "timer"), ("backup", "backup"), ("settings", "settings")):
+        if resources.get(resource_name):
+            out[native_name] = resources[resource_name]
     return out
 
 
