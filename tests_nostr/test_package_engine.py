@@ -130,3 +130,17 @@ def test_reconciliation_detects_config_and_service_drift(tmp_path: Path):
     service.apply(service.plan({"name": "example", "exec": "/bin/true"})[0])
     desired_service = {"name": "example", "exec": "/bin/false"}
     assert not _operation_satisfied(Operation("service.ensure", "example:service", desired_service), service.inspect(desired_service))
+
+
+def test_reconciliation_skips_verified_cached_source(tmp_path: Path):
+    import hashlib
+
+    from nostrhost.native_providers import SourceProvider
+
+    payload = b"verified source"
+    url = "https://example.test/source.tar.gz"
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(payload))
+    desired = {"url": url, "sha256": hashlib.sha256(payload).hexdigest()}
+    provider.apply(provider.plan(desired)[0])
+    operation = Operation("source.fetch", url, desired)
+    assert _operation_satisfied(operation, provider.inspect(desired))

@@ -365,6 +365,8 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         return actual.get("exists") is True and actual.get("sha256") == actual.get("desired_sha256")
     if operation.name == "database.ensure":
         return actual.get("exists") is True
+    if operation.name == "source.fetch":
+        return operation.args.get("destination") is None and actual.get("sha256", "").lower() == operation.args.get("sha256", "").lower()
     if operation.name == "secret.ensure":
         return actual.get("exists") is True
     if operation.name in {"settings.ensure", "backup.register"}:

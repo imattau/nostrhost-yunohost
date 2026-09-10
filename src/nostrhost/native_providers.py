@@ -315,7 +315,10 @@ class SourceProvider:
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         destination = desired.get("destination")
         path = _target(self.root, destination) if destination else self.cache_dir / hashlib.sha256(desired["url"].encode()).hexdigest()
-        return {"exists": path.exists(), "path": str(path)}
+        result = {"exists": path.exists(), "path": str(path)}
+        if path.is_file():
+            result["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("source.fetch", desired["url"], desired, risk="medium", reverse="source.remove", summary=f"fetch and verify source {desired['url']}")]
