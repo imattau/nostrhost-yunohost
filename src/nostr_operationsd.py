@@ -113,6 +113,7 @@ class OperationEngine:
         state: Any = None,
         restic: Any = None,
         policy: Callable[[str, dict[str, Any], str], dict[str, Any] | bool | None] | None = None,
+        policy_owner: str | None = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
@@ -122,6 +123,7 @@ class OperationEngine:
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
         self._policy = policy  # optional nostrhost-policy adapter
+        self._policy_owner = policy_owner
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
         self.delegations: dict[str, dict[str, Any]] = {}
@@ -202,6 +204,10 @@ class OperationEngine:
         if event.get("pubkey") not in self._admins:
             logger.warning("approval for %s by non-admin ignored", request_id[:16])
             return False
+        if record.policy and record.policy.get("owner_signature_required"):
+            if not self._policy_owner or event.get("pubkey") != self._policy_owner:
+                logger.warning("owner approval for %s by non-owner ignored", request_id[:16])
+                return False
         try:
             self._evaluate_policy(record)
         except Exception as exc:  # noqa: BLE001 - policy may change while awaiting approval
@@ -562,8 +568,16 @@ def run() -> None:
     _require_bootstrapped()
     cfg = _operator_config()
     restic = _restic_from_config()
+    try:
+        from .nostrhost_native_policy import build_native_policy_adapter
+
+        policy = build_native_policy_adapter()
+    except Exception as exc:  # noqa: BLE001 - policy remains optional on old nodes
+        logger.error("native policy adapter unavailable (%s); continuing without policy facts", exc)
+        policy = None
     engine = OperationEngine(
-        publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins, restic=restic
+        publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
+        restic=restic, policy=policy, policy_owner=cfg.operator_pubkey,
     )
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
@@ -578,11 +592,14 @@ def run() -> None:
             admins=cfg.admins,
             state=state,
             restic=restic,
+            policy=policy,
+            policy_owner=cfg.operator_pubkey,
         )
     except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
         logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
         engine = OperationEngine(
-            publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins, restic=restic
+            publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
+            restic=restic, policy=policy, policy_owner=cfg.operator_pubkey,
         )
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))

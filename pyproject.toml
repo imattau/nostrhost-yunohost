@@ -16,6 +16,9 @@ dependencies = [
     # nostr-identity / nostr-identityd author and project identity events on
     # the local control relay (kind 31102) over raw NIP-01 WebSocket.
     "nostrhost-auth @ git+https://github.com/imattau/nostrhost-auth@main",
+    # Shared authorization/policy rules used by the native resource-engine
+    # execution boundary (free-space, backup, and owner approval tiers).
+    "nostrhost-policy @ git+https://github.com/imattau/nostrhost-policy@main",
     "coincurve>=21.0.0",
     "websockets>=12.0",
     "bottle",

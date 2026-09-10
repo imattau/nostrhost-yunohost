@@ -81,6 +81,10 @@ DATA_AFFECTING_TOOLS = frozenset(
         "app.install",
         "app.upgrade",
         "app.remove",
+        # Native resource-engine plans replace the app.* wrappers for package
+        # mutations.  Keep their state and Restic snapshots on the same
+        # audit path while the legacy tools remain available for migration.
+        "package.reconcile",
         "backup.create",
         "backup.restore",
     }
