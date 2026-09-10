@@ -172,13 +172,14 @@ class ConfigFileProvider:
         if args.get("content") is not None:
             content = args["content"]
         else:
-            if self.template_root is None:
+            template_root = Path(args.get("_template_root")) if args.get("_template_root") else self.template_root
+            if template_root is None:
                 raise ProviderError("a template root is required for template-backed config")
             import jinja2
 
             name = self._template_name(args["template"])
-            template_path = (self.template_root / name).resolve()
-            if not str(template_path).startswith(str(self.template_root.resolve()) + os.sep):
+            template_path = (template_root / name).resolve()
+            if not str(template_path).startswith(str(template_root.resolve()) + os.sep):
                 raise ProviderError("config template escapes the template root")
             if not template_path.is_file():
                 raise ProviderError(f"config template does not exist: {name}")

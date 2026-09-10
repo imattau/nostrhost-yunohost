@@ -278,7 +278,7 @@ def _op(name: str, resource: str, args: dict[str, Any], *, deps: tuple[str, ...]
     return Operation(name, resource, args, deps, risk, reverse is not None if reversible is None else reversible, reverse, summary)
 
 
-def plan_package(package: PackageManifest) -> list[Operation]:
+def plan_package(package: PackageManifest, *, template_root: Path | None = None) -> list[Operation]:
     """Create a stable install plan from desired state only."""
     app = package.app.id
     plan: list[Operation] = []
@@ -302,7 +302,10 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     for name, source in package.sources.items():
         plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
     for name, config in package.config.items():
-        plan.append(_op("config.ensure", f"{app}:config:{name}", {**config.dict(), "destination": str(config.destination)}, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
+        config_args = {**config.dict(), "destination": str(config.destination)}
+        if template_root is not None:
+            config_args["_template_root"] = str(template_root)
+        plan.append(_op("config.ensure", f"{app}:config:{name}", config_args, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
     if package.runtime:
         plan.append(_op("runtime.ensure", f"{app}:runtime", package.runtime.dict(), deps=(package_op.resource,), risk="medium", reverse="runtime.remove", summary=f"ensure {package.runtime.type} {package.runtime.version}"))
     if package.database:

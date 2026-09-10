@@ -29,7 +29,7 @@ def main() -> int:
         elif args.command == "migrate":
             migrate_manifest_file(args.manifest, args.output)
         else:
-            operations = [operation.json_dict() for operation in plan_package(load_package(args.package))]
+            operations = [operation.json_dict() for operation in plan_package(load_package(args.package), template_root=args.package.parent)]
             if args.as_json:
                 print(json.dumps(operations, indent=2, sort_keys=True, default=str))
             else:

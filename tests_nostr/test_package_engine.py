@@ -179,3 +179,9 @@ def test_reconciliation_skips_unchanged_extracted_source(tmp_path: Path):
     provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(archive.read_bytes()))
     provider.apply(provider.plan(desired)[0])
     assert _operation_satisfied(Operation("source.fetch", url, desired), provider.inspect(desired))
+
+
+def test_package_plan_carries_explicit_template_root(tmp_path: Path):
+    raw = {"app": {"id": "example", "version": "1"}, "config": {"main": {"destination": "/etc/example.conf", "template": "templates/app.j2"}}}
+    operation = next(operation for operation in plan_package(PackageManifest.parse_obj(raw), template_root=tmp_path) if operation.name == "config.ensure")
+    assert operation.args["_template_root"] == str(tmp_path)
