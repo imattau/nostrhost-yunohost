@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PostgresProvider, ProviderError, ServiceProvider, SourceProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -115,3 +115,30 @@ def test_caddy_provider_validates_and_loads_json():
     provider = CaddyProvider(client=client, config_builder=lambda args: {"apps": {"http": {"routes": [args]}}})
     result = provider.apply(provider.plan({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0])
     assert result["loaded"] and client.call[0] == "/load"
+
+
+def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_path: Path):
+    calls = []
+    command = lambda args, **kwargs: calls.append((args, kwargs))
+    tmpfiles = TmpfilesProvider(root=tmp_path, command=command)
+    tmpfiles.apply(tmpfiles.plan({"path": "/var/lib/example", "mode": 0o750})[0])
+    sysusers = SysusersProvider(root=tmp_path, command=command)
+    sysusers.apply(sysusers.plan({"name": "example"})[0])
+    assert list((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
+    assert (tmp_path / "etc/sysusers.d/nostrhost-example.conf").is_file()
+    tmpfile = next((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
+    assert calls == [
+        (["systemd-tmpfiles", "--create", str(tmpfile)], {"check": True}),
+        (["systemd-sysusers", str(tmp_path / "etc/sysusers.d/nostrhost-example.conf")], {"check": True}),
+    ]
+
+
+def test_secret_provider_generates_mode_600_credential(tmp_path: Path):
+    provider = SecretProvider(credential_dir=tmp_path / "credentials")
+    operation = provider.plan({"name": "database_password", "length": 32})[0]
+    result = provider.apply(operation)
+    target = Path(result["credential"])
+    assert target.is_file() and target.stat().st_mode & 0o777 == 0o600
+    first = target.read_text()
+    provider.apply(operation)
+    assert target.read_text() == first

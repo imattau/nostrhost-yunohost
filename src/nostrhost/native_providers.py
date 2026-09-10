@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -64,6 +65,99 @@ class DirectoryProvider:
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("directory.remove", desired["path"], {"path": desired["path"]}, reverse="directory.ensure", summary=f"remove directory {desired['path']}")]
+
+
+class TmpfilesProvider(DirectoryProvider):
+    """Declare managed directories through systemd-tmpfiles."""
+
+    def __init__(self, *, root: Path = Path("/"), definition_dir: Path = Path("/etc/tmpfiles.d"), command: Callable[..., Any] | None = None) -> None:
+        super().__init__(root=root)
+        self.definition_dir = _target(root, definition_dir)
+        self.command = command or subprocess.run
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        path = Path(args["path"])
+        resource_name = operation.resource.rsplit(":", 1)[-1]
+        name = hashlib.sha256(str(path).encode()).hexdigest()[:12] if resource_name.startswith("/") else _safe_name(resource_name)
+        self.definition_dir.mkdir(parents=True, exist_ok=True)
+        file = self.definition_dir / f"nostrhost-{name}.conf"
+        file.write_text(f"d {path} {args['mode']:04o} {args.get('owner') or '-'} {args.get('group') or '-'} -\n", encoding="utf-8")
+        self.command(["systemd-tmpfiles", "--create", str(file)], check=True)
+        return {"path": str(path), "definition": str(file), "changed": True}
+
+
+class SysusersProvider:
+    """Declare service accounts through systemd-sysusers."""
+
+    def __init__(self, *, root: Path = Path("/"), definition_dir: Path = Path("/etc/sysusers.d"), command: Callable[..., Any] | None = None) -> None:
+        self.definition_dir = _target(root, definition_dir)
+        self.command = command or subprocess.run
+
+    @staticmethod
+    def _name(value: str) -> str:
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*", value):
+            raise ProviderError(f"unsafe system user name: {value!r}")
+        return value
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = self._name(desired["name"])
+        return {"name": name, "definition": (self.definition_dir / f"nostrhost-{name}.conf").is_file()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("system_user.ensure", desired["name"], desired, reverse="system_user.remove", summary=f"declare system user {desired['name']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        name = self._name(args["name"])
+        self.definition_dir.mkdir(parents=True, exist_ok=True)
+        file = self.definition_dir / f"nostrhost-{name}.conf"
+        home = args.get("home") or f"/var/lib/{name}"
+        description = args.get("description") or "NostrHost service account"
+        file.write_text(f'u {name} - "{description}" {home}\n', encoding="utf-8")
+        self.command(["systemd-sysusers", str(file)], check=True)
+        return {"name": name, "definition": str(file), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("system_user.remove", desired["name"], {"name": desired["name"]}, reverse="system_user.ensure", summary="remove system user declaration")]
+
+
+class SecretProvider:
+    """Store generated credentials in a mode-600 systemd credential source."""
+
+    def __init__(self, *, credential_dir: Path = Path("/var/lib/nostrhost/credentials")) -> None:
+        self.credential_dir = credential_dir
+
+    @staticmethod
+    def _name(value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", value):
+            raise ProviderError(f"unsafe credential name: {value!r}")
+        return value
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = self._name(desired["name"])
+        return {"name": name, "exists": (self.credential_dir / name).is_file()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("secret.ensure", desired["name"], desired, risk="high", reverse="secret.remove", summary=f"ensure systemd credential {desired['name']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        name = self._name(operation.args["name"])
+        self.credential_dir.mkdir(parents=True, exist_ok=True)
+        target = self.credential_dir / name
+        if not target.exists():
+            target.write_text(secrets.token_urlsafe(operation.args.get("length", 32)), encoding="utf-8")
+            os.chmod(target, 0o600)
+        return {"name": name, "credential": str(target), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("secret.remove", desired["name"], {"name": desired["name"]}, risk="high", reverse="secret.ensure", summary="remove systemd credential")]
 
 
 class SourceProvider:
@@ -188,6 +282,8 @@ class ServiceProvider:
         lines.extend([f"Restart={args.get('restart', 'on-failure')}", f"PrivateTmp={'yes' if security.get('private_tmp', True) else 'no'}", f"ProtectSystem={security.get('protect_system', 'strict')}", f"ProtectHome={'yes' if security.get('protect_home', True) else 'no'}", f"NoNewPrivileges={'yes' if security.get('no_new_privileges', True) else 'no'}"])
         if environment:
             lines.append(environment)
+        for credential, path in sorted(args.get("credentials", {}).items()):
+            lines.append(f"LoadCredential={credential}:{path}")
         lines.extend(["", "[Install]", "WantedBy=multi-user.target", ""])
         return "\n".join(lines)
 
@@ -326,11 +422,13 @@ class NativeOperationExecutor:
 def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
-        "directory": DirectoryProvider(root=root),
+        "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
         "database": PostgresProvider(connection_factory=postgres_connection_factory),
+        "system_user": SysusersProvider(root=root, command=command),
+        "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
     }
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
