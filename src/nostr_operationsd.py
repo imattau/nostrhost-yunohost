@@ -91,6 +91,7 @@ class OperationRecord:
     tool: str
     args: dict[str, Any]
     requester: str
+    actor: str
     state: OpState = OpState.REQUESTED
     reason: str | None = None
     result: dict[str, Any] | None = None
@@ -163,8 +164,11 @@ class OperationEngine:
         requester = event.get("pubkey", "")
         if not tool or not _is_hex64(requester):
             return False
+        actor = _tag_value(event, "actor") or requester
+        if not _is_hex64(actor):
+            return False
 
-        record = OperationRecord(request_id=request_id, tool=tool, args=args, requester=requester)
+        record = OperationRecord(request_id=request_id, tool=tool, args=args, requester=requester, actor=actor.lower())
         self.records[request_id] = record
 
         spec = tool_spec(tool)
@@ -325,10 +329,10 @@ class OperationEngine:
         except InvalidTransition as exc:
             logger.warning("execution for %s ignored: %s", record.request_id[:16], exc)
             return
-        self._publish(build_execution_started(self._server_sk, self._server_pubkey, record.request_id))
+        self._publish(build_execution_started(self._server_sk, self._server_pubkey, record.request_id, actor_pubkey=record.actor))
         logger.info("executing %s: %s", record.request_id[:16], record.tool)
         if self._state is not None:
-            self._state.pre(record.request_id, record.tool, record.args)
+            self._state.pre(record.request_id, record.tool, record.args, actor=record.actor)
         try:
             if record.tool == "rollback.apply":
                 from .nostr_operations import _run_rollback_apply
@@ -352,8 +356,8 @@ class OperationEngine:
             logger.error("execution of %s failed: %s", record.tool, exc)
             body = {"ok": False, "error": str(exc)}
         if self._state is not None:
-            self._state.post(record.request_id, record.tool, body["ok"], body)
-        self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, **body))
+            self._state.post(record.request_id, record.tool, body["ok"], body, actor=record.actor)
+        self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, actor_pubkey=record.actor, **body))
         record.state = next_state(record.state, KIND_EXECUTION_RESULT, ok=body["ok"])
         record.result = body
         logger.info("request %s -> %s", record.request_id[:16], record.state.value)
@@ -362,7 +366,7 @@ class OperationEngine:
         record.state = OpState.REJECTED
         record.reason = reason
         body = {"reason": reason}
-        self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, ok=False, **body))
+        self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, ok=False, actor_pubkey=record.actor, **body))
         logger.info("request %s rejected: %s", record.request_id[:16], reason)
 
     # -- helpers ----------------------------------------------------------- #
@@ -389,6 +393,13 @@ def _e_tag(event: dict[str, Any]) -> str | None:
     for tag in event.get("tags") or []:
         if tag and tag[0] == "e" and len(tag) > 1:
             return tag[1]
+    return None
+
+
+def _tag_value(event: dict[str, Any], name: str) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == name and len(tag) > 1:
+            return str(tag[1])
     return None
 
 

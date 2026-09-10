@@ -114,6 +114,19 @@ def test_e2e_request_approval_execute_result():
     assert body["result"]["versions"]["yunohost"] == "12.1.41.2"
 
 
+def test_e2e_preserves_actor_separately_from_request_signer():
+    h = Harness()
+    h.grant(["server.read"])
+    _, actor_pk = new_key()
+    ev = build_operation_request(h.agent_sk, h.agent_pk, "system.version", {}, actor_pubkey=actor_pk)
+    assert h.engine.handle_event(ev)
+    assert h.engine.records[ev["id"]].requester == h.agent_pk
+    assert h.engine.records[ev["id"]].actor == actor_pk
+    assert h.approve(ev["id"])
+    assert ["actor", actor_pk] in h.events_by_kind(2203)[0]["tags"]
+    assert ["actor", actor_pk] in h.events_by_kind(2204)[0]["tags"]
+
+
 def test_e2e_denied_requester_is_auto_rejected():
     h = Harness()  # no grant for the agent
 

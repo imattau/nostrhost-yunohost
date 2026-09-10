@@ -36,6 +36,21 @@ def test_mcp_adapter_lists_native_tools_and_submits_signed_request():
     assert json.loads(sent[0][1]["content"]) == {"tool": "system.version", "args": {}}
 
 
+def test_mcp_adapter_preserves_authenticated_actor_identity():
+    sk, pk = new_key()
+    _, actor_pk = new_key()
+    sent = []
+    adapter = NostrMCPAdapter(
+        requester_sk=sk,
+        requester_pubkey=pk,
+        control_relay="ws://relay",
+        transport=lambda relay, event: sent.append(event),
+    )
+    adapter.call_tool("system.version", actor_pubkey=actor_pk)
+    assert ["actor", actor_pk] in sent[0]["tags"]
+    assert sent[0]["pubkey"] == pk
+
+
 def test_mcp_adapter_correlates_result_events():
     sk, pk = new_key()
     adapter = NostrMCPAdapter(
@@ -47,10 +62,14 @@ def test_mcp_adapter_correlates_result_events():
     request = adapter.call_tool("system.version")
     request_id = request["_nostr"]["request_id"]
     server_sk, server_pk = new_key()
-    result = build_execution_result(server_sk, server_pk, request_id, ok=True, result={"ready": True})
+    result = build_execution_result(
+        server_sk, server_pk, request_id, ok=True, actor_pubkey=pk, result={"ready": True}
+    )
 
     assert adapter.ingest_event(result)
-    assert adapter.result(request_id) == {"ok": True, "result": {"ready": True}}
+    assert adapter.result(request_id) == {
+        "ok": True, "result": {"ready": True}, "_nostr_actor": pk
+    }
 
 
 def test_mcp_adapter_rejects_unknown_tool():

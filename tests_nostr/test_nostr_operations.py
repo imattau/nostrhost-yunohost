@@ -193,3 +193,14 @@ def test_rollback_apply_shared_executor_rejects_bad_plan():
     plan["approved"] = True
     with pytest.raises(OperationError, match="already executed"):
         _run_rollback_apply({"plan": plan}, backend=object(), restic=None)
+
+
+def test_operation_events_carry_first_class_actor():
+    sk, pk = new_key()
+    _, actor = new_key()
+    request = build_operation_request(sk, pk, "system.version", {}, actor_pubkey=actor)
+    assert ["actor", actor] in request["tags"]
+    started = build_execution_started(sk, pk, request["id"], actor_pubkey=actor)
+    result = build_execution_result(sk, pk, request["id"], ok=True, actor_pubkey=actor)
+    assert ["actor", actor] in started["tags"]
+    assert ["actor", actor] in result["tags"]

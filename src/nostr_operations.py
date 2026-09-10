@@ -334,9 +334,14 @@ def build_operation_request(
     args: dict[str, Any],
     *,
     target: str | None = None,
+    actor_pubkey: str | None = None,
 ) -> dict[str, Any]:
-    """Build (without publishing) a kind-2200 operation request."""
+    """Build a kind-2200 request, optionally naming the authenticated actor."""
+    if actor_pubkey is not None and not _is_hex64(actor_pubkey):
+        raise OperationError("actor pubkey must be 64-hex")
     tags = [["p", target]] if target else []
+    if actor_pubkey:
+        tags.append(["actor", actor_pubkey.lower()])
     content = json.dumps({"tool": tool, "args": args}, default=_json_default)
     return _sign_event(requester_sk, requester_pubkey, KIND_OPERATION_REQUEST, content, tags)
 
@@ -400,9 +405,14 @@ def build_rejection(admin_sk: str, admin_pubkey: str, request_id: str, reason: s
     return _sign_event(admin_sk, admin_pubkey, KIND_OPERATION_REJECTION, content, _e_tag(request_id))
 
 
-def build_execution_started(server_sk: str, server_pubkey: str, request_id: str) -> dict[str, Any]:
+def build_execution_started(server_sk: str, server_pubkey: str, request_id: str, *, actor_pubkey: str | None = None) -> dict[str, Any]:
     """Build (without publishing) a kind-2203 execution-started event."""
-    return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_STARTED, "", _e_tag(request_id))
+    if actor_pubkey is not None and not _is_hex64(actor_pubkey):
+        raise OperationError("actor pubkey must be 64-hex")
+    tags = _e_tag(request_id)
+    if actor_pubkey:
+        tags.append(["actor", actor_pubkey.lower()])
+    return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_STARTED, "", tags)
 
 
 def build_execution_result(
@@ -411,11 +421,17 @@ def build_execution_result(
     request_id: str,
     *,
     ok: bool,
+    actor_pubkey: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Build (without publishing) a kind-2204 execution-result event."""
+    if actor_pubkey is not None and not _is_hex64(actor_pubkey):
+        raise OperationError("actor pubkey must be 64-hex")
     content = json.dumps({"ok": ok, **extra}, default=_json_default)
-    return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_RESULT, content, _e_tag(request_id))
+    tags = _e_tag(request_id)
+    if actor_pubkey:
+        tags.append(["actor", actor_pubkey.lower()])
+    return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_RESULT, content, tags)
 
 
 def build_capability(
@@ -467,13 +483,14 @@ def request_operation(
     requester_sk: str | None = None,
     control_relay: str | None = None,
     target: str | None = None,
+    actor_pubkey: str | None = None,
     transport: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Publish a kind-2200 request as `requester_sk` (default: operator key)."""
     if tool_spec(tool) is None:
         raise OperationError(f"unknown tool {tool!r} (known: {', '.join(known_tools())})")
     sk = requester_sk or _operator_config(None, control_relay).operator_sk
-    event = build_operation_request(sk, _derive_pubkey(sk), tool, args or {}, target=target)
+    event = build_operation_request(sk, _derive_pubkey(sk), tool, args or {}, target=target, actor_pubkey=actor_pubkey)
     (transport or publish_to_relay)(_control_relay(control_relay), event)
     return event
 

@@ -142,6 +142,7 @@ def _manifest(
     restic_snapshot: str = "",
     required: bool = False,
     health: str = "pending",
+    actor_pubkey: str = "",
 ) -> str:
     return (
         "[state]\n"
@@ -151,6 +152,7 @@ def _manifest(
         "[operation]\n"
         f"event = {_tquote(op_event_id)}\n"
         f"phase = {_tquote(phase)}\n"
+        f"actor = {_tquote(actor_pubkey)}\n"
         "\n"
         "[backup]\n"
         f"restic_snapshot = {_tquote(restic_snapshot)}\n"
@@ -423,6 +425,7 @@ class StateRepo:
         restic_snapshot: str = "",
         required: bool = False,
         health: str = "pending",
+        actor_pubkey: str = "",
         message: str | None = None,
     ) -> str:
         """Render the tree, write the manifest and commit; move the
@@ -430,7 +433,7 @@ class StateRepo:
         self.ensure()
         self._render(tree)
         (self.path / "manifest.toml").write_text(
-            _manifest(known_good=known_good, op_event_id=op_event_id, phase=phase, restic_snapshot=restic_snapshot, required=required, health=health)
+            _manifest(known_good=known_good, op_event_id=op_event_id, phase=phase, restic_snapshot=restic_snapshot, required=required, health=health, actor_pubkey=actor_pubkey)
         )
         self._git(["add", "-A"])
         msg = message or "state snapshot"
@@ -679,10 +682,10 @@ class StateRecorder:
             return {}
         return self._capabilities() if callable(self._capabilities) else self._capabilities
 
-    def pre(self, request_id: str, tool: str, args: dict[str, Any]) -> str:
-        return self.snapshot(op_event_id=request_id, phase="pre", health="pending", tool=tool)
+    def pre(self, request_id: str, tool: str, args: dict[str, Any], *, actor: str = "") -> str:
+        return self.snapshot(op_event_id=request_id, phase="pre", health="pending", tool=tool, actor=actor)
 
-    def post(self, request_id: str, tool: str, ok: bool, result: dict[str, Any]) -> str:
+    def post(self, request_id: str, tool: str, ok: bool, result: dict[str, Any], *, actor: str = "") -> str:
         return self.snapshot(
             op_event_id=request_id,
             phase="post",
@@ -690,6 +693,7 @@ class StateRecorder:
             health="passed" if ok else "failed",
             tool=tool,
             data_affecting=tool in DATA_AFFECTING_TOOLS,
+            actor=actor,
         )
 
     def snapshot(
@@ -701,6 +705,7 @@ class StateRecorder:
         health: str = "pending",
         tool: str = "",
         data_affecting: bool = False,
+        actor: str = "",
     ) -> str:
         tree = export_state(self.backend, self._caps())
         restic = ""
@@ -714,7 +719,8 @@ class StateRecorder:
             restic_snapshot=restic,
             required=data_affecting,
             health=health,
-            message=f"operation {tool}" if tool else None,
+            actor_pubkey=actor,
+            message=f"operation {tool} actor={actor}" if tool and actor else (f"operation {tool}" if tool else None),
         )
 
 

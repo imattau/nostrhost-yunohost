@@ -59,7 +59,13 @@ class NostrMCPAdapter:
             for name in known_tools()
         ]
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        actor_pubkey: str | None = None,
+    ) -> dict[str, Any]:
         """Publish one signed operation request and return its correlation id."""
         spec = tool_spec(name)
         if spec is None:
@@ -67,7 +73,7 @@ class NostrMCPAdapter:
         if arguments is not None and not isinstance(arguments, dict):
             raise MCPAdapterError("MCP tool arguments must be an object")
         event = build_operation_request(
-            self.requester_sk, self.requester_pubkey, name, arguments or {}
+            self.requester_sk, self.requester_pubkey, name, arguments or {}, actor_pubkey=actor_pubkey
         )
         self.transport(self.control_relay, event)
         return {
@@ -110,9 +116,15 @@ class NostrMCPAdapter:
             return False
         if not isinstance(body, dict) or "ok" not in body:
             return False
+        actor = next(
+            (tag[1] for tag in event.get("tags") or [] if len(tag) >= 2 and tag[0] == "actor"),
+            None,
+        )
+        if actor:
+            body = {**body, "_nostr_actor": actor}
         self.results[request_id] = body
         return True
 
     def result(self, request_id: str) -> dict[str, Any] | None:
         """Return the latest projected result, or ``None`` while pending."""
-    return self.results.get(request_id)
+        return self.results.get(request_id)
