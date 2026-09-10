@@ -70,7 +70,7 @@ def test_appchangeurl():
 
     app_change_url("change_url_app", maindomain, "/newchangeurl")
 
-    # For some reason the nginx reload can take some time to propagate ...?
+    # For some reason the Caddy reload can take some time to propagate ...?
     time.sleep(2)
 
     check_changeurl_app("/newchangeurl")

@@ -151,9 +151,10 @@ def app_is_installed(app):
     if app == "permissions_app":
         return _is_installed(app)
 
-    # These are files we know should be installed by the app
+    # These are files we know should be installed by the app. Native apps
+    # expose no per-app web conf file -- routing is reconciled via the Caddy
+    # admin API (web.route) -- so only content/state files are asserted here.
     app_files = []
-    app_files.append("/etc/nginx/conf.d/{}.d/{}.conf".format(maindomain, app))
     app_files.append("/var/www/%s/index.html" % app)
     app_files.append("/etc/importantfile")
 

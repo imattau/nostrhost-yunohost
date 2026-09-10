@@ -38,7 +38,7 @@ from moulinette import Moulinette, m18n
 from moulinette.core import MoulinetteError
 
 from .log import OperationLogger, is_unit_operation
-from .regenconf import _force_clear_hashes, _process_regen_conf, regen_conf
+from .regenconf import regen_conf
 from .utils.error import YunohostError, YunohostValidationError
 from .utils.file_utils import (
     read_file,
@@ -380,28 +380,28 @@ def domain_add(
 
         # Don't regen these conf if we're still in postinstall
         if os.path.exists("/etc/yunohost/installed"):
-            # Sometime we have weird issues with the regenconf where some files
-            # appears as manually modified even though they weren't touched ...
-            # There are a few ideas why this happens (like backup/restore nginx
-            # conf ... which we shouldnt do ...). This in turns creates funky
-            # situation where the regenconf may refuse to re-create the conf
-            # (when re-creating a domain..)
-            # So here we force-clear the has out of the regenconf if it exists.
-            # This is a pretty ad hoc solution and only applied to nginx
-            # because it's one of the major service, but in the long term we
-            # should identify the root of this bug...
-            _force_clear_hashes([f"/etc/nginx/conf.d/{domain}.conf"])
+            # Caddy owns the web front end: ensure the domain has a site (the
+            # ACME policy is Caddy's global acme_ca / automatic HTTPS; certd
+            # exports the cert). The "caddy" regenconf category keeps the
+            # per-domain snippet tracked, and the permission projection is
+            # regenerated so the authd sees the new domain.
+            try:
+                from .nostrhost.caddy_admin import CaddyAdminClient
+
+                CaddyAdminClient().ensure_domain_site(domain)
+            except Exception as e:
+                logger.warning("unable to ensure Caddy site for %s: %s", domain, e)
+
+            from .nostrhost.permissions import write_permissions_projection
+
             regen_conf(
                 names=_domain_regen_conf_categories(
-                    "nginx",
+                    "caddy",
                     "dnsmasq",
-                    "postfix",
                     "mdns",
-                    "dovecot",
-                    "opendkim",
                 )
             )
-            app_ssowatconf()
+            write_permissions_projection()
 
     except Exception as e:
         # Force domain removal silently
@@ -567,32 +567,26 @@ def domain_remove(
     rm(f"{DOMAIN_SETTINGS_DIR}/{domain}.yml", force=True)
 
     # Sometime we have weird issues with the regenconf where some files
+    # Sometime we have weird issues with the regenconf where some files
     # appears as manually modified even though they weren't touched ...
-    # There are a few ideas why this happens (like backup/restore nginx
-    # conf ... which we shouldnt do ...). This in turns creates funky
-    # situation where the regenconf may refuse to re-create the conf
-    # (when re-creating a domain..)
-    #
-    # So here we force-clear the has out of the regenconf if it exists.
-    # This is a pretty ad hoc solution and only applied to nginx
-    # because it's one of the major service, but in the long term we
-    # should identify the root of this bug...
-    _force_clear_hashes([f"/etc/nginx/conf.d/{domain}.conf"])
-    # And in addition we even force-delete the file Otherwise, if the file was
-    # manually modified, it may not get removed by the regenconf which leads to
-    # catastrophic consequences of nginx breaking because it can't load the
-    # cert file which disappeared etc..
-    if os.path.exists(f"/etc/nginx/conf.d/{domain}.conf"):
-        _process_regen_conf(
-            f"/etc/nginx/conf.d/{domain}.conf", new_conf=None, save=True
-        )
+    # The retired nginx force-clear/force-delete hack is gone: Caddy owns the
+    # web front end, so removal just drops the domain site and re-renders the
+    # tracked per-domain snippet via the "caddy" regenconf category.
+    try:
+        from .nostrhost.caddy_admin import CaddyAdminClient
+
+        CaddyAdminClient().remove_domain_site(domain)
+    except Exception as e:
+        logger.warning("unable to remove Caddy site for %s: %s", domain, e)
+
+    from .nostrhost.permissions import write_permissions_projection
 
     regen_conf(
         names=_domain_regen_conf_categories(
-            "nginx", "dnsmasq", "postfix", "mdns", "opendkim"
+            "caddy", "dnsmasq", "mdns"
         )
     )
-    app_ssowatconf()
+    write_permissions_projection()
 
     hook_callback("post_domain_remove", args=[domain])
 

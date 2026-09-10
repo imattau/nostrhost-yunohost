@@ -56,9 +56,10 @@ def clean():
 
     _save_services(services)
 
-    if os.path.exists("/etc/nginx/conf.d/broken.conf"):
-        os.remove("/etc/nginx/conf.d/broken.conf")
-        os.system("systemctl reload-or-restart nginx")
+    # restore a Caddy config left broken by test_service_conf_broken
+    if os.path.exists("/etc/caddy/Caddyfile.broken-test"):
+        os.rename("/etc/caddy/Caddyfile.broken-test", "/etc/caddy/Caddyfile")
+        os.system("systemctl reload-or-restart caddy")
 
 
 def test_service_status_all():
@@ -132,16 +133,26 @@ def test_service_update_to_remove_properties():
 
 
 def test_service_conf_broken():
-    os.system("echo pwet > /etc/nginx/conf.d/broken.conf")
+    # The caddy service's test_conf is `caddy validate --config
+    # /etc/caddy/Caddyfile`; break the active config (the running process is
+    # unaffected - validate does not reload) and check the service reports it.
+    caddy_conf = "/etc/caddy/Caddyfile"
+    if os.path.exists(caddy_conf):
+        os.rename(caddy_conf, "/etc/caddy/Caddyfile.broken-test")
+    os.system("echo 'this is {{{{' > %s" % caddy_conf)
 
-    status = service_status("nginx")
-    assert status["status"] == "running"
-    assert status["configuration"] == "broken"
-    assert "broken.conf" in status["configuration-details"][0]
+    try:
+        status = service_status("caddy")
+        assert status["status"] == "running"
+        assert status["configuration"] == "broken"
+        assert "Caddyfile" in status["configuration-details"][0]
 
-    # Service reload-or-restart should check that the conf ain't valid
-    # before reload-or-restart, hence the service should still be running
-    service_reload_or_restart("nginx")
-    assert status["status"] == "running"
-
-    os.remove("/etc/nginx/conf.d/broken.conf")
+        # Service reload-or-restart should check that the conf ain't valid
+        # before reload-or-restart, hence the service should still be running
+        service_reload_or_restart("caddy")
+        assert status["status"] == "running"
+    finally:
+        if os.path.exists("/etc/caddy/Caddyfile.broken-test"):
+            os.rename("/etc/caddy/Caddyfile.broken-test", caddy_conf)
+        else:
+            os.remove(caddy_conf)

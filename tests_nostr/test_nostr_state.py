@@ -50,6 +50,9 @@ class FakeBackend:
     def services(self) -> dict:
         return {"dnsmasq": {"status": "running", "type": "system"}}
 
+    def certificates(self) -> dict:
+        return {"nostrhost.test": {"CA_type": "letsencrypt", "validity_days": 60, "summary": "letsencrypt"}}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 
@@ -63,6 +66,7 @@ def test_export_state_renders_semantic_tree():
     assert tree["domains"]["nostrhost.test.toml"]["main"] is True
     assert tree["apps"]["hello_nostr_ynh.toml"]["version"] == "1.0.0~ynh1"
     assert tree["services"]["dnsmasq.toml"]["status"] == "running"
+    assert tree["certificates"]["nostrhost.test.toml"]["summary"] == "letsencrypt"
     assert tree["identities"]["matt.toml"]["groups"] == ["all_users", "admins"]
     assert tree["package-versions"]["versions.toml"]["yunohost"] == "12.1.41.2"
     caps = tree["capabilities"]

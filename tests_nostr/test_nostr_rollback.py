@@ -50,6 +50,9 @@ class FakeBackend:
     def services(self) -> dict:
         return {"dnsmasq": {"status": "running", "type": "system"}}
 
+    def certificates(self) -> dict:
+        return {"nostrhost.test": {"CA_type": "letsencrypt", "validity_days": 60, "summary": "letsencrypt"}}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 

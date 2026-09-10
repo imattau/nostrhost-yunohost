@@ -35,37 +35,37 @@ from yunohost.tools import tools_regen_conf
 from .conftest import message
 
 TEST_DOMAIN = "secondarydomain.test"
-TEST_DOMAIN_NGINX_CONFIG = "/etc/nginx/conf.d/%s.conf" % TEST_DOMAIN
+TEST_DOMAIN_CADDY_CONFIG = "/etc/caddy/conf.d/%s.conf" % TEST_DOMAIN
 TEST_DOMAIN_DNSMASQ_CONFIG = "/etc/dnsmasq.d/%s" % TEST_DOMAIN
 SSHD_CONFIG = "/etc/ssh/sshd_config"
 
 
 def setup_function(function):
-    _force_clear_hashes([TEST_DOMAIN_NGINX_CONFIG])
+    _force_clear_hashes([TEST_DOMAIN_CADDY_CONFIG])
     clean()
 
 
 def teardown_function(function):
     clean()
-    _force_clear_hashes([TEST_DOMAIN_NGINX_CONFIG])
+    _force_clear_hashes([TEST_DOMAIN_CADDY_CONFIG])
     os.umask(0o022)
 
 
 def clean():
     assert os.system("pgrep slapd >/dev/null") == 0
-    assert os.system("pgrep nginx >/dev/null") == 0
+    assert os.system("pgrep caddy >/dev/null") == 0
 
     if TEST_DOMAIN in domain_list()["domains"]:
         domain_remove(TEST_DOMAIN)
-        assert not os.path.exists(TEST_DOMAIN_NGINX_CONFIG)
+        assert not os.path.exists(TEST_DOMAIN_CADDY_CONFIG)
 
-    os.system("rm -f %s" % TEST_DOMAIN_NGINX_CONFIG)
+    os.system("rm -f %s" % TEST_DOMAIN_CADDY_CONFIG)
 
-    assert os.system("nginx -t 2>/dev/null") == 0
+    assert os.system("caddy validate --config /etc/caddy/Caddyfile 2>/dev/null") == 0
 
-    assert not os.path.exists(TEST_DOMAIN_NGINX_CONFIG)
-    assert TEST_DOMAIN_NGINX_CONFIG not in _get_conf_hashes("nginx")
-    assert TEST_DOMAIN_NGINX_CONFIG not in manually_modified_files()
+    assert not os.path.exists(TEST_DOMAIN_CADDY_CONFIG)
+    assert TEST_DOMAIN_CADDY_CONFIG not in _get_conf_hashes("caddy")
+    assert TEST_DOMAIN_CADDY_CONFIG not in manually_modified_files()
 
     regen_conf(["ssh"], force=True)
 
@@ -75,32 +75,32 @@ def test_add_domain():
 
     assert TEST_DOMAIN in domain_list()["domains"]
 
-    assert os.path.exists(TEST_DOMAIN_NGINX_CONFIG)
+    assert os.path.exists(TEST_DOMAIN_CADDY_CONFIG)
 
-    assert TEST_DOMAIN_NGINX_CONFIG in _get_conf_hashes("nginx")
-    assert TEST_DOMAIN_NGINX_CONFIG not in manually_modified_files()
+    assert TEST_DOMAIN_CADDY_CONFIG in _get_conf_hashes("caddy")
+    assert TEST_DOMAIN_CADDY_CONFIG not in manually_modified_files()
 
 
 def test_add_and_edit_domain_conf():
     domain_add(TEST_DOMAIN)
 
-    assert os.path.exists(TEST_DOMAIN_NGINX_CONFIG)
-    assert TEST_DOMAIN_NGINX_CONFIG in _get_conf_hashes("nginx")
-    assert TEST_DOMAIN_NGINX_CONFIG not in manually_modified_files()
+    assert os.path.exists(TEST_DOMAIN_CADDY_CONFIG)
+    assert TEST_DOMAIN_CADDY_CONFIG in _get_conf_hashes("caddy")
+    assert TEST_DOMAIN_CADDY_CONFIG not in manually_modified_files()
 
-    os.system("echo ' ' >> %s" % TEST_DOMAIN_NGINX_CONFIG)
+    os.system("echo ' ' >> %s" % TEST_DOMAIN_CADDY_CONFIG)
 
-    assert TEST_DOMAIN_NGINX_CONFIG in manually_modified_files()
+    assert TEST_DOMAIN_CADDY_CONFIG in manually_modified_files()
 
 
 def test_add_domain_conf_already_exists():
-    os.system("echo ' ' >> %s" % TEST_DOMAIN_NGINX_CONFIG)
+    os.system("echo ' ' >> %s" % TEST_DOMAIN_CADDY_CONFIG)
 
     domain_add(TEST_DOMAIN)
 
-    assert os.path.exists(TEST_DOMAIN_NGINX_CONFIG)
-    assert TEST_DOMAIN_NGINX_CONFIG in _get_conf_hashes("nginx")
-    assert TEST_DOMAIN_NGINX_CONFIG not in manually_modified_files()
+    assert os.path.exists(TEST_DOMAIN_CADDY_CONFIG)
+    assert TEST_DOMAIN_CADDY_CONFIG in _get_conf_hashes("caddy")
+    assert TEST_DOMAIN_CADDY_CONFIG not in manually_modified_files()
 
 
 def test_ssh_conf_unmanaged():
@@ -141,8 +141,7 @@ def test_stale_hashes_get_removed_if_empty():
     This is intended to test that if a file gets removed and is indeed removed,
     we don't keep a useless empty hash corresponding to an old file.
     In this case, we test this using the dnsmasq conf file (we don't do this
-    using the nginx conf file because it's already force-removed during
-    domain_remove())
+    using the caddy conf file because it's removed during domain_remove())
     """
 
     domain_add(TEST_DOMAIN)

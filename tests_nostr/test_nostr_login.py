@@ -85,6 +85,7 @@ def fake_ldap_ynhuser(monkeypatch):
     mod.Authenticator = FakeAuthenticator
     mod.encrypt = lambda data: f"enc:{data}"
     mod.user_is_allowed_on_domain = lambda user, domain: True
+    mod._host_domain = lambda host: host
     sys.modules["yunohost.authenticators.ldap_ynhuser"] = mod
 
     yield mod
@@ -108,17 +109,17 @@ def test_auth_request_returns_compatibility_headers(monkeypatch):
 
     mod = types.ModuleType("yunohost.authenticators.ldap_ynhuser")
     mod.Authenticator = FakeAuthenticator
+    mod._host_domain = lambda host: host
     monkeypatch.setitem(sys.modules, "yunohost.authenticators.ldap_ynhuser", mod)
 
-    from bottle import response
-
-    response.headers.clear()
     result = auth_request_route()
 
     assert result.status_code == 204
-    assert response.headers["X-Remote-User"] == "matt"
-    assert response.headers["X-Remote-Email"] == "matt@example.test"
-    assert response.headers["X-Remote-Fullname"] == "Matt Example"
+    # identity headers ride on the returned HTTPResponse (bottle drops headers
+    # set on the global `response` when a fresh HTTPResponse is returned)
+    assert result.headers["X-Remote-User"] == "matt"
+    assert result.headers["X-Remote-Email"] == "matt@example.test"
+    assert result.headers["X-Remote-Fullname"] == "Matt Example"
 
 
 def test_auth_request_rejects_invalid_session(monkeypatch):
@@ -128,6 +129,7 @@ def test_auth_request_rejects_invalid_session(monkeypatch):
 
     mod = types.ModuleType("yunohost.authenticators.ldap_ynhuser")
     mod.Authenticator = FakeAuthenticator
+    mod._host_domain = lambda host: host
     monkeypatch.setitem(sys.modules, "yunohost.authenticators.ldap_ynhuser", mod)
 
     with pytest.raises(Exception) as exc_info:

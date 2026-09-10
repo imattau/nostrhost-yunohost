@@ -69,8 +69,11 @@ def clean():
         if _is_installed(test_app):
             app_remove(test_app)
 
-        for filepath in glob.glob("/etc/nginx/conf.d/*.d/*%s*" % test_app):
-            os.remove(filepath)
+        try:
+            from yunohost.nostrhost.caddy_admin import CaddyAdminClient
+            CaddyAdminClient().delete_route("nostrhost-web:%s" % test_app)
+        except Exception:
+            pass
         for folderpath in glob.glob("/etc/yunohost/apps/*%s*" % test_app):
             shutil.rmtree(folderpath, ignore_errors=True)
         for folderpath in glob.glob("/var/www/*%s*" % test_app):
@@ -82,8 +85,8 @@ def clean():
         )
 
     # Reset failed quota for service to avoid running into start-limit rate ?
-    os.system("systemctl reset-failed nginx")
-    os.system("systemctl start nginx")
+    os.system("systemctl reset-failed caddy")
+    os.system("systemctl start caddy")
 
     # Clean permissions
     for permission_name in user_permission_list()["permissions"]:
@@ -124,7 +127,8 @@ def secondary_domain(request):
 
 
 def app_expected_files(domain, app):
-    yield "/etc/nginx/conf.d/{}.d/{}.conf".format(domain, app)
+    # native apps expose no per-app web conf file -- routing is reconciled via
+    # the Caddy admin API (web.route); the web route is verified separately
     if app.startswith("legacy_app"):
         yield "/var/www/%s/index.html" % app
     yield "/etc/yunohost/apps/%s/settings.yml" % app
@@ -457,8 +461,8 @@ def test_legacy_app_install_path_unavailable(secondary_domain):
     assert app_is_not_installed(secondary_domain, "legacy_app__2")
 
 
-def test_legacy_app_install_with_nginx_down(mocker, secondary_domain):
-    os.system("systemctl stop nginx")
+def test_legacy_app_install_with_caddy_down(mocker, secondary_domain):
+    os.system("systemctl stop caddy")
 
     with raiseYunohostError(
         mocker, "app_action_cannot_be_ran_because_required_services_down"
@@ -483,7 +487,9 @@ def test_legacy_app_failed_remove(secondary_domain):
 
     # The remove script runs with set -eu and attempt to remove this
     # file without -f, so will fail if it's not there ;)
-    os.remove("/etc/nginx/conf.d/{}.d/{}.conf".format(secondary_domain, "legacy_app"))
+    from yunohost.nostrhost.caddy_admin import CaddyAdminClient
+
+    CaddyAdminClient().delete_route("nostrhost-web:legacy_app")
 
     # TODO / FIXME : can't easily validate that 'app_not_properly_removed'
     # is triggered for weird reasons ...

@@ -194,6 +194,9 @@ class Backend:
     def services(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def certificates(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
+        raise NotImplementedError
+
     def users(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -285,6 +288,31 @@ class YunohostBackend(Backend):
             logger.warning("services export failed: %s", exc)
         return out
 
+    def certificates(self) -> dict[str, dict[str, Any]]:
+        """Certificate state per domain, from the certd-exported store
+        (/etc/yunohost/certs). Caddy is the ACME owner; ``nostr_certd``
+        exports each cert here, so this is the durable snapshot for backups."""
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            from yunohost.certificate import _get_status
+            from yunohost.domain import domain_list
+
+            for domain in domain_list()["domains"]:
+                try:
+                    status = _get_status(domain)
+                    out[domain] = {
+                        "CA_type": str(status.get("CA_type") or ""),
+                        "CA_name": str(status.get("CA_name") or ""),
+                        "validity_days": int(status.get("validity") or 0),
+                        "style": str(status.get("style") or ""),
+                        "summary": str(status.get("summary") or ""),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    out[domain] = {"summary": "unavailable", "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("certificates export failed: %s", exc)
+        return out
+
     def users(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         try:
@@ -323,6 +351,7 @@ def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = N
         "domains": {f"{name}.toml": data for name, data in backend.domains().items()},
         "apps": {f"{app}.toml": data for app, data in backend.apps().items()},
         "services": {f"{service}.toml": data for service, data in backend.services().items()},
+        "certificates": {f"{domain}.toml": data for domain, data in backend.certificates().items()},
         "identities": {f"{user}.toml": data for user, data in backend.users().items()},
         "package-versions": {"versions.toml": backend.packages()},
     }
