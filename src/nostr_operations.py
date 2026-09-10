@@ -89,23 +89,38 @@ class ToolSpec:
     description: str = ""
 
 
-def _safe_package_plan(package: dict[str, Any] | None = None, **args: Any) -> list[dict[str, Any]]:
+def _safe_package_plan(package: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
     if args or not isinstance(package, dict):
         raise OperationError("package.plan requires exactly one package object")
-    from nostrhost.package_engine import PackageManifest, plan_package, validate_package
+    from nostrhost.package_engine import package_plan_envelope
 
-    return [operation.json_dict() for operation in plan_package(validate_package(PackageManifest.parse_obj(package)))]
+    try:
+        return package_plan_envelope(package)
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"invalid native package: {exc}") from exc
 
 
-def _safe_package_reconcile(plan: list[dict[str, Any]] | None = None, **args: Any) -> dict[str, Any]:
-    if args or not isinstance(plan, list) or not plan:
-        raise OperationError("package.reconcile requires a non-empty plan")
+def _safe_package_reconcile(plan: dict[str, Any] | list[dict[str, Any]] | None = None, **args: Any) -> dict[str, Any]:
+    if args or not isinstance(plan, (dict, list)) or not plan:
+        raise OperationError("package.reconcile requires a native plan envelope")
     from nostrhost.native_providers import NativeOperationExecutor, native_providers
-    from nostrhost.package_engine import apply_reconciled_plan, operation_from_dict
+    from nostrhost.package_engine import apply_reconciled_plan, operation_from_dict, validate_plan_envelope
 
-    operations = [operation_from_dict(item) for item in plan]
+    if isinstance(plan, dict):
+        try:
+            operations = validate_plan_envelope(plan)
+        except (TypeError, ValueError) as exc:
+            raise OperationError(f"invalid native plan envelope: {exc}") from exc
+        plan_digest = plan["plan_sha256"]
+        legacy = False
+    else:
+        # Compatibility for callers that have not yet moved to the signed
+        # envelope. New control-plane requests must use the envelope form.
+        operations = [operation_from_dict(item) for item in plan]
+        plan_digest = ""
+        legacy = True
     results = apply_reconciled_plan(operations, NativeOperationExecutor(native_providers()))
-    return {"operations": len(results), "results": results}
+    return {"operations": len(results), "results": results, "plan_sha256": plan_digest, "legacy_plan": legacy}
 
 
 def _safe_system_version(**args: Any) -> dict[str, Any]:

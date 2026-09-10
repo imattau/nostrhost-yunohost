@@ -461,6 +461,49 @@ class Operation:
         return asdict(self) | {"depends_on": list(self.depends_on)}
 
 
+PLAN_SCHEMA = 1
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def operation_plan_digest(plan: list[Operation]) -> str:
+    """Return the stable digest that binds a plan to an approval request."""
+    return hashlib.sha256(_canonical_json([operation.json_dict() for operation in plan])).hexdigest()
+
+
+def package_plan_envelope(package_data: dict[str, Any]) -> dict[str, Any]:
+    """Build the control-plane envelope for one validated native package."""
+    if not isinstance(package_data, dict):
+        raise PackageError("package plan requires an object")
+    package = validate_package(PackageManifest.parse_obj(package_data))
+    plan = plan_package(package)
+    return {
+        "schema": PLAN_SCHEMA,
+        "package": {"id": package.app.id, "version": package.app.version},
+        "manifest_sha256": hashlib.sha256(_canonical_json(package_data)).hexdigest(),
+        "plan_sha256": operation_plan_digest(plan),
+        "operations": [operation.json_dict() for operation in plan],
+    }
+
+
+def validate_plan_envelope(envelope: dict[str, Any]) -> list[Operation]:
+    """Validate an approved plan envelope before handing it to providers."""
+    if not isinstance(envelope, dict) or envelope.get("schema") != PLAN_SCHEMA:
+        raise PackageError("unsupported or missing native package plan schema")
+    operations = envelope.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise PackageError("native package plan envelope requires operations")
+    plan = [operation_from_dict(item) for item in operations]
+    if envelope.get("plan_sha256") != operation_plan_digest(plan):
+        raise PackageError("native package plan digest does not match operations")
+    package = envelope.get("package")
+    if not isinstance(package, dict) or not package.get("id") or not package.get("version"):
+        raise PackageError("native package plan envelope requires package id and version")
+    return plan
+
+
 class Provider(Protocol):
     resource_type: ClassVar[str]
 

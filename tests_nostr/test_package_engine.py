@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.native_providers import NativeOperationExecutor, PackageProvider, native_providers
-from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, plan_package_removal, reconcile_operation_plan, validate_package
+from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, operation_plan_digest, package_plan_envelope, plan_package, plan_package_removal, reconcile_operation_plan, validate_package, validate_plan_envelope
 
 
 def example() -> dict:
@@ -33,6 +33,17 @@ def test_plan_is_typed_and_dependency_ordered():
     ]
     assert plan[-1].depends_on == ("example:web",)
     assert plan[0].json_dict()["depends_on"] == []
+
+
+def test_plan_envelope_binds_manifest_and_operations():
+    envelope = package_plan_envelope(example())
+    assert envelope["schema"] == 1
+    assert envelope["package"] == {"id": "example", "version": "1.2.0"}
+    assert envelope["plan_sha256"] == operation_plan_digest(validate_plan_envelope(envelope))
+
+    envelope["operations"][0]["args"]["version"] = "tampered"
+    with pytest.raises(PackageError, match="plan digest"):
+        validate_plan_envelope(envelope)
 
 
 def test_removal_plan_reverses_only_owned_resources():
