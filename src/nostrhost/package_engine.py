@@ -521,7 +521,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     for name, policy in package.policies.items():
         plan.append(_op("policy.ensure", f"{app}:policy:{name}", policy.dict(), deps=(package_op.resource,), risk="medium", reverse="policy.remove", summary=f"install {policy.type} policy {policy.name}"))
     for name, hook in package.hooks.items():
-        plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
+        plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"name": f"{app}-{name}", "reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
     return plan
 
 
@@ -644,9 +644,9 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         )
     if operation.name == "secret.ensure":
         return actual.get("exists") is True
-    if operation.name in {"settings.ensure", "backup.register"}:
+    if operation.name in {"settings.ensure", "backup.register", "hook.python.ensure"}:
         return actual.get("exists") is True and (
-            operation.name != "settings.ensure"
+            operation.name not in {"settings.ensure", "hook.python.ensure"}
             or actual.get("sha256") == actual.get("desired_sha256")
         )
     if operation.name == "system_user.ensure":

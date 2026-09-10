@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 from nostrhost.package_engine import Operation
 
 
@@ -436,6 +436,15 @@ def test_json_state_provider_unregisters_state_atomically(tmp_path: Path):
     remove = provider.remove({"name": "example"})[0]
     assert provider.apply(remove)["changed"]
     assert not target.exists()
+
+
+def test_hook_provider_registers_reference_without_executing(tmp_path: Path):
+    provider = HookProvider(state_dir=tmp_path)
+    desired = {"name": "example-post_install", "reference": "hooks.py:post_install"}
+    operation = provider.plan(desired)[0]
+    result = provider.apply(operation)
+    assert result["changed"]
+    assert "hooks.py:post_install" in (tmp_path / "example-post_install.json").read_text()
 
 
 def test_backup_provider_persists_validated_manifest(tmp_path: Path):

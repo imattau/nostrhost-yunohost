@@ -984,6 +984,15 @@ class BackupProvider(JsonStateProvider):
         return super().apply(operation)
 
 
+class HookProvider(JsonStateProvider):
+    """Register restricted Python hook references without executing them."""
+
+    resource_type = "hook"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        super().__init__(state_dir=state_dir, resource_type="hook")
+
+
 class AptProvider:
     resource_type = "package.apt"
 
@@ -1411,6 +1420,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "policy": PolicyProvider(root=root),
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
+        "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
     }
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder, remove_config_builder=caddy_remove_config_builder)
