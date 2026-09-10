@@ -215,6 +215,29 @@ def test_caddy_provider_validates_and_loads_json():
     assert result["loaded"] and client.call[0] == "/load"
 
 
+def test_caddy_provider_requires_explicit_route_removal_builder():
+    class Response:
+        def raise_for_status(self): pass
+    class Client:
+        def post(self, path, *, json): self.call = (path, json); return Response()
+    provider = CaddyProvider(client=Client(), config_builder=lambda args: {"ensure": args})
+    operation = provider.remove({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0]
+    with pytest.raises(ProviderError, match="removal builder"):
+        provider.apply(operation)
+
+
+def test_caddy_provider_uses_native_route_removal_builder():
+    class Response:
+        def raise_for_status(self): pass
+    class Client:
+        def post(self, path, *, json): self.call = (path, json); return Response()
+    client = Client()
+    provider = CaddyProvider(client=client, config_builder=lambda args: {"ensure": args}, remove_config_builder=lambda args: {"remove": args["domain"]})
+    operation = provider.remove({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0]
+    assert provider.apply(operation)["loaded"]
+    assert client.call[1] == {"remove": "example.test"}
+
+
 def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_path: Path):
     calls = []
     command = lambda args, **kwargs: calls.append((args, kwargs))

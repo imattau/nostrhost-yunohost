@@ -758,9 +758,10 @@ class DatabaseProvider:
 class CaddyProvider:
     resource_type = "web.route"
 
-    def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+    def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]], remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> None:
         self.client = client
         self.config_builder = config_builder
+        self.remove_config_builder = remove_config_builder
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         response = self.client.get("/config")
@@ -771,7 +772,12 @@ class CaddyProvider:
         return [Operation("web.route.ensure", desired.get("domain") or desired["upstream"], desired, risk="medium", reverse="web.route.remove", summary="validate and load Caddy JSON configuration")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
-        config = self.config_builder(operation.args)
+        if operation.name == "web.route.remove":
+            if self.remove_config_builder is None:
+                raise ProviderError("a Caddy route removal builder is required for native removal")
+            config = self.remove_config_builder(operation.args)
+        else:
+            config = self.config_builder(operation.args)
         response = self.client.post("/load", json=config)
         response.raise_for_status()
         return {"loaded": True, "domain": operation.args.get("domain")}
@@ -810,7 +816,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -830,5 +836,5 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "backup": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups"), resource_type="backup"),
     }
     if caddy_client is not None and caddy_config_builder is not None:
-        providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
+        providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder, remove_config_builder=caddy_remove_config_builder)
     return providers
