@@ -482,7 +482,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     package_op = _op("package.ensure", app, {"id": app, "version": package.app.version}, reverse="package.remove", summary=f"register package {app}")
     plan.append(package_op)
     for name in package.packages.apt:
-        plan.append(_op("package.apt.ensure", f"{app}:apt:{name}", {"package": name}, deps=(package_op.resource,), risk="medium", reverse="package.apt.remove", summary=f"ensure apt package {name}"))
+        plan.append(_op("package.apt.ensure", f"{app}:apt:{name}", {"package": name}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"ensure apt package {name}"))
     for name, port in package.ports.named.items():
         plan.append(_op("port.validate", f"{app}:port:{name}", {"name": name, "port": port}, deps=(package_op.resource,), summary=f"validate port {port}"))
     user_op: Operation | None = None
@@ -512,7 +512,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
             config_args["_template_root"] = str(template_root)
         plan.append(_op("config.ensure", f"{app}:config:{name}", config_args, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
     if package.runtime:
-        plan.append(_op("runtime.ensure", f"{app}:runtime", package.runtime.dict(), deps=(package_op.resource,), risk="medium", reverse="runtime.remove", summary=f"ensure {package.runtime.type} {package.runtime.version}"))
+        plan.append(_op("runtime.ensure", f"{app}:runtime", package.runtime.dict(), deps=(package_op.resource,), risk="medium", reversible=False, summary=f"ensure {package.runtime.type} {package.runtime.version}"))
     if package.fpm:
         deps = (f"{app}:runtime",) if package.runtime else (package_op.resource,)
         plan.append(_op("fpm.ensure", f"{app}:fpm", {**package.fpm.dict(), "app": app}, deps=deps, risk="medium", reverse="fpm.remove", summary=f"configure PHP-FPM pool {app}"))
@@ -542,16 +542,47 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
     if package.settings.values or package.settings.fields:
-        plan.append(_op("settings.ensure", f"{app}:settings", {"name": app, "fields": {name: field.dict() for name, field in package.settings.fields.items()}, "values": package.settings.values}, deps=(package_op.resource,), summary="ensure typed application settings"))
+        plan.append(_op("settings.ensure", f"{app}:settings", {"name": app, "fields": {name: field.dict() for name, field in package.settings.fields.items()}, "values": package.settings.values}, deps=(package_op.resource,), reverse="settings.remove", summary="ensure typed application settings"))
     for name, secret in package.secrets.items():
         plan.append(_op("secret.ensure", f"{app}:secret:{name}", {"name": name, "generate": secret.generate, "length": secret.length}, deps=(package_op.resource,), risk="high", reverse="secret.remove", summary=f"ensure secret {name}"))
     if package.backup:
-        plan.append(_op("backup.register", f"{app}:backup", {"name": app, "paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), summary="register backup resources"))
+        plan.append(_op("backup.register", f"{app}:backup", {"name": app, "paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), reverse="backup.unregister", summary="register backup resources"))
     for name, policy in package.policies.items():
         plan.append(_op("policy.ensure", f"{app}:policy:{name}", policy.dict(), deps=(package_op.resource,), risk="medium", reverse="policy.remove", summary=f"install {policy.type} policy {policy.name}"))
     for name, hook in package.hooks.items():
         plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"name": f"{app}-{name}", "reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
     return plan
+
+
+def plan_package_removal(package: PackageManifest) -> list[Operation]:
+    """Create the safe, reverse-order lifecycle plan for a native package.
+
+    Only operations with an explicit reverse operation are included. Shared
+    host dependencies (APT packages and runtimes) stay installed, while
+    database removal remains an explicit high-risk operation that callers may
+    gate on a backup/restore policy.
+    """
+    removal: list[Operation] = []
+    previous: str | None = None
+    for operation in reversed(plan_package(package)):
+        if not operation.reversible or not operation.reverse:
+            continue
+        args = dict(operation.args)
+        reverse = operation.reverse
+        dependencies = (previous,) if previous else ()
+        removal_operation = Operation(
+            reverse,
+            operation.resource,
+            args,
+            dependencies,
+            operation.risk,
+            True,
+            operation.name,
+            f"reverse: {operation.summary}",
+        )
+        removal.append(removal_operation)
+        previous = operation.resource
+    return removal
 
 
 def validate_package(package: PackageManifest) -> PackageManifest:

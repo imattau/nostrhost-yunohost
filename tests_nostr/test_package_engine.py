@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.native_providers import NativeOperationExecutor, PackageProvider, native_providers
-from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan, validate_package
+from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, plan_package_removal, reconcile_operation_plan, validate_package
 
 
 def example() -> dict:
@@ -33,6 +33,20 @@ def test_plan_is_typed_and_dependency_ordered():
     ]
     assert plan[-1].depends_on == ("example:web",)
     assert plan[0].json_dict()["depends_on"] == []
+
+
+def test_removal_plan_reverses_only_owned_resources():
+    package = PackageManifest.parse_obj(example() | {
+        "settings": {"values": {"mode": "safe"}},
+        "backup": {"paths": ["/var/lib/example"], "database": False},
+    })
+    plan = plan_package_removal(package)
+    names = [operation.name for operation in plan]
+    assert names[0] == "backup.unregister"
+    assert names[-1] == "package.remove"
+    assert "package.apt.remove" not in names
+    assert "runtime.remove" not in names
+    assert all(operation.depends_on == ((plan[index - 1].resource,) if index else ()) for index, operation in enumerate(plan))
 
 
 def test_plan_distinguishes_filesystem_access_from_portal_permissions():
