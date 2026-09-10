@@ -343,6 +343,67 @@ def apply_operation_plan(plan: list[Operation], executor: Any) -> list[Any]:
     return results
 
 
+def _operation_satisfied(operation: Operation, actual: Any) -> bool:
+    """Return true only for state that providers inspect completely enough to skip."""
+    if not isinstance(actual, dict):
+        return False
+    if operation.name == "directory.ensure":
+        return actual.get("exists") is True and actual.get("mode") == operation.args.get("mode")
+    if operation.name == "package.apt.ensure":
+        return set(operation.args.get("packages", [])) <= set(actual.get("installed", []))
+    if operation.name == "runtime.ensure":
+        return actual.get("matches") is True
+    if operation.name == "database.ensure":
+        return actual.get("exists") is True
+    if operation.name == "secret.ensure":
+        return actual.get("exists") is True
+    if operation.name in {"settings.ensure", "backup.register"}:
+        return actual.get("exists") is True
+    if operation.name == "system_user.ensure":
+        return actual.get("definition") is True
+    return False
+
+
+def reconcile_operation_plan(plan: list[Operation], executor: Any) -> tuple[list[Operation], list[str]]:
+    """Inspect safe resources and return the operations still requiring apply.
+
+    Operations whose providers cannot prove satisfaction remain in the plan.
+    This deliberately avoids treating an existing service/config/source as
+    current without content or checksum verification.
+    """
+    if hasattr(executor, "can_execute"):
+        unsupported = [operation.name for operation in plan if not executor.can_execute(operation)]
+        if unsupported:
+            raise PackageError("native providers are unavailable for: " + ", ".join(unsupported))
+    pending: list[Operation] = []
+    skipped: list[str] = []
+    for operation in plan:
+        provider = executor.provider_for(operation) if hasattr(executor, "provider_for") else None
+        actual = provider.inspect(operation.args) if provider is not None and hasattr(provider, "inspect") else None
+        if _operation_satisfied(operation, actual):
+            skipped.append(operation.resource)
+        else:
+            pending.append(operation)
+    return pending, skipped
+
+
+def apply_reconciled_plan(plan: list[Operation], executor: Any) -> list[Any]:
+    """Inspect, skip satisfied resources, then apply remaining operations."""
+    pending, skipped = reconcile_operation_plan(plan, executor)
+    if hasattr(executor, "can_execute"):
+        unsupported = [operation.name for operation in pending if not executor.can_execute(operation)]
+        if unsupported:
+            raise PackageError("native providers are unavailable for: " + ", ".join(unsupported))
+    pending_resources = {operation.resource for operation in pending}
+    pending = [
+        Operation(operation.name, operation.resource, operation.args,
+                  tuple(dep for dep in operation.depends_on if dep in pending_resources),
+                  operation.risk, operation.reversible, operation.reverse, operation.summary)
+        for operation in pending
+    ]
+    return apply_operation_plan(pending, executor)
+
+
 def load_package(path: Path) -> PackageManifest:
     try:
         with path.open("rb") as stream:

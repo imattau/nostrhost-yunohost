@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.native_providers import NativeOperationExecutor, native_providers
-from nostrhost.package_engine import PackageError, PackageManifest, apply_operation_plan, load_package, migrate_manifest, plan_package
+from nostrhost.package_engine import Operation, PackageError, PackageManifest, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan
 
 
 def example() -> dict:
@@ -101,3 +101,18 @@ def test_apply_preflights_native_provider_coverage():
     plan = plan_package(PackageManifest.parse_obj(example()))
     with pytest.raises(PackageError, match="native providers are unavailable"):
         apply_operation_plan(plan, NativeOperationExecutor(native_providers(root=Path("/tmp"))))
+
+
+def test_reconciliation_skips_directory_when_observed_state_matches(tmp_path: Path):
+    target = tmp_path / "var/lib/example"
+    target.mkdir(parents=True)
+    target.chmod(0o750)
+    plan = [
+        Operation("package.ensure", "example", {"id": "example", "version": "1"}),
+        Operation("directory.ensure", "example:directory:data", {"path": "/var/lib/example", "mode": 0o750}, depends_on=("example",)),
+    ]
+    executor = NativeOperationExecutor(native_providers(root=tmp_path))
+    pending, skipped = reconcile_operation_plan(plan, executor)
+    assert [operation.name for operation in pending] == ["package.ensure"]
+    assert skipped == ["example:directory:data"]
+    assert len(apply_reconciled_plan(plan, executor)) == 1

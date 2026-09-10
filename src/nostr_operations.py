@@ -101,10 +101,10 @@ def _safe_package_reconcile(plan: list[dict[str, Any]] | None = None, **args: An
     if args or not isinstance(plan, list) or not plan:
         raise OperationError("package.reconcile requires a non-empty plan")
     from nostrhost.native_providers import NativeOperationExecutor, native_providers
-    from nostrhost.package_engine import apply_operation_plan, operation_from_dict
+    from nostrhost.package_engine import apply_reconciled_plan, operation_from_dict
 
     operations = [operation_from_dict(item) for item in plan]
-    results = apply_operation_plan(operations, NativeOperationExecutor(native_providers()))
+    results = apply_reconciled_plan(operations, NativeOperationExecutor(native_providers()))
     return {"operations": len(results), "results": results}
 
 
