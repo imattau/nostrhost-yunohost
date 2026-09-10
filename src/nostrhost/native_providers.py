@@ -92,6 +92,48 @@ class DirectoryProvider:
         return [Operation("directory.remove", desired["path"], {"path": desired["path"]}, reverse="directory.ensure", summary=f"remove directory {desired['path']}")]
 
 
+class AccessProvider(DirectoryProvider):
+    """Apply declared ownership and mode using native stat/chown/chmod APIs."""
+
+    resource_type = "access"
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        path = _target(self.root, desired["path"])
+        if not path.exists():
+            return {"exists": False, "path": str(path)}
+        item = path.stat()
+        owner = pwd.getpwuid(item.st_uid).pw_name
+        group = grp.getgrgid(item.st_gid).gr_name
+        return {"exists": True, "path": str(path), "owner": owner, "group": group, "mode": item.st_mode & 0o7777}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("access.ensure", desired["path"], desired, reverse="access.remove", summary=f"enforce access policy on {desired['path']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        path = _target(self.root, operation.args["path"])
+        if operation.name == "access.remove":
+            return {"path": str(path), "changed": False}
+        if not path.exists():
+            raise ProviderError(f"access target does not exist: {path}")
+        targets = path.rglob("*") if operation.args.get("recursive") else [path]
+        targets = [path, *targets] if operation.args.get("recursive") else [path]
+        try:
+            uid = pwd.getpwnam(operation.args["owner"]).pw_uid if operation.args.get("owner") else -1
+            gid = grp.getgrnam(operation.args["group"]).gr_gid if operation.args.get("group") else -1
+        except KeyError as exc:
+            raise ProviderError(f"unknown access owner or group: {exc.args[0]}") from exc
+        for target in targets:
+            os.chmod(target, operation.args["mode"])
+            self.chown(target, uid, gid)
+        return {"path": str(path), "changed": True, "count": len(targets)}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("access.remove", desired["path"], desired, reverse="access.ensure", summary=f"remove access policy from {desired['path']}")]
+
+
 class ConfigFileProvider:
     """Render declared configuration files with Jinja2 and atomic writes."""
 
@@ -842,6 +884,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
+        "access": AccessProvider(root=root),
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "runtime": RuntimeProvider(command=command),

@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -324,6 +324,15 @@ def test_directory_provider_resolves_numeric_ownership(tmp_path: Path):
     operation = provider.plan({"path": "/var/lib/example", "mode": 0o750, "owner": "root", "group": "root"})[0]
     assert provider.apply(operation)["changed"] is True
     assert calls and calls[0][1:] == (0, 0)
+
+
+def test_access_provider_enforces_mode_and_ownership(tmp_path: Path):
+    target = tmp_path / "var/lib/example"
+    target.mkdir(parents=True)
+    provider = AccessProvider(root=tmp_path, chown=lambda *args: None)
+    operation = provider.plan({"path": "/var/lib/example", "owner": "root", "mode": 0o750})[0]
+    result = provider.apply(operation)
+    assert result["changed"] and target.stat().st_mode & 0o7777 == 0o750
 
 
 def test_config_provider_renders_inline_content_atomically(tmp_path: Path):

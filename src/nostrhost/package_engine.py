@@ -91,6 +91,26 @@ class DirectoryResource(BaseModel):
         return value
 
 
+class AccessResource(BaseModel):
+    path: Path
+    owner: str | None = None
+    group: str | None = None
+    mode: int = Field(0o750, ge=0, le=0o7777)
+    recursive: bool = False
+
+    @validator("path")
+    def absolute_path(cls, value: Path) -> Path:
+        if not value.is_absolute() or ".." in PurePosixPath(value).parts:
+            raise ValueError("access paths must be absolute and cannot contain '..'")
+        return value
+
+    @root_validator
+    def has_owner_or_group(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if not (values.get("owner") or values.get("group")):
+            raise ValueError("access resources require an owner or group")
+        return values
+
+
 class ConfigFileResource(BaseModel):
     destination: Path
     content: str | None = None
@@ -197,6 +217,7 @@ class PackageManifest(BaseModel):
     ports: PortsResource = Field(default_factory=PortsResource)
     user: UserResource | None = None
     directories: dict[str, DirectoryResource] = Field(default_factory=dict)
+    permissions: dict[str, AccessResource] = Field(default_factory=dict)
     config: dict[str, ConfigFileResource] = Field(default_factory=dict)
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
@@ -208,7 +229,7 @@ class PackageManifest(BaseModel):
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "config", "secrets", "hooks")
+    @validator("sources", "directories", "permissions", "config", "secrets", "hooks")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
@@ -274,6 +295,9 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     for name, directory in package.directories.items():
         deps = (user_op.resource,) if user_op else (package_op.resource,)
         plan.append(_op("directory.ensure", f"{app}:directory:{name}", {"path": str(directory.path), "owner": directory.owner or (package.user.name if package.user else None), "group": directory.group, "mode": directory.mode, "backup": directory.backup}, deps=deps, reverse="directory.remove", summary=f"ensure directory {directory.path}"))
+    for name, access in package.permissions.items():
+        deps = (user_op.resource,) if user_op else (package_op.resource,)
+        plan.append(_op("access.ensure", f"{app}:access:{name}", {"path": str(access.path), "owner": access.owner, "group": access.group, "mode": access.mode, "recursive": access.recursive}, deps=deps, reverse="access.remove", summary=f"enforce access policy on {access.path}"))
     for name, source in package.sources.items():
         plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
     for name, config in package.config.items():
@@ -350,6 +374,13 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         return False
     if operation.name == "directory.ensure":
         return actual.get("exists") is True and actual.get("mode") == operation.args.get("mode")
+    if operation.name == "access.ensure":
+        return (
+            actual.get("exists") is True
+            and actual.get("mode") == operation.args.get("mode")
+            and (not operation.args.get("owner") or actual.get("owner") == operation.args["owner"])
+            and (not operation.args.get("group") or actual.get("group") == operation.args["group"])
+        )
     if operation.name == "package.apt.ensure":
         return set(operation.args.get("packages", [])) <= set(actual.get("installed", []))
     if operation.name == "runtime.ensure":
