@@ -134,6 +134,137 @@ class AccessProvider(DirectoryProvider):
         return [Operation("access.remove", desired["path"], desired, reverse="access.ensure", summary=f"remove access policy from {desired['path']}")]
 
 
+class PermissionProvider:
+    """Reconcile an application's Portal/SSO permission without shell helpers."""
+
+    resource_type = "permission"
+
+    def __init__(self, api: Any = None) -> None:
+        self.api = api
+
+    def _api(self) -> Any:
+        if self.api is None:
+            self.api = self._default_api()
+        return self.api
+
+    @staticmethod
+    def _default_api() -> Any:
+        from yunohost.app import app_ssowatconf
+        from yunohost.permission import (
+            _sync_permissions_with_ldap,
+            permission_create,
+            permission_delete,
+            permission_url,
+            user_permission_info,
+            user_permission_update,
+        )
+        from yunohost.app import app_setting
+
+        class Api:
+            info = staticmethod(user_permission_info)
+            create = staticmethod(permission_create)
+            delete = staticmethod(permission_delete)
+            url = staticmethod(permission_url)
+            update = staticmethod(user_permission_update)
+
+            @staticmethod
+            def sync() -> None:
+                _sync_permissions_with_ldap()
+                app_ssowatconf()
+
+            @staticmethod
+            def set_auth_request(name: str, enabled: bool) -> None:
+                app, permission = name.split(".", 1)
+                settings = app_setting(app, "_permissions") or {}
+                settings.setdefault(permission, {})["auth_request"] = enabled
+                app_setting(app, "_permissions", settings)
+
+        return Api()
+
+    @staticmethod
+    def _permission(desired: dict[str, Any]) -> str:
+        app = _safe_name(str(desired.get("app", "")))
+        name = _safe_name(str(desired.get("name", "")))
+        return f"{app}.{name}"
+
+    @staticmethod
+    def _allowed(desired: dict[str, Any]) -> list[str]:
+        allowed = desired.get("allowed")
+        return sorted([allowed] if isinstance(allowed, str) else list(allowed or []))
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        permission = self._permission(desired)
+        try:
+            info = dict(self._api().info(permission))
+        except Exception:
+            return {"permission": permission, "exists": False}
+        return {
+            "permission": permission,
+            "exists": True,
+            "url": info.get("url"),
+            "additional_urls": sorted(info.get("additional_urls", [])),
+            "allowed": sorted(info.get("allowed", [])),
+            "auth_header": info.get("auth_header", True),
+            "auth_request": info.get("auth_request", False),
+            "show_tile": info.get("show_tile", False),
+            "protected": info.get("protected", False),
+        }
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        permission = self._permission(desired)
+        return [Operation("permission.ensure", permission, desired, risk="medium", reverse="permission.remove", summary=f"ensure Portal permission {permission}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        desired = operation.args
+        permission = self._permission(desired)
+        if operation.name == "permission.remove":
+            self._api().delete(permission, force=True, sync_perm=False)
+            self._api().sync()
+            return {"permission": permission, "changed": True}
+
+        actual = self.inspect(desired)
+        allowed = self._allowed(desired)
+        if not actual["exists"]:
+            self._api().create(
+                permission,
+                allowed=allowed,
+                url=desired.get("url"),
+                additional_urls=desired.get("additional_urls", []),
+                auth_header=desired.get("auth_header", True),
+                show_tile=desired.get("show_tile"),
+                protected=desired.get("protected", False),
+                sync_perm=False,
+            )
+        else:
+            current = actual.get("allowed", [])
+            self._api().update(
+                permission,
+                add=[group for group in allowed if group not in current],
+                remove=[group for group in current if group not in allowed],
+                show_tile=desired.get("show_tile"),
+                protected=desired.get("protected", False),
+                sync_perm=False,
+                log_success_as_debug=True,
+            )
+            self._api().url(
+                permission,
+                url=desired.get("url"),
+                set_url=desired.get("additional_urls", []),
+                auth_header=desired.get("auth_header", True),
+                sync_perm=False,
+            )
+        self._api().set_auth_request(permission, bool(desired.get("auth_request", False)))
+        self._api().sync()
+        return {"permission": permission, "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        permission = self._permission(desired)
+        return [Operation("permission.remove", permission, desired, risk="medium", reverse="permission.ensure", summary=f"remove Portal permission {permission}")]
+
+
 class ConfigFileProvider:
     """Render declared configuration files with Jinja2 and atomic writes."""
 
@@ -960,6 +1091,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "package": PackageProvider(),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "access": AccessProvider(root=root),
+        "permission": PermissionProvider(),
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "runtime": RuntimeProvider(command=command),

@@ -35,6 +35,18 @@ def test_plan_is_typed_and_dependency_ordered():
     assert plan[0].json_dict()["depends_on"] == []
 
 
+def test_plan_distinguishes_filesystem_access_from_portal_permissions():
+    raw = example() | {
+        "access": {"data": {"path": "/var/lib/example", "owner": "example"}},
+        "permissions": {"main": {"url": "/", "allowed": ["all_users"]}},
+    }
+    plan = plan_package(PackageManifest.parse_obj(raw))
+    assert [operation.name for operation in plan].count("access.ensure") == 1
+    permission = next(operation for operation in plan if operation.name == "permission.ensure")
+    assert permission.args["app"] == "example"
+    assert permission.args["show_tile"] is True
+
+
 def test_invalid_source_hash_and_path_are_rejected():
     invalid = example()
     invalid["source"]["main"]["sha256"] = "bad"

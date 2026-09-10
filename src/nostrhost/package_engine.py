@@ -112,6 +112,34 @@ class AccessResource(BaseModel):
         return values
 
 
+class PermissionResource(BaseModel):
+    url: str | None = None
+    additional_urls: list[str] = Field(default_factory=list)
+    allowed: str | list[str] | None = None
+    auth_header: bool = True
+    auth_request: bool = False
+    show_tile: bool | None = None
+    protected: bool = False
+
+    @validator("url")
+    def valid_url(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("permission urls must not be empty")
+        return value
+
+    @validator("additional_urls")
+    def unique_urls(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(not url.strip() for url in value):
+            raise ValueError("permission additional_urls must be unique and non-empty")
+        return value
+
+    @root_validator
+    def default_tile(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if values.get("show_tile") is None:
+            values["show_tile"] = bool(values.get("url"))
+        return values
+
+
 class ConfigFileResource(BaseModel):
     destination: Path
     content: str | None = None
@@ -238,7 +266,8 @@ class PackageManifest(BaseModel):
     ports: PortsResource = Field(default_factory=PortsResource)
     user: UserResource | None = None
     directories: dict[str, DirectoryResource] = Field(default_factory=dict)
-    permissions: dict[str, AccessResource] = Field(default_factory=dict)
+    access: dict[str, AccessResource] = Field(default_factory=dict)
+    permissions: dict[str, PermissionResource] = Field(default_factory=dict)
     config: dict[str, ConfigFileResource] = Field(default_factory=dict)
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
@@ -251,7 +280,7 @@ class PackageManifest(BaseModel):
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "permissions", "config", "secrets", "hooks", "policies")
+    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
@@ -317,7 +346,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     for name, directory in package.directories.items():
         deps = (user_op.resource,) if user_op else (package_op.resource,)
         plan.append(_op("directory.ensure", f"{app}:directory:{name}", {"path": str(directory.path), "owner": directory.owner or (package.user.name if package.user else None), "group": directory.group, "mode": directory.mode, "backup": directory.backup}, deps=deps, reverse="directory.remove", summary=f"ensure directory {directory.path}"))
-    for name, access in package.permissions.items():
+    for name, access in package.access.items():
         deps = (user_op.resource,) if user_op else (package_op.resource,)
         plan.append(_op("access.ensure", f"{app}:access:{name}", {"path": str(access.path), "owner": access.owner, "group": access.group, "mode": access.mode, "recursive": access.recursive}, deps=deps, reverse="access.remove", summary=f"enforce access policy on {access.path}"))
     for name, source in package.sources.items():
@@ -344,6 +373,10 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     if package.web:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("web.route.ensure", f"{app}:web", package.web.dict(), deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
+    for name, permission in package.permissions.items():
+        deps = (f"{app}:web",) if package.web else (package_op.resource,)
+        permission_args = {**permission.dict(), "app": app, "name": name}
+        plan.append(_op("permission.ensure", f"{app}:permission:{name}", permission_args, deps=deps, risk="medium", reverse="permission.remove", summary=f"ensure Portal permission {app}.{name}"))
     if package.health:
         deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else (package_op.resource,))
         plan.append(_op("health.http.check", f"{app}:health", package.health.dict(), deps=deps, risk="low", reversible=False, summary="check application health"))
@@ -437,6 +470,20 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
             and actual.get("mode") == operation.args.get("mode")
             and (not operation.args.get("owner") or actual.get("owner") == operation.args["owner"])
             and (not operation.args.get("group") or actual.get("group") == operation.args["group"])
+        )
+    if operation.name == "permission.ensure":
+        if not actual or actual.get("exists") is not True:
+            return False
+        allowed = operation.args.get("allowed")
+        expected_allowed = [allowed] if isinstance(allowed, str) else sorted(allowed or [])
+        return (
+            sorted(actual.get("allowed", [])) == expected_allowed
+            and actual.get("url") == operation.args.get("url")
+            and sorted(actual.get("additional_urls", [])) == sorted(operation.args.get("additional_urls", []))
+            and actual.get("auth_header") == operation.args.get("auth_header")
+            and actual.get("auth_request") == operation.args.get("auth_request")
+            and actual.get("show_tile") == operation.args.get("show_tile")
+            and actual.get("protected") == operation.args.get("protected")
         )
     if operation.name == "package.apt.ensure":
         packages = operation.args.get("packages")

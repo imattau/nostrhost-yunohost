@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -358,6 +358,61 @@ def test_policy_provider_writes_and_removes_managed_policy(tmp_path: Path):
     assert target.read_text() == desired["content"]
     provider.apply(provider.remove(desired)[0])
     assert not target.exists()
+
+
+def test_permission_provider_reconciles_portal_permission():
+    state = {}
+
+    class API:
+        syncs = 0
+
+        def info(self, name):
+            if name not in state:
+                raise KeyError(name)
+            return state[name].copy()
+
+        def create(self, name, **kwargs):
+            state[name] = {
+                "url": kwargs["url"],
+                "additional_urls": kwargs["additional_urls"],
+                "allowed": kwargs["allowed"],
+                "auth_header": kwargs["auth_header"],
+                "auth_request": False,
+                "show_tile": kwargs["show_tile"],
+                "protected": kwargs["protected"],
+            }
+
+        def update(self, name, *, add, remove, show_tile, protected, **kwargs):
+            state[name]["allowed"] = [group for group in state[name]["allowed"] if group not in remove] + add
+            state[name]["show_tile"] = show_tile
+            state[name]["protected"] = protected
+
+        def url(self, name, *, url, set_url, auth_header, **kwargs):
+            state[name].update(url=url, additional_urls=set_url, auth_header=auth_header)
+
+        def delete(self, name, **kwargs):
+            del state[name]
+
+        def sync(self):
+            self.syncs += 1
+
+        def set_auth_request(self, name, enabled):
+            state[name]["auth_request"] = enabled
+
+    api = API()
+    provider = PermissionProvider(api=api)
+    desired = {"app": "example", "name": "main", "url": "/", "allowed": ["all_users"], "show_tile": True, "auth_request": True, "additional_urls": []}
+    ensure = provider.plan(desired)[0]
+    provider.apply(ensure)
+    assert provider.inspect(desired)["allowed"] == ["all_users"]
+
+    desired["allowed"] = ["admins"]
+    provider.apply(provider.plan(desired)[0])
+    assert provider.inspect(desired)["allowed"] == ["admins"]
+    assert api.syncs == 2
+
+    provider.apply(provider.remove(desired)[0])
+    assert provider.inspect(desired)["exists"] is False
 
 
 def test_port_provider_checks_bind_availability():
