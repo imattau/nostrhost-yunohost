@@ -1524,7 +1524,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "fpm": FpmProvider(root=root, command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
-        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, mongo_client_factory=mongo_client_factory, redis_client_factory=redis_client_factory, credential_reader=credential_reader),
+        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, mongo_client_factory=mongo_client_factory, redis_client_factory=redis_client_factory, credential_reader=credential_reader, command=command),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
         "port": PortProvider(),

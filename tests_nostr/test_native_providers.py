@@ -304,6 +304,13 @@ def test_database_provider_uses_bounded_dump_and_restore_commands(tmp_path: Path
     ]
 
 
+def test_native_provider_factory_routes_database_commands_through_injected_runner(tmp_path: Path):
+    calls = []
+    providers = native_providers(command=lambda argv, **kwargs: calls.append((argv, kwargs)))
+    providers["database"].apply(Operation("database.dump", "example_db", {"type": "postgresql", "name": "example_db", "output": str(tmp_path / "db.dump")}))
+    assert calls == [(["pg_dump", "--dbname", "example_db", "--format", "custom", "--file", str(tmp_path / "db.dump")], {"check": True})]
+
+
 def test_database_dump_rejects_traversal_path():
     provider = PostgresProvider(command=lambda *_args, **_kwargs: None)
     operation = Operation("database.dump", "example_db", {"name": "example_db", "output": "/var/lib/../etc/db.dump"})
