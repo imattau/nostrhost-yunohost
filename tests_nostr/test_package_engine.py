@@ -52,19 +52,30 @@ def test_schema_has_native_resource_shape():
     assert schema["additionalProperties"] is False
 
 
-def test_migration_maps_v2_resources_and_leaves_scripts_explicit():
+def test_migration_maps_declarative_v2_resources():
     result = migrate_manifest({
-        "id": "legacy",
+        "id": "converted",
         "version": "2.0",
         "resources": {
             "apt": {"packages": ["ffmpeg"]},
-            "install_dir": {"path": "/opt/legacy"},
-            "data_dir": {"path": "/var/lib/legacy"},
+            "install_dir": {"path": "/opt/converted"},
+            "data_dir": {"path": "/var/lib/converted"},
         },
     })
     assert result["packages"] == {"apt": ["ffmpeg"]}
     assert result["directories"]["data"]["backup"] is True
     assert "hooks" not in result
+
+
+def test_migration_rejects_imperative_scripts(tmp_path: Path):
+    from nostrhost.package_engine import migrate_manifest_file
+
+    app = tmp_path / "app"
+    (app / "scripts").mkdir(parents=True)
+    (app / "scripts" / "install").write_text("#!/bin/bash\n")
+    (app / "manifest.toml").write_text("id = 'converted'\nversion = '1'\n")
+    with pytest.raises(PackageError, match="cannot migrate imperative package scripts"):
+        migrate_manifest_file(app / "manifest.toml", tmp_path / "package.toml")
 
 
 def test_load_package_reports_parse_errors(tmp_path: Path):

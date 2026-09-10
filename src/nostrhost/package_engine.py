@@ -136,21 +136,13 @@ class SecretResource(BaseModel):
 
 
 class HookResource(BaseModel):
-    python: str | None = None
-    legacy: str | None = None
+    python: str = Field(..., min_length=1)
 
     @validator("python")
     def python_reference(cls, value: str | None) -> str | None:
         if value and (":" not in value or value.startswith("/") or ".." in PurePosixPath(value.split(":", 1)[0]).parts):
             raise ValueError("Python hooks must use a relative module:function reference")
         return value
-
-    @validator("legacy")
-    def legacy_reference(cls, value: str | None) -> str | None:
-        if value and (value.startswith("/") or ".." in PurePosixPath(value).parts):
-            raise ValueError("legacy hooks must use a relative script path")
-        return value
-
 
 class PackageManifest(BaseModel):
     app: AppResource
@@ -260,8 +252,7 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     if package.backup:
         plan.append(_op("backup.register", f"{app}:backup", {"paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), summary="register backup resources"))
     for name, hook in package.hooks.items():
-        operation = "hook.python.ensure" if hook.python else "hook.legacy.ensure"
-        plan.append(_op(operation, f"{app}:hook:{name}", {"reference": hook.python or hook.legacy}, deps=(package_op.resource,), risk="high" if hook.legacy else "medium", reversible=False, summary=f"register {name} hook"))
+        plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
     return plan
 
 
@@ -297,13 +288,17 @@ def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def migrate_manifest_file(source: Path, destination: Path) -> None:
+    scripts = source.parent / "scripts"
+    unsupported = [name for name in ("install", "upgrade", "remove", "backup", "restore") if (scripts / name).is_file()]
+    if unsupported:
+        raise PackageError(
+            "cannot migrate imperative package scripts ("
+            + ", ".join(unsupported)
+            + "); convert the package to declarative resources or Python hooks first"
+        )
     with source.open("rb") as stream:
         raw = tomllib.load(stream)
     converted = migrate_manifest(raw)
-    scripts = source.parent / "scripts"
-    for name in ("install", "upgrade", "remove", "backup", "restore"):
-        if (scripts / name).is_file():
-            converted.setdefault("hooks", {})[name] = {"legacy": f"scripts/{name}"}
     destination.write_text(_toml_dump(converted), encoding="utf-8")
 
 

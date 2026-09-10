@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 
 try:
-    from yunohost.nostrhost.package_engine import load_package, migrate_manifest_file, plan_package, schema
+    from yunohost.nostrhost.package_engine import PackageError, load_package, migrate_manifest_file, plan_package, schema
 except ModuleNotFoundError:  # source checkout; Debian installs this below yunohost/
-    from nostrhost.package_engine import load_package, migrate_manifest_file, plan_package, schema
+    from nostrhost.package_engine import PackageError, load_package, migrate_manifest_file, plan_package, schema
 
 
 def main() -> int:
@@ -23,18 +23,21 @@ def main() -> int:
     migrate.add_argument("manifest", type=Path)
     migrate.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.command == "schema":
-        print(json.dumps(schema(), indent=2, sort_keys=True))
-    elif args.command == "migrate":
-        migrate_manifest_file(args.manifest, args.output)
-    else:
-        operations = [operation.json_dict() for operation in plan_package(load_package(args.package))]
-        if args.as_json:
-            print(json.dumps(operations, indent=2, sort_keys=True, default=str))
+    try:
+        if args.command == "schema":
+            print(json.dumps(schema(), indent=2, sort_keys=True))
+        elif args.command == "migrate":
+            migrate_manifest_file(args.manifest, args.output)
         else:
-            for index, operation in enumerate(operations, 1):
-                deps = f" (after {', '.join(operation['depends_on'])})" if operation["depends_on"] else ""
-                print(f"{index:02d} {operation['name']} {operation['resource']}: {operation['summary']}{deps}")
+            operations = [operation.json_dict() for operation in plan_package(load_package(args.package))]
+            if args.as_json:
+                print(json.dumps(operations, indent=2, sort_keys=True, default=str))
+            else:
+                for index, operation in enumerate(operations, 1):
+                    deps = f" (after {', '.join(operation['depends_on'])})" if operation["depends_on"] else ""
+                    print(f"{index:02d} {operation['name']} {operation['resource']}: {operation['summary']}{deps}")
+    except PackageError as exc:
+        parser.error(str(exc))
     return 0
 
 
