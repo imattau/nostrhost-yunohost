@@ -459,6 +459,22 @@ def test_rollback_apply_bad_plan_reports_failed_result():
     assert "steps" in body["error"]
 
 
+def test_rollback_apply_partial_plan_reports_failed_result():
+    h = Harness()
+    h.grant(["state.write"])
+    plan = _sample_plan()
+    plan["steps"][0].update(
+        reversibility="impossible", automatic=False, tool=None, reverse="manual"
+    )
+    ev, handled = h.request("rollback.apply", args={"plan": plan})
+    assert handled
+    assert h.approve(ev["id"])
+    assert h.engine.state(ev["id"]) == OpState.FAILED
+    body = _content(h.events_by_kind(2204)[0])
+    assert body["ok"] is False
+    assert body["result"]["steps"][0]["status"] == "blocked"
+
+
 def test_app_remove_handler_argument_validation():
     """The rollback app-removal handler is bounded: single app id, explicit
     purge flag, no extra args."""

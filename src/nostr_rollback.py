@@ -259,6 +259,7 @@ def apply_rollback_plan(
     backend: Any,
     restic: ResticClient | None = None,
     approve: bool = False,
+    repo: StateRepo | None = None,
 ) -> list[dict[str, Any]]:
     """Execute an assisted rollback plan through the operation chain.
 
@@ -277,6 +278,20 @@ def apply_rollback_plan(
         raise RollbackError("rollback plan has no steps")
     if plan.get("approved"):
         raise RollbackError("rollback plan already executed")
+    if plan.get("schema") != ROLLBACK_SCHEMA:
+        raise RollbackError(f"unsupported rollback plan schema: {plan.get('schema')!r}")
+    if not isinstance(plan.get("from"), str) or not isinstance(plan.get("to"), str):
+        raise RollbackError("rollback plan must identify string 'from' and 'to' revisions")
+    if repo is not None:
+        current = repo.revision()
+        if current != plan["to"]:
+            raise RollbackError(
+                f"rollback plan is stale: plan targets {plan['to'][:16]}, current state is {current[:16] or '(none)'}"
+            )
+        try:
+            repo.diff_names(plan["from"], plan["to"])
+        except Exception as exc:  # noqa: BLE001 - normalize invalid refs for callers
+            raise RollbackError(f"rollback plan revisions are not available: {exc}") from exc
 
     report: list[dict[str, Any]] = []
     failures = 0
@@ -310,7 +325,11 @@ def apply_rollback_plan(
 
     plan["approved"] = True
     plan["_report"] = report
-    plan["_ok"] = failures == 0
+    # A blocked/manual step is a partial rollback, not a successful restore.
+    # In particular, callers use _ok to decide whether the resulting state may
+    # become known-good.
+    complete = all(e["status"] in ("executed", "restored", "skipped") for e in report)
+    plan["_ok"] = failures == 0 and complete
     return report
 
 

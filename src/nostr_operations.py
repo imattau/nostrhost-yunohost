@@ -163,7 +163,9 @@ def _safe_service_control(name: str = "", action: str = "", **args: Any) -> dict
     return {"service": name, "action": action, "status": service_status(name)["status"]}
 
 
-def _run_rollback_apply(args: dict[str, Any], *, backend: Any, restic: Any) -> dict[str, Any]:
+def _run_rollback_apply(
+    args: dict[str, Any], *, backend: Any, restic: Any, repo: Any = None
+) -> dict[str, Any]:
     """Execute a rollback plan through the operation chain (the shared path).
 
     ``args`` must be exactly ``{"plan": {...}}`` — a plan produced by
@@ -183,8 +185,10 @@ def _run_rollback_apply(args: dict[str, Any], *, backend: Any, restic: Any) -> d
         raise OperationError("rollback plan already executed")
     from .nostr_rollback import apply_rollback_plan
 
-    report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True)
-    return {"steps": report}
+    report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True, repo=repo)
+    # Keep the per-step report for the audit result while allowing the daemon
+    # to distinguish a complete rollback from a partial/manual one.
+    return {"steps": report, "_ok": bool(plan.get("_ok"))}
 
 
 def _safe_rollback_apply(plan: Any = None, **args: Any) -> dict[str, Any]:

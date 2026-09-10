@@ -273,10 +273,15 @@ class OperationEngine:
             if record.tool == "rollback.apply":
                 from .nostr_operations import _run_rollback_apply
 
-                result = _run_rollback_apply(record.args, backend=self._backend, restic=self._restic)
+                state_repo = getattr(self._state, "repo", None)
+                result = _run_rollback_apply(
+                    record.args, backend=self._backend, restic=self._restic, repo=state_repo
+                )
+                operation_ok = bool(result.pop("_ok", True))
             else:
                 result = self._backend.execute(record.tool, record.args)
-            body: dict[str, Any] = {"ok": True, "result": result}
+                operation_ok = True
+            body: dict[str, Any] = {"ok": operation_ok, "result": result}
         except Exception as exc:  # noqa: BLE001 - a failed tool is a 2204, not a crash
             logger.error("execution of %s failed: %s", record.tool, exc)
             body = {"ok": False, "error": str(exc)}

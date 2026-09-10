@@ -161,7 +161,7 @@ def cmd_rollback_apply(args) -> int:
     backend = YnhExecutorBackend()
     restic = restic_client() if plan.get("restic_snapshot") else None
     try:
-        report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True)
+        report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True, repo=default_repo())
     except RollbackError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR

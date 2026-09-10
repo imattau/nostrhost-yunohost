@@ -165,7 +165,7 @@ def test_apply_executes_registry_tools_and_marks_unknown_manual(tmp_path: Path):
     assert by_section["identities"]["status"] == "manual"  # credential-rotation, no tool
     executed_tools = [c[0] for c in backend.calls]
     assert "service.control" in executed_tools and "app.remove" in executed_tools
-    assert plan["approved"] is True and plan["_ok"] is True
+    assert plan["approved"] is True and plan["_ok"] is False
 
 
 def test_apply_restore_step_blocked_without_restic(tmp_path: Path):
@@ -177,6 +177,31 @@ def test_apply_restore_step_blocked_without_restic(tmp_path: Path):
     assert plan["steps"][0]["restore_required"] is True
     report = apply_rollback_plan(plan, backend=ExecBackend(), restic=None, approve=True)
     assert report[0]["status"] == "blocked"
+    assert plan["_ok"] is False
+
+
+def test_apply_rejects_stale_plan(tmp_path: Path):
+    repo, good = _seed_repo(tmp_path)
+    changed = dict(good)
+    changed["services"] = {"dnsmasq.toml": {"status": "dead", "type": "system"}}
+    repo.commit(changed, op_event_id="s" * 64, phase="post", health="failed")
+    plan = build_rollback_plan(repo)
+
+    newer = dict(changed)
+    newer["services"] = {"dnsmasq.toml": {"status": "running", "type": "system"}}
+    repo.commit(newer, op_event_id="t" * 64, phase="post", health="failed")
+
+    with pytest.raises(RollbackError, match="stale"):
+        apply_rollback_plan(plan, backend=ExecBackend(), approve=True, repo=repo)
+
+
+def test_apply_rejects_unknown_plan_schema():
+    with pytest.raises(RollbackError, match="schema"):
+        apply_rollback_plan(
+            {"schema": 99, "from": "a", "to": "b", "steps": [{}], "approved": False},
+            backend=ExecBackend(),
+            approve=True,
+        )
 
 
 def test_apply_restore_step_uses_restic(tmp_path: Path):
