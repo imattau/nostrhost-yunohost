@@ -186,7 +186,6 @@ class PermissionProvider:
 
     @staticmethod
     def _default_api() -> Any:
-        from yunohost.app import app_ssowatconf
         from yunohost.permission import (
             _sync_permissions_with_ldap,
             permission_create,
@@ -206,8 +205,12 @@ class PermissionProvider:
 
             @staticmethod
             def sync() -> None:
+                from .permissions import write_permissions_projection
+
                 _sync_permissions_with_ldap()
-                app_ssowatconf()
+                # SSOwat retired: regenerate the authd's permission projection
+                # instead of /etc/ssowat/conf.json.
+                write_permissions_projection()
 
             @staticmethod
             def set_auth_request(name: str, enabled: bool) -> None:
