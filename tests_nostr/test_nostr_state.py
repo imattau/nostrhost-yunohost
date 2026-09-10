@@ -152,7 +152,7 @@ def test_reconciliation_plan_is_report_only(tmp_path: Path):
             "action": "update",
             "risk": "low",
             "tool": "service.control",
-            "args": {"name": "dnsmasq", "action": "stop"},
+            "args": {"name": "dnsmasq", "action": "start"},
             "automatic": True,
         }
     ]
@@ -170,7 +170,7 @@ def test_reconciliation_apply_requires_approval_and_is_bounded(tmp_path: Path):
         apply_reconciliation_plan(plan, backend=backend, repo=repo)
     report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
     assert report[0]["status"] == "executed"
-    assert backend.calls == [("service.control", {"name": "dnsmasq", "action": "stop"})]
+    assert backend.calls == [("service.control", {"name": "dnsmasq", "action": "start"})]
 
 
 def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):

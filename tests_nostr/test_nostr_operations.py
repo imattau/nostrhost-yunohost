@@ -58,6 +58,7 @@ def test_registry_has_the_safe_tools():
         "service.control",
         "service.restart",
         "service.status",
+        "state.reconcile",
         "system.version",
     ]
     assert tool_spec("system.version").scope == "server.read"
