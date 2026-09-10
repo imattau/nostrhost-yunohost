@@ -2,13 +2,15 @@
 #
 # Copyright (c) 2026 NostrHost Contributors
 #
-# Regenerate Caddy per-domain config snippets (regenconf category: caddy).
+# Regenerate Caddy config (regenconf category: caddy).
 #
 # The real web routing is reconciled through the Caddy admin API (native
-# web.route resources and nostrhost-domain:<domain> sites); this category only
-# maintains a tracked per-domain snippet under /etc/caddy/conf.d so regenconf
-# can detect manual modifications and domain add/remove can re-render it,
-# mirroring the retired 15-nginx category.
+# web.route resources and nostrhost-domain:<domain> sites); this category
+# tracks the base Caddyfile and a per-domain snippet under /etc/caddy/conf.d
+# so regenconf can detect manual modifications and domain add/remove can
+# re-render them, mirroring the retired 15-nginx category. The base
+# Caddyfile carries the global options block (admin API, ports, storage,
+# and the access-log directive consumed by CrowdSec's caddy-logs parser).
 
 set -e
 source /usr/share/yunohost/helpers
@@ -29,10 +31,13 @@ do_regen() {
     caddy_dir="${pending_dir}/etc/caddy"
     mkdir -p "$caddy_dir/conf.d"
     cd /usr/share/yunohost/conf/caddy
+    ynh_render_template "Caddyfile.template" "${caddy_dir}/Caddyfile"
     for domain in $(yunohost domain list --output-as json 2>/dev/null | jq -r '.domains[]'); do
         [ -n "$domain" ] || continue
-        ynh_render_template "caddy_domain.conf" "${caddy_dir}/conf.d/${domain}.conf" \
-            --var domain="$domain"
+        # ynh_render_template renders with os.environ only (it ignores extra
+        # args), so `domain` must be exported for {{ domain }} to populate.
+        export domain="$domain"
+        ynh_render_template "caddy_domain.conf" "${caddy_dir}/conf.d/${domain}.conf"
     done
     exit 0
 }
