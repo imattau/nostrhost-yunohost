@@ -19,6 +19,11 @@ nginx:
   test_conf: nginx -t
   needs_exposed_ports: [80, 443]
   category: web
+caddy:
+  log: /var/log/caddy
+  test_conf: caddy validate --config /etc/caddy/Caddyfile
+  needs_exposed_ports: [80, 443]
+  category: web
 # Yunohost will dynamically add installed php-fpm services (7.3, 7.4, 8.0, ...) in services.py
 #php7.4-fpm:
 #  log: /var/log/php7.4-fpm.log

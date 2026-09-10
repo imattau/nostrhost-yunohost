@@ -86,6 +86,21 @@ def _route_id(desired: dict[str, Any]) -> str:
     return f"nostrhost-web:{desired.get('domain') or 'app'}"
 
 
+def build_domain_site(domain: str) -> dict[str, Any]:
+    """A minimal, precise Caddy site for a domain (domain_add/create).
+
+    Matches only the domain's root path, so it never shadows app routes on the
+    same host. ACME for the domain is handled by Caddy's global ``acme_ca`` /
+    automatic HTTPS (the "ACME policy"); ``certd`` exports the resulting cert.
+    """
+    return {
+        "@id": f"nostrhost-domain:{domain}",
+        "match": [{"host": [domain]}, {"path": ["/"]}],
+        "handle": [{"handler": "static_response", "status_code": 200, "body": f"nostrhost domain {domain}"}],
+        "terminal": True,
+    }
+
+
 def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     """Build a Caddy route JSON object for a native ``[web]`` resource.
 
@@ -208,3 +223,11 @@ class CaddyAdminClient:
             return
         response.raise_for_status()
         logger.info("removed caddy route %s", route_id)
+
+    def ensure_domain_site(self, domain: str) -> str:
+        """Create (or reconcile) Caddy's site for ``domain`` (domain_add)."""
+        return self.ensure_route(build_domain_site(domain))
+
+    def remove_domain_site(self, domain: str) -> None:
+        """Remove Caddy's site for ``domain`` (domain_remove)."""
+        self.delete_route(f"nostrhost-domain:{domain}")

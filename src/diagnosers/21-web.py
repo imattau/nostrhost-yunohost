@@ -29,6 +29,28 @@ from ..settings import settings_get
 from ..utils.dns import is_special_use_tld
 from ..utils.file_utils import mkdir, read_file, rm
 
+
+def _domain_has_caddy_site(domain: str) -> bool:
+    """True when Caddy serves ``domain`` (any route matches the host).
+
+    Replaces the legacy ``/etc/nginx/conf.d/<domain>.conf`` existence check:
+    the Caddy equivalent is that the active config routes the host. Sites come
+    from the Caddyfile (portal/default) or from ``nostrhost-domain:<domain>``
+    routes created by domain_add. An unreachable admin API yields False (the
+    diagnoser reports the config as not up to date).
+    """
+    try:
+        from ..nostrhost.caddy_admin import CaddyAdminClient
+
+        config = CaddyAdminClient().get_config()
+    except Exception:
+        return False
+    routes = config.get("apps", {}).get("http", {}).get("servers", {}).get("srv0", {}).get("routes", [])
+    return any(
+        any(domain in (m.get("host") or []) for m in route.get("match", []))
+        for route in routes
+    )
+
 DIAGNOSIS_SERVER = "diagnosis.yunohost.org"
 
 
@@ -41,10 +63,9 @@ class MyDiagnoser(Diagnoser):
         all_domains = domain_list()["domains"]
         domains_to_check = []
         for domain in all_domains:
-            # If the diagnosis location ain't defined, can't do diagnosis,
-            # probably because nginx conf manually modified...
-            nginx_conf = "/etc/nginx/conf.d/%s.conf" % domain
-            if ".well-known/ynh-diagnosis/" not in read_file(nginx_conf):
+            # If Caddy isn't serving the domain, can't do diagnosis, probably
+            # because the domain lacks a Caddy site (or the admin API is down).
+            if not _domain_has_caddy_site(domain):
                 yield dict(
                     meta={"domain": domain},
                     status="WARNING",

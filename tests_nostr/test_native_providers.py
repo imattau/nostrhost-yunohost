@@ -419,6 +419,17 @@ def test_build_web_route_rejects_invalid_upstream():
         build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "upstream": "not-a-port", "auth": "none"})
 
 
+def test_build_domain_site_is_precise_and_idempotent():
+    from nostrhost.caddy_admin import build_domain_site
+
+    site = build_domain_site("example.test")
+    assert site["@id"] == "nostrhost-domain:example.test"
+    assert site["match"] == [{"host": ["example.test"]}, {"path": ["/"]}]
+    assert site["handle"][0]["handler"] == "static_response"
+    assert site["terminal"] is True
+    assert build_domain_site("example.test") == site  # deterministic
+
+
 def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_path: Path):
     calls = []
     command = lambda args, **kwargs: calls.append((args, kwargs))
