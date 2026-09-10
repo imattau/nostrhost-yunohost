@@ -143,6 +143,13 @@ class ConfigFileResource(BaseModel):
 class RuntimeResource(BaseModel):
     type: Literal["node", "python", "go", "composer"]
     version: str = Field(..., min_length=1)
+    prefix: Path | None = None
+
+    @validator("prefix")
+    def absolute_prefix(cls, value: Path | None) -> Path | None:
+        if value is not None and (not value.is_absolute() or ".." in PurePosixPath(value).parts):
+            raise ValueError("runtime prefixes must be absolute and cannot contain '..'")
+        return value
 
 
 class DatabaseResource(BaseModel):
@@ -193,6 +200,18 @@ class BackupResource(BaseModel):
     database: bool = False
 
 
+class PolicyResource(BaseModel):
+    type: Literal["fail2ban", "logrotate"]
+    name: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+
+    @validator("name")
+    def safe_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", value):
+            raise ValueError("policy name must be a safe filename")
+        return value
+
+
 class SettingResource(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
@@ -227,11 +246,12 @@ class PackageManifest(BaseModel):
     health: HealthResource | None = None
     timer: TimerResource | None = None
     backup: BackupResource | None = None
+    policies: dict[str, PolicyResource] = Field(default_factory=dict)
     settings: SettingResource = Field(default_factory=SettingResource)
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "permissions", "config", "secrets", "hooks")
+    @validator("sources", "directories", "permissions", "config", "secrets", "hooks", "policies")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
@@ -336,6 +356,8 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("secret.ensure", f"{app}:secret:{name}", {"name": name, "generate": secret.generate, "length": secret.length}, deps=(package_op.resource,), risk="high", reverse="secret.remove", summary=f"ensure secret {name}"))
     if package.backup:
         plan.append(_op("backup.register", f"{app}:backup", {"paths": [str(path) for path in package.backup.paths], "database": package.backup.database}, deps=(package_op.resource,), summary="register backup resources"))
+    for name, policy in package.policies.items():
+        plan.append(_op("policy.ensure", f"{app}:policy:{name}", policy.dict(), deps=(package_op.resource,), risk="medium", reverse="policy.remove", summary=f"install {policy.type} policy {policy.name}"))
     for name, hook in package.hooks.items():
         plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
     return plan
@@ -429,6 +451,8 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         )
     if operation.name == "service.ensure":
         return actual.get("exists") is True and actual.get("sha256") == actual.get("desired_sha256")
+    if operation.name == "policy.ensure":
+        return actual.get("exists") is True and actual.get("sha256") == hashlib.sha256(operation.args["content"].encode()).hexdigest()
     if operation.name == "database.ensure":
         return actual.get("exists") is True
     if operation.name == "source.fetch":

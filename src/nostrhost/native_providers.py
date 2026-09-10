@@ -640,6 +640,48 @@ class HealthProvider:
         return []
 
 
+class PolicyProvider:
+    """Render host policy snippets without invoking policy-manager shells."""
+
+    resource_type = "policy"
+    directories = {"fail2ban": Path("/etc/fail2ban/jail.d"), "logrotate": Path("/etc/logrotate.d")}
+
+    def __init__(self, *, root: Path = Path("/")) -> None:
+        self.root = root
+
+    def _target(self, args: dict[str, Any]) -> Path:
+        try:
+            directory = self.directories[args["type"]]
+        except KeyError as exc:
+            raise ProviderError(f"unsupported policy type: {args.get('type')}") from exc
+        return _target(self.root, directory) / f"nostrhost-{_safe_name(args['name'])}{'.local' if args['type'] == 'fail2ban' else ''}"
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        target = self._target(desired)
+        return {"path": str(target), "exists": target.is_file(), "sha256": hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("policy.ensure", desired["name"], desired, risk="medium", reverse="policy.remove", summary=f"install {desired['type']} policy")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        target = self._target(operation.args)
+        if operation.name == "policy.remove":
+            target.unlink(missing_ok=True)
+            return {"path": str(target), "changed": True}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(operation.args["content"], encoding="utf-8")
+        os.chmod(temporary, 0o640)
+        temporary.replace(target)
+        return {"path": str(target), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("policy.remove", desired["name"], desired, reverse="policy.ensure", summary="remove host policy")]
+
+
 class JsonStateProvider:
     """Persist typed settings or backup declarations as semantic state."""
 
@@ -929,6 +971,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "port": PortProvider(),
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
+        "policy": PolicyProvider(root=root),
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
     }

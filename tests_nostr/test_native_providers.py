@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -348,6 +348,16 @@ def test_health_provider_retries_transport_failure_then_succeeds():
     client = Client()
     result = HealthProvider(client=client).inspect({"path": "/health", "retries": 2})
     assert result == {"status_code": 200, "healthy": True, "attempts": 2}
+
+
+def test_policy_provider_writes_and_removes_managed_policy(tmp_path: Path):
+    provider = PolicyProvider(root=tmp_path)
+    desired = {"type": "fail2ban", "name": "example", "content": "[example]\nenabled=true\n"}
+    provider.apply(provider.plan(desired)[0])
+    target = tmp_path / "etc/fail2ban/jail.d/nostrhost-example.local"
+    assert target.read_text() == desired["content"]
+    provider.apply(provider.remove(desired)[0])
+    assert not target.exists()
 
 
 def test_port_provider_checks_bind_availability():
