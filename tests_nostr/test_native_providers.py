@@ -287,8 +287,8 @@ def test_postgres_provider_creates_declared_user_and_grants():
     provider = PostgresProvider(connection_factory=lambda: connection, credential_reader=lambda name: f"secret:{name}")
     desired = {"type": "postgresql", "name": "example_db", "users": {"app": {"name": "app", "password_secret": "db_password", "privileges": ["CONNECT"]}}}
     provider.apply(provider.plan(desired)[0])
-    assert connection.cursor_obj.calls[1] == ('CREATE ROLE "app" LOGIN PASSWORD %s', ("secret:db_password",))
-    assert connection.cursor_obj.calls[2] == ('GRANT CONNECT ON DATABASE "example_db" TO "app"', None)
+    assert ('CREATE ROLE "app" LOGIN PASSWORD %s', ("secret:db_password",)) in connection.cursor_obj.calls
+    assert ('GRANT CONNECT ON DATABASE "example_db" TO "app"', None) in connection.cursor_obj.calls
 
 
 def test_database_provider_uses_bounded_dump_and_restore_commands(tmp_path: Path):

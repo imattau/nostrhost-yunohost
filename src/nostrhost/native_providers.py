@@ -1102,7 +1102,22 @@ class PostgresProvider:
         name = self._name(desired.get("name") or "nostrhost")
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
-            return {"name": name, "exists": cursor.fetchone() is not None}
+            exists = cursor.fetchone() is not None
+            result = {"name": name, "exists": exists}
+            if exists and desired.get("users"):
+                names = [self._name(user.get("name", key)) for key, user in desired["users"].items()]
+                cursor.execute("SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", (names,))
+                result["users"] = sorted(row[0] for row in cursor.fetchall())
+                privileges: dict[str, list[str]] = {}
+                for key, user in desired["users"].items():
+                    username = self._name(user.get("name", key))
+                    privileges[username] = []
+                    for privilege in user.get("privileges", []):
+                        cursor.execute("SELECT has_database_privilege(%s, %s, %s)", (username, name, privilege))
+                        if cursor.fetchone()[0]:
+                            privileges[username].append(privilege)
+                result["privileges"] = {user: sorted(values) for user, values in privileges.items()}
+            return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
@@ -1122,14 +1137,22 @@ class PostgresProvider:
             if operation.name == "database.remove":
                 cursor.execute(f'DROP DATABASE IF EXISTS "{name}"')
                 return {"name": name, "changed": True}
-            cursor.execute(f'CREATE DATABASE "{name}"')
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            if cursor.fetchone() is None:
+                cursor.execute(f'CREATE DATABASE "{name}"')
             for user in operation.args.get("users", {}).values():
                 username = self._name(user["name"])
                 password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
-                cursor.execute(f'CREATE ROLE "{username}" LOGIN' + (" PASSWORD %s" if password else ""), (password,) if password else None)
+                cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (username,))
+                existing = cursor.fetchone() is not None
+                if not existing:
+                    cursor.execute(f'CREATE ROLE "{username}" LOGIN' + (" PASSWORD %s" if password else ""), (password,) if password else None)
+                elif password:
+                    cursor.execute(f'ALTER ROLE "{username}" PASSWORD %s', (password,))
                 privileges = user.get("privileges", [])
                 if any(not re.fullmatch(r"[A-Z, ]+", privilege) for privilege in privileges):
                     raise ProviderError("unsafe PostgreSQL privilege")
+                cursor.execute(f'REVOKE ALL PRIVILEGES ON DATABASE "{name}" FROM "{username}"')
                 if privileges:
                     cursor.execute(f'GRANT {", ".join(privileges)} ON DATABASE "{name}" TO "{username}"')
         return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
@@ -1164,7 +1187,25 @@ class MySQLProvider(PostgresProvider):
         name = self._name(desired.get("name") or "nostrhost")
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s", (name,))
-            return {"name": name, "exists": cursor.fetchone() is not None}
+            exists = cursor.fetchone() is not None
+            result = {"name": name, "exists": exists}
+            if exists and desired.get("users"):
+                users = [(user.get("name", key), user.get("host", "%")) for key, user in desired["users"].items()]
+                clauses = " OR ".join("(User = %s AND Host = %s)" for _ in users)
+                cursor.execute(f"SELECT User, Host FROM mysql.user WHERE {clauses}", tuple(value for pair in users for value in pair))
+                rows = cursor.fetchall()
+                result["users"] = sorted(row[0] for row in rows)
+                cursor.execute(
+                    "SELECT GRANTEE, PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA = %s",
+                    (name,),
+                )
+                grants = {username: [] for username, _host in users}
+                for grantee, privilege in cursor.fetchall():
+                    username = str(grantee).split("@", 1)[0].strip("'")
+                    if username in grants:
+                        grants[username].append(privilege)
+                result["privileges"] = {user: sorted(values) for user, values in grants.items()}
+            return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
@@ -1183,17 +1224,23 @@ class MySQLProvider(PostgresProvider):
             if operation.name == "database.remove":
                 cursor.execute(f"DROP DATABASE IF EXISTS `{name}`")
                 return {"name": name, "changed": True}
-            cursor.execute(f"CREATE DATABASE `{name}`")
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{name}`")
             for user in operation.args.get("users", {}).values():
                 username = self._name(user["name"])
                 host = user.get("host", "%")
                 if not re.fullmatch(r"[a-zA-Z0-9_.%-]+", host):
                     raise ProviderError("unsafe MySQL user host")
                 password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
-                cursor.execute("CREATE USER IF NOT EXISTS %s@%s" + (" IDENTIFIED BY %s" if password else ""), (username, host, password) if password else (username, host))
+                cursor.execute("SELECT 1 FROM mysql.user WHERE User = %s AND Host = %s", (username, host))
+                existing = cursor.fetchone() is not None
+                if not existing:
+                    cursor.execute("CREATE USER IF NOT EXISTS %s@%s" + (" IDENTIFIED BY %s" if password else ""), (username, host, password) if password else (username, host))
+                elif password:
+                    cursor.execute("ALTER USER %s@%s IDENTIFIED BY %s", (username, host, password))
                 privileges = user.get("privileges", [])
                 if any(not re.fullmatch(r"[A-Z, ]+", privilege) for privilege in privileges):
                     raise ProviderError("unsafe MySQL privilege")
+                cursor.execute(f"REVOKE ALL PRIVILEGES ON `{name}`.* FROM %s@%s", (username, host))
                 if privileges:
                     cursor.execute(f'GRANT {", ".join(privileges)} ON `{name}`.* TO %s@%s', (username, host))
         return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
@@ -1234,7 +1281,22 @@ class MongoProvider:
         name = self._name(desired.get("name") or "nostrhost")
         client = self._client()
         try:
-            return {"name": name, "exists": name in client.list_database_names()}
+            exists = name in client.list_database_names()
+            result = {"name": name, "exists": exists}
+            if exists and desired.get("users"):
+                database = client[name]
+                names = [self._name(user.get("name", key)) for key, user in desired["users"].items()]
+                users = database.command("usersInfo", names).get("users", [])
+                result["users"] = sorted(user.get("user") for user in users if user.get("user") in names)
+                result["privileges"] = {
+                    user.get("user"): sorted(
+                        role.get("role") if isinstance(role, dict) else role
+                        for role in user.get("roles", [])
+                    )
+                    for user in users
+                    if user.get("user") in names
+                }
+            return result
         finally:
             close = getattr(client, "close", None)
             if close:
@@ -1266,13 +1328,17 @@ class MongoProvider:
             if operation.name == "database.remove":
                 client.drop_database(name)
                 return {"name": name, "users": [], "changed": True}
+            database_exists = name in client.list_database_names()
             database = client[name]
             for user in operation.args.get("users", {}).values():
                 username = self._name(user["name"])
                 password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
                 if not password:
                     raise ProviderError(f"MongoDB user {username} requires password_secret")
-                database.command("createUser", username, pwd=password, roles=user.get("privileges", []))
+                if database_exists and database.command("usersInfo", [username]).get("users"):
+                    database.command("updateUser", username, pwd=password, roles=user.get("privileges", []))
+                else:
+                    database.command("createUser", username, pwd=password, roles=user.get("privileges", []))
             if not operation.args.get("users"):
                 database.command("ping")
             return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}

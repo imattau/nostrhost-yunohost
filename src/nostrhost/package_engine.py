@@ -666,7 +666,19 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
     if operation.name == "policy.ensure":
         return actual.get("exists") is True and actual.get("sha256") == hashlib.sha256(operation.args["content"].encode()).hexdigest()
     if operation.name == "database.ensure":
-        return actual.get("exists") is True
+        if actual.get("exists") is not True:
+            return False
+        expected_users = operation.args.get("users", {})
+        if expected_users:
+            expected_names = sorted(user.get("name", key) for key, user in expected_users.items())
+            if sorted(actual.get("users", [])) != expected_names:
+                return False
+            expected_privileges = {
+                user.get("name", key): sorted(user.get("privileges", []))
+                for key, user in expected_users.items()
+            }
+            return actual.get("privileges") == expected_privileges
+        return True
     if operation.name == "source.fetch":
         return (
             actual.get("exists") is True
