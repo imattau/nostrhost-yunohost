@@ -82,6 +82,78 @@ class DirectoryProvider:
         return [Operation("directory.remove", desired["path"], {"path": desired["path"]}, reverse="directory.ensure", summary=f"remove directory {desired['path']}")]
 
 
+class ConfigFileProvider:
+    """Render declared configuration files with Jinja2 and atomic writes."""
+
+    resource_type = "config"
+
+    def __init__(self, *, root: Path = Path("/"), template_root: Path | None = None, chown: Callable[..., Any] | None = None) -> None:
+        self.root = root
+        self.template_root = template_root
+        self.chown = chown or os.chown
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        target = _target(self.root, desired["destination"])
+        return {"destination": str(target), "exists": target.is_file(), "mode": target.stat().st_mode & 0o7777 if target.exists() else None}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("config.ensure", desired["destination"], desired, reverse="config.remove", summary=f"render config {desired['destination']}")]
+
+    @staticmethod
+    def _template_name(value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ProviderError("config template must be relative and cannot contain '..'")
+        return value
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        target = _target(self.root, args["destination"])
+        if operation.name == "config.remove":
+            target.unlink(missing_ok=True)
+            return {"destination": str(target), "changed": True}
+        if args.get("content") is not None:
+            content = args["content"]
+        else:
+            if self.template_root is None:
+                raise ProviderError("a template root is required for template-backed config")
+            import jinja2
+
+            name = self._template_name(args["template"])
+            template_path = (self.template_root / name).resolve()
+            if not str(template_path).startswith(str(self.template_root.resolve()) + os.sep):
+                raise ProviderError("config template escapes the template root")
+            if not template_path.is_file():
+                raise ProviderError(f"config template does not exist: {name}")
+            environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+            content = environment.from_string(template_path.read_text(encoding="utf-8")).render(args.get("context", {}))
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            os.chmod(temporary, args.get("mode", 0o640))
+            if args.get("owner") or args.get("group"):
+                try:
+                    uid = pwd.getpwnam(args["owner"]).pw_uid if args.get("owner") else -1
+                    gid = grp.getgrnam(args["group"]).gr_gid if args.get("group") else -1
+                    self.chown(temporary, uid, gid)
+                except KeyError as exc:
+                    raise ProviderError(f"unknown config owner or group: {exc.args[0]}") from exc
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {"destination": str(target), "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("config.remove", desired["destination"], {"destination": desired["destination"]}, reverse="config.ensure", summary=f"remove config {desired['destination']}")]
+
+
 class TmpfilesProvider(DirectoryProvider):
     """Declare managed directories through systemd-tmpfiles."""
 
@@ -559,11 +631,12 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
+        "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),

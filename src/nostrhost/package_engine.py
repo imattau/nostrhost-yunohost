@@ -15,9 +15,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Literal, Protocol
 
 try:  # Keep the package stable on both the declared v1 and transitional v2 hosts.
-    from pydantic.v1 import BaseModel, Field, validator
+    from pydantic.v1 import BaseModel, Field, root_validator, validator
 except ImportError:  # pragma: no cover - exercised on Pydantic v1 installations
-    from pydantic import BaseModel, Field, validator
+    from pydantic import BaseModel, Field, root_validator, validator
 
 
 class PackageError(ValueError):
@@ -88,6 +88,34 @@ class DirectoryResource(BaseModel):
         if not value.is_absolute() or ".." in PurePosixPath(value).parts:
             raise ValueError("directory paths must be absolute and cannot contain '..'")
         return value
+
+
+class ConfigFileResource(BaseModel):
+    destination: Path
+    content: str | None = None
+    template: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    mode: int = Field(0o640, ge=0, le=0o7777)
+    owner: str | None = None
+    group: str | None = None
+
+    @validator("destination")
+    def absolute_destination(cls, value: Path) -> Path:
+        if not value.is_absolute() or ".." in PurePosixPath(value).parts:
+            raise ValueError("config destinations must be absolute and cannot contain '..'")
+        return value
+
+    @root_validator
+    def valid_source(cls, values: dict[str, Any]) -> dict[str, Any]:
+        content = values.get("content")
+        template = values.get("template")
+        if (content is None) == (template is None):
+            raise ValueError("config file requires exactly one of content or template")
+        if template and (template.startswith("/") or ".." in PurePosixPath(template).parts):
+            raise ValueError("config templates must be relative and cannot contain '..'")
+        if content is None and template is None:
+            raise ValueError("config file requires content or template")
+        return values
 
 
 class RuntimeResource(BaseModel):
@@ -168,6 +196,7 @@ class PackageManifest(BaseModel):
     ports: PortsResource = Field(default_factory=PortsResource)
     user: UserResource | None = None
     directories: dict[str, DirectoryResource] = Field(default_factory=dict)
+    config: dict[str, ConfigFileResource] = Field(default_factory=dict)
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
     web: WebResource | None = None
@@ -178,7 +207,7 @@ class PackageManifest(BaseModel):
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "secrets", "hooks")
+    @validator("sources", "directories", "config", "secrets", "hooks")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
@@ -246,12 +275,14 @@ def plan_package(package: PackageManifest) -> list[Operation]:
         plan.append(_op("directory.ensure", f"{app}:directory:{name}", {"path": str(directory.path), "owner": directory.owner or (package.user.name if package.user else None), "group": directory.group, "mode": directory.mode, "backup": directory.backup}, deps=deps, reverse="directory.remove", summary=f"ensure directory {directory.path}"))
     for name, source in package.sources.items():
         plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
+    for name, config in package.config.items():
+        plan.append(_op("config.ensure", f"{app}:config:{name}", {**config.dict(), "destination": str(config.destination)}, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
     if package.runtime:
         plan.append(_op("runtime.ensure", f"{app}:runtime", package.runtime.dict(), deps=(package_op.resource,), risk="medium", reverse="runtime.remove", summary=f"ensure {package.runtime.type} {package.runtime.version}"))
     if package.database:
         plan.append(_op("database.ensure", f"{app}:database", package.database.dict(), deps=(package_op.resource,), risk="high", reverse="database.remove", summary=f"ensure {package.database.type} database"))
     if package.service:
-        deps = tuple(op.resource for op in plan if op.resource.startswith((f"{app}:directory:", f"{app}:source:")))
+        deps = tuple(op.resource for op in plan if op.resource.startswith((f"{app}:directory:", f"{app}:source:", f"{app}:config:")))
         deps += tuple(resource for resource in (f"{app}:runtime", f"{app}:database") if any(op.resource == resource for op in plan))
         deps = deps or (package_op.resource,)
         service = package.service.dict()

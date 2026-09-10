@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -161,3 +161,38 @@ def test_directory_provider_resolves_numeric_ownership(tmp_path: Path):
     operation = provider.plan({"path": "/var/lib/example", "mode": 0o750, "owner": "root", "group": "root"})[0]
     assert provider.apply(operation)["changed"] is True
     assert calls and calls[0][1:] == (0, 0)
+
+
+def test_config_provider_renders_inline_content_atomically(tmp_path: Path):
+    provider = ConfigFileProvider(root=tmp_path)
+    operation = provider.plan({"destination": "/etc/example.conf", "content": "port=8090\n", "mode": 0o640})[0]
+    result = provider.apply(operation)
+    target = tmp_path / "etc/example.conf"
+    assert result["changed"] and target.read_text() == "port=8090\n"
+    assert target.stat().st_mode & 0o7777 == 0o640
+
+
+def test_config_provider_renders_strict_jinja_template(tmp_path: Path):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "app.conf.j2").write_text("domain={{ domain }}\nport={{ port }}\n")
+    provider = ConfigFileProvider(root=tmp_path, template_root=templates)
+    operation = provider.plan({"destination": "/etc/example.conf", "template": "app.conf.j2", "context": {"domain": "example.test", "port": 8090}})[0]
+    provider.apply(operation)
+    assert (tmp_path / "etc/example.conf").read_text() == "domain=example.test\nport=8090"
+
+
+def test_config_provider_rejects_template_traversal(tmp_path: Path):
+    provider = ConfigFileProvider(root=tmp_path, template_root=tmp_path)
+    operation = provider.plan({"destination": "/etc/example.conf", "template": "../secret"})[0]
+    with pytest.raises(ProviderError, match="relative"):
+        provider.apply(operation)
+
+
+def test_config_provider_removes_managed_file(tmp_path: Path):
+    provider = ConfigFileProvider(root=tmp_path)
+    ensure = provider.plan({"destination": "/etc/example.conf", "content": "managed\n"})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"destination": "/etc/example.conf"})[0]
+    assert provider.apply(remove)["changed"]
+    assert not (tmp_path / "etc/example.conf").exists()
