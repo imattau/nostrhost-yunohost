@@ -89,6 +89,25 @@ class ToolSpec:
     description: str = ""
 
 
+def _safe_package_plan(package: dict[str, Any] | None = None, **args: Any) -> list[dict[str, Any]]:
+    if args or not isinstance(package, dict):
+        raise OperationError("package.plan requires exactly one package object")
+    from nostrhost.package_engine import PackageManifest, plan_package
+
+    return [operation.json_dict() for operation in plan_package(PackageManifest.parse_obj(package))]
+
+
+def _safe_package_reconcile(plan: list[dict[str, Any]] | None = None, **args: Any) -> dict[str, Any]:
+    if args or not isinstance(plan, list) or not plan:
+        raise OperationError("package.reconcile requires a non-empty plan")
+    from nostrhost.native_providers import NativeOperationExecutor, native_providers
+    from nostrhost.package_engine import apply_operation_plan, operation_from_dict
+
+    operations = [operation_from_dict(item) for item in plan]
+    results = apply_operation_plan(operations, NativeOperationExecutor(native_providers()))
+    return {"operations": len(results), "results": results}
+
+
 def _safe_system_version(**args: Any) -> dict[str, Any]:
     from yunohost.tools import tools_versions
 
@@ -238,6 +257,14 @@ def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
 # safe by gating — `services.write` scope + admin approval on top of the
 # chain, and it is bounded to a single known service name.
 TOOLS: dict[str, ToolSpec] = {
+    "package.plan": ToolSpec(
+        name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
+        require_approval=False, description="validate and plan a native package",
+    ),
+    "package.reconcile": ToolSpec(
+        name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,
+        description="apply an approved native package operation plan",
+    ),
     "system.version": ToolSpec(
         name="system.version",
         handler=_safe_system_version,
