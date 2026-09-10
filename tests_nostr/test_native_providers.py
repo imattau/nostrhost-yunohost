@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, HealthProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -221,6 +221,35 @@ def test_postgres_provider_creates_declared_user_and_grants():
     provider.apply(provider.plan(desired)[0])
     assert connection.cursor_obj.calls[1] == ('CREATE ROLE "app" LOGIN PASSWORD %s', ("secret:db_password",))
     assert connection.cursor_obj.calls[2] == ('GRANT CONNECT ON DATABASE "example_db" TO "app"', None)
+
+
+def test_mongo_provider_creates_declared_user():
+    class Database:
+        def __init__(self): self.calls = []
+        def command(self, *args, **kwargs): self.calls.append((args, kwargs))
+    class Client:
+        def __init__(self): self.database = Database()
+        def list_database_names(self): return []
+        def __getitem__(self, name): assert name == "example"; return self.database
+        def close(self): pass
+    client = Client()
+    provider = MongoProvider(client_factory=lambda: client, credential_reader=lambda _: "password")
+    operation = provider.plan({"type": "mongodb", "name": "example", "users": {"app": {"name": "app", "password_secret": "db_password", "privileges": ["readWrite"]}}})[0]
+    provider.apply(operation)
+    assert client.database.calls == [(('createUser', 'app'), {"pwd": "password", "roles": ["readWrite"]})]
+
+
+def test_redis_provider_validates_logical_database_without_mutating_keys():
+    class Client:
+        def __init__(self): self.pings = 0
+        def ping(self): self.pings += 1
+        def close(self): pass
+    client = Client()
+    provider = RedisProvider(client_factory=lambda index: client)
+    operation = provider.plan({"type": "redis", "name": "4"})[0]
+    result = provider.apply(operation)
+    assert result == {"name": "4", "index": 4, "changed": False}
+    assert client.pings == 1
 
 
 def test_caddy_provider_validates_and_loads_json():

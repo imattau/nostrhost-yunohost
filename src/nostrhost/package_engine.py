@@ -211,6 +211,18 @@ class DatabaseResource(BaseModel):
             raise ValueError("database user names must be unique")
         return value
 
+    @root_validator
+    def valid_backend_options(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if values.get("type") == "redis" and values.get("users"):
+            raise ValueError("Redis resources cannot declare database users")
+        if values.get("type") == "redis" and values.get("name") is not None:
+            try:
+                if not 0 <= int(values["name"]) <= 15:
+                    raise ValueError
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Redis database name must be a database index between 0 and 15") from exc
+        return values
+
 
 class ServiceSecurity(BaseModel):
     private_tmp: bool = True

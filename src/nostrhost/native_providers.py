@@ -1013,18 +1013,146 @@ class MySQLProvider(PostgresProvider):
         return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
 
 
+class MongoProvider:
+    """Native MongoDB database/user operations through PyMongo."""
+
+    resource_type = "database"
+
+    def __init__(self, *, client_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
+        self.client_factory = client_factory
+        self.credential_reader = credential_reader
+
+    def _client(self) -> Any:
+        if self.client_factory:
+            return self.client_factory()
+        try:
+            from pymongo import MongoClient
+        except ImportError as exc:  # pragma: no cover - optional runtime dependency
+            raise ProviderError("pymongo is required for native MongoDB resources") from exc
+        return MongoClient()
+
+    @staticmethod
+    def _name(value: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", value):
+            raise ProviderError(f"unsafe MongoDB database name: {value!r}")
+        return value
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = self._name(desired.get("name") or "nostrhost")
+        client = self._client()
+        try:
+            return {"name": name, "exists": name in client.list_database_names()}
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        name = self._name(desired.get("name") or "nostrhost")
+        return [Operation("database.ensure", name, {"type": "mongodb", "name": name, "backup": desired.get("backup", True), "users": desired.get("users", {})}, risk="high", reverse="database.remove", summary=f"ensure MongoDB database {name}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        name = self._name(operation.args["name"])
+        client = self._client()
+        try:
+            if operation.name == "database.remove":
+                client.drop_database(name)
+                return {"name": name, "users": [], "changed": True}
+            database = client[name]
+            for user in operation.args.get("users", {}).values():
+                username = self._name(user["name"])
+                password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
+                if not password:
+                    raise ProviderError(f"MongoDB user {username} requires password_secret")
+                database.command("createUser", username, pwd=password, roles=user.get("privileges", []))
+            if not operation.args.get("users"):
+                database.command("ping")
+            return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+
+class RedisProvider:
+    """Validate and select a Redis logical database index.
+
+    Redis databases are pre-created logical namespaces; the provider must not
+    invent a fake CREATE DATABASE operation or mutate unrelated keys.
+    """
+
+    resource_type = "database"
+
+    def __init__(self, *, client_factory: Callable[[int], Any] | None = None) -> None:
+        self.client_factory = client_factory
+
+    @staticmethod
+    def _index(value: Any) -> int:
+        try:
+            index = int(value if value is not None else 0)
+        except (TypeError, ValueError) as exc:
+            raise ProviderError("Redis database name must be a database index") from exc
+        if not 0 <= index <= 15:
+            raise ProviderError("Redis database index must be between 0 and 15")
+        return index
+
+    def _client(self, index: int) -> Any:
+        if self.client_factory:
+            return self.client_factory(index)
+        try:
+            import redis
+        except ImportError as exc:  # pragma: no cover - optional runtime dependency
+            raise ProviderError("redis is required for native Redis resources") from exc
+        return redis.Redis(db=index)
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        index = self._index(desired.get("name"))
+        client = self._client(index)
+        try:
+            client.ping()
+            return {"name": str(index), "exists": True, "index": index}
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        index = self._index(desired.get("name"))
+        return [Operation("database.ensure", str(index), {"type": "redis", "name": str(index), "backup": desired.get("backup", True)}, risk="medium", reverse="database.remove", summary=f"validate Redis database {index}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        index = self._index(operation.args.get("name"))
+        client = self._client(index)
+        try:
+            client.ping()
+            return {"name": str(index), "index": index, "changed": False}
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        index = self._index(desired.get("name"))
+        return [Operation("database.remove", str(index), {"type": "redis", "name": str(index)}, risk="medium", reverse="database.ensure", summary=f"release Redis database {index}")]
+
+
 class DatabaseProvider:
     """Dispatch database resources to their explicitly selected DB-API driver."""
 
     resource_type = "database"
 
-    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
+    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
         self.providers = {
             "postgresql": PostgresProvider(connection_factory=postgres_connection_factory, credential_reader=credential_reader),
             "mysql": MySQLProvider(connection_factory=mysql_connection_factory, credential_reader=credential_reader),
+            "mongodb": MongoProvider(client_factory=mongo_client_factory, credential_reader=credential_reader),
+            "redis": RedisProvider(client_factory=redis_client_factory),
         }
 
-    def _provider(self, desired: dict[str, Any]) -> PostgresProvider | MySQLProvider:
+    def _provider(self, desired: dict[str, Any]) -> Any:
         try:
             return self.providers[desired["type"]]
         except KeyError as exc:
@@ -1107,7 +1235,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -1119,7 +1247,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "runtime": RuntimeProvider(command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
-        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, credential_reader=credential_reader),
+        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, mongo_client_factory=mongo_client_factory, redis_client_factory=redis_client_factory, credential_reader=credential_reader),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
         "port": PortProvider(),
