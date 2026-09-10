@@ -180,10 +180,36 @@ class RuntimeResource(BaseModel):
         return value
 
 
+class DatabaseUserResource(BaseModel):
+    name: str = Field(..., min_length=1, max_length=63)
+    password_secret: str | None = None
+    host: str = "%"
+    privileges: list[str] = Field(default_factory=list)
+
+    @validator("name")
+    def valid_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value):
+            raise ValueError("database user names must be lowercase identifiers")
+        return value
+
+    @validator("password_secret")
+    def valid_secret(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[a-z][a-z0-9_-]*", value):
+            raise ValueError("database password_secret must be a safe secret name")
+        return value
+
+
 class DatabaseResource(BaseModel):
-    type: Literal["postgresql", "mysql"]
+    type: Literal["postgresql", "mysql", "mongodb", "redis"]
     name: str | None = None
     backup: bool = True
+    users: dict[str, DatabaseUserResource] = Field(default_factory=dict)
+
+    @validator("users")
+    def unique_user_names(cls, value: dict[str, DatabaseUserResource]) -> dict[str, DatabaseUserResource]:
+        if len({user.name for user in value.values()}) != len(value):
+            raise ValueError("database user names must be unique")
+        return value
 
 
 class ServiceSecurity(BaseModel):

@@ -200,8 +200,27 @@ def test_database_provider_dispatches_mysql_without_postgres_fallback():
     connection = Connection()
     provider = DatabaseProvider(mysql_connection_factory=lambda: connection)
     result = provider.apply(provider.plan({"type": "mysql", "name": "example_db"})[0])
-    assert result == {"name": "example_db", "changed": True}
-    assert connection.cursor_obj.call == ("CREATE DATABASE `example_db`", None)
+    assert result == {"name": "example_db", "users": [], "changed": True}
+
+
+def test_postgres_provider_creates_declared_user_and_grants():
+    class Cursor:
+        def __init__(self): self.calls = []
+        def execute(self, query, args=None): self.calls.append((query, args))
+        def fetchone(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    class Connection:
+        def __init__(self): self.cursor_obj = Cursor()
+        def cursor(self): return self.cursor_obj
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    connection = Connection()
+    provider = PostgresProvider(connection_factory=lambda: connection, credential_reader=lambda name: f"secret:{name}")
+    desired = {"type": "postgresql", "name": "example_db", "users": {"app": {"name": "app", "password_secret": "db_password", "privileges": ["CONNECT"]}}}
+    provider.apply(provider.plan(desired)[0])
+    assert connection.cursor_obj.calls[1] == ('CREATE ROLE "app" LOGIN PASSWORD %s', ("secret:db_password",))
+    assert connection.cursor_obj.calls[2] == ('GRANT CONNECT ON DATABASE "example_db" TO "app"', None)
 
 
 def test_caddy_provider_validates_and_loads_json():

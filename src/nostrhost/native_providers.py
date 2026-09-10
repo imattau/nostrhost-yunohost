@@ -914,8 +914,9 @@ class AptProvider:
 class PostgresProvider:
     resource_type = "database"
 
-    def __init__(self, *, connection_factory: Callable[[], Any] | None = None) -> None:
+    def __init__(self, *, connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
         self.connection_factory = connection_factory
+        self.credential_reader = credential_reader
 
     def _connection(self) -> Any:
         if self.connection_factory:
@@ -940,7 +941,7 @@ class PostgresProvider:
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
-        return [Operation("database.ensure", name, {"type": "postgresql", "name": name, "backup": desired.get("backup", True)}, risk="high", reverse="database.remove", summary=f"ensure PostgreSQL database {name}")]
+        return [Operation("database.ensure", name, {"type": "postgresql", "name": name, "backup": desired.get("backup", True), "users": desired.get("users", {})}, risk="high", reverse="database.remove", summary=f"ensure PostgreSQL database {name}")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
@@ -949,7 +950,16 @@ class PostgresProvider:
                 cursor.execute(f'DROP DATABASE IF EXISTS "{name}"')
                 return {"name": name, "changed": True}
             cursor.execute(f'CREATE DATABASE "{name}"')
-        return {"name": name, "changed": True}
+            for user in operation.args.get("users", {}).values():
+                username = self._name(user["name"])
+                password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
+                cursor.execute(f'CREATE ROLE "{username}" LOGIN' + (" PASSWORD %s" if password else ""), (password,) if password else None)
+                privileges = user.get("privileges", [])
+                if any(not re.fullmatch(r"[A-Z, ]+", privilege) for privilege in privileges):
+                    raise ProviderError("unsafe PostgreSQL privilege")
+                if privileges:
+                    cursor.execute(f'GRANT {", ".join(privileges)} ON DATABASE "{name}" TO "{username}"')
+        return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
         return self.inspect(desired)
@@ -979,7 +989,7 @@ class MySQLProvider(PostgresProvider):
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
-        return [Operation("database.ensure", name, {"type": "mysql", "name": name, "backup": desired.get("backup", True)}, risk="high", reverse="database.remove", summary=f"ensure MySQL database {name}")]
+        return [Operation("database.ensure", name, {"type": "mysql", "name": name, "backup": desired.get("backup", True), "users": desired.get("users", {})}, risk="high", reverse="database.remove", summary=f"ensure MySQL database {name}")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
@@ -988,7 +998,19 @@ class MySQLProvider(PostgresProvider):
                 cursor.execute(f"DROP DATABASE IF EXISTS `{name}`")
                 return {"name": name, "changed": True}
             cursor.execute(f"CREATE DATABASE `{name}`")
-        return {"name": name, "changed": True}
+            for user in operation.args.get("users", {}).values():
+                username = self._name(user["name"])
+                host = user.get("host", "%")
+                if not re.fullmatch(r"[a-zA-Z0-9_.%-]+", host):
+                    raise ProviderError("unsafe MySQL user host")
+                password = self.credential_reader(user["password_secret"]) if user.get("password_secret") and self.credential_reader else None
+                cursor.execute("CREATE USER IF NOT EXISTS %s@%s" + (" IDENTIFIED BY %s" if password else ""), (username, host, password) if password else (username, host))
+                privileges = user.get("privileges", [])
+                if any(not re.fullmatch(r"[A-Z, ]+", privilege) for privilege in privileges):
+                    raise ProviderError("unsafe MySQL privilege")
+                if privileges:
+                    cursor.execute(f'GRANT {", ".join(privileges)} ON `{name}`.* TO %s@%s', (username, host))
+        return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
 
 
 class DatabaseProvider:
@@ -996,10 +1018,10 @@ class DatabaseProvider:
 
     resource_type = "database"
 
-    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None) -> None:
+    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
         self.providers = {
-            "postgresql": PostgresProvider(connection_factory=postgres_connection_factory),
-            "mysql": MySQLProvider(connection_factory=mysql_connection_factory),
+            "postgresql": PostgresProvider(connection_factory=postgres_connection_factory, credential_reader=credential_reader),
+            "mysql": MySQLProvider(connection_factory=mysql_connection_factory, credential_reader=credential_reader),
         }
 
     def _provider(self, desired: dict[str, Any]) -> PostgresProvider | MySQLProvider:
@@ -1085,7 +1107,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -1097,7 +1119,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "runtime": RuntimeProvider(command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),
-        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory),
+        "database": DatabaseProvider(postgres_connection_factory=postgres_connection_factory, mysql_connection_factory=mysql_connection_factory, credential_reader=credential_reader),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
         "port": PortProvider(),
