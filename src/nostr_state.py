@@ -66,6 +66,7 @@ logger = logging.getLogger("nostr-state")
 
 # State repository constants (overridable for tests / alternate roots).
 STATE_SCHEMA = 1
+RECONCILIATION_SCHEMA = 1
 STATE_REPO_NAME = "nostrhost-state"
 DEFAULT_STATE_DIR = "/var/lib/nostrhost/state"
 KNOWN_GOOD_TAG = "known-good"
@@ -514,12 +515,134 @@ class StateRepo:
                     out.append((status, path))
         return out
 
+    def reconciliation_plan(self, current_tree: dict[str, dict[str, dict[str, Any]]]) -> dict[str, Any]:
+        """Compare committed desired state with a freshly exported live tree.
+
+        This is intentionally a report-only Stage D seam: it classifies file
+        changes but does not mutate the machine or repository.
+        """
+        if self.is_dirty():
+            raise StateError("cannot reconcile a dirty state repository")
+        desired = _state_files(self.path)
+        with tempfile.TemporaryDirectory(prefix="nostrhost-reconcile-") as directory:
+            rendered = Path(directory)
+            temporary = StateRepo(rendered, self.server_pubkey)
+            temporary._render(current_tree)
+            actual = _state_files(rendered)
+
+        changes = []
+        for path in sorted(set(desired) | set(actual)):
+            if path not in actual:
+                status, action = "D", "restore"
+            elif path not in desired:
+                status, action = "A", "remove"
+            elif desired[path] != actual[path]:
+                status, action = "M", "update"
+            else:
+                continue
+            change: dict[str, Any] = {
+                "path": path,
+                "status": status,
+                "action": action,
+                "risk": _reconciliation_risk(path),
+            }
+            tool, args = _reconciliation_tool(path, action, desired, actual)
+            if tool is not None:
+                change.update(tool=tool, args=args, automatic=True)
+            else:
+                change.update(automatic=False, detail="no bounded operation exists for this drift")
+            changes.append(change)
+        return {
+            "schema": RECONCILIATION_SCHEMA,
+            "revision": self.revision(),
+            "known_good": self.known_good_revision(),
+            "apply": False,
+            "changes": changes,
+        }
+
     def show(self, rev: str, path: str) -> str:
         """Read one file at a revision (e.g. a manifest for restic linkage)."""
         res = subprocess.run(["git", "-C", str(self.path), "show", f"{rev}:{path}"], capture_output=True, text=True)
         if res.returncode != 0:
             raise StateError(f"git show {rev}:{path} failed: {res.stderr.strip()}")
         return res.stdout
+
+
+def _state_files(root: Path) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    for path in root.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or path.name == "manifest.toml":
+            continue
+        files[str(path.relative_to(root))] = path.read_bytes()
+    return files
+
+
+def _reconciliation_risk(path: str) -> str:
+    section = path.split("/", 1)[0]
+    if section == "services":
+        return "low"
+    if section in {"apps", "package-versions"}:
+        return "medium"
+    return "high"
+
+
+def _reconciliation_tool(
+    path: str,
+    action: str,
+    desired: dict[str, bytes],
+    actual: dict[str, bytes],
+) -> tuple[str | None, dict[str, Any]]:
+    """Map only narrowly bounded drift to an operation-registry tool."""
+    try:
+        import tomllib
+
+        source = desired if action != "remove" else actual
+        data = tomllib.loads(source[path].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None, {}
+    section, _, filename = path.partition("/")
+    name = filename.removesuffix(".toml")
+    if section == "services" and action == "update":
+        status = str(data.get("status") or "")
+        if status in {"running", "active"}:
+            return "service.control", {"name": name, "action": "start"}
+        if status in {"dead", "inactive", "stopped"}:
+            return "service.control", {"name": name, "action": "stop"}
+    if section == "apps" and action == "remove":
+        return "app.remove", {"app": name, "purge": False}
+    return None, {}
+
+
+def apply_reconciliation_plan(plan: dict[str, Any], *, backend: Any, approve: bool = False, repo: StateRepo | None = None) -> list[dict[str, Any]]:
+    """Apply only approved, registry-bounded reconciliation steps."""
+    if not approve:
+        raise StateError("reconciliation plan not approved (pass approve=True)")
+    if plan.get("schema") != RECONCILIATION_SCHEMA:
+        raise StateError(f"unsupported reconciliation plan schema: {plan.get('schema')!r}")
+    if plan.get("applied"):
+        raise StateError("reconciliation plan already applied")
+    if repo is not None and repo.revision() != plan.get("revision"):
+        raise StateError("reconciliation plan is stale; generate a new plan")
+    report: list[dict[str, Any]] = []
+    for change in plan.get("changes", []):
+        entry = {"path": change.get("path", ""), "status": "blocked", "detail": ""}
+        try:
+            if not change.get("automatic") or not change.get("tool"):
+                entry["detail"] = change.get("detail", "manual intervention required")
+            else:
+                from .nostr_operations import tool_spec
+
+                if tool_spec(change["tool"]) is None:
+                    entry["detail"] = f"tool {change['tool']} is not in the operation registry"
+                else:
+                    backend.execute(change["tool"], dict(change.get("args") or {}))
+                    entry.update(status="executed", detail=change["tool"])
+        except Exception as exc:  # noqa: BLE001 - preserve per-change audit report
+            entry.update(status="failed", detail=str(exc))
+        report.append(entry)
+    plan["applied"] = True
+    plan["report"] = report
+    return report
 
 
 def _op_id_from_message(subject: str) -> str | None:

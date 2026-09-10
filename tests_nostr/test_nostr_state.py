@@ -11,11 +11,15 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from yunohost.nostr_state import (
     DATA_AFFECTING_TOOLS,
     STATE_SCHEMA,
     StateRecorder,
     StateRepo,
+    StateError,
+    apply_reconciliation_plan,
     build_repository_announcement,
     export_state,
     state_dir_from_env,
@@ -129,6 +133,44 @@ def test_state_repo_bundle_round_trip(tmp_path: Path):
     restored_repo = StateRepo(restored, "a" * 64)
     assert restored_repo.revision() == revision
     assert restored_repo.known_good_revision() == revision
+
+
+def test_reconciliation_plan_is_report_only(tmp_path: Path):
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    desired = export_state(FakeBackend())
+    repo.commit(desired, known_good=True, health="passed")
+
+    current = export_state(FakeBackend())
+    current["services"]["dnsmasq.toml"] = {"status": "dead", "type": "system"}
+    plan = repo.reconciliation_plan(current)
+
+    assert plan["apply"] is False
+    assert plan["changes"] == [
+        {
+            "path": "services/dnsmasq.toml",
+            "status": "M",
+            "action": "update",
+            "risk": "low",
+            "tool": "service.control",
+            "args": {"name": "dnsmasq", "action": "stop"},
+            "automatic": True,
+        }
+    ]
+
+
+def test_reconciliation_apply_requires_approval_and_is_bounded(tmp_path: Path):
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+    current = export_state(FakeBackend())
+    current["services"]["dnsmasq.toml"] = {"status": "dead", "type": "system"}
+    plan = repo.reconciliation_plan(current)
+    backend = type("Backend", (), {"calls": [], "execute": lambda self, tool, args: self.calls.append((tool, args))})()
+
+    with pytest.raises(StateError, match="not approved"):
+        apply_reconciliation_plan(plan, backend=backend, repo=repo)
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
+    assert report[0]["status"] == "executed"
+    assert backend.calls == [("service.control", {"name": "dnsmasq", "action": "stop"})]
 
 
 def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):

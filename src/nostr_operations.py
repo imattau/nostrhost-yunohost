@@ -214,6 +214,25 @@ def _safe_rollback_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     return _run_rollback_apply({"plan": plan}, backend=YnhExecutorBackend(), restic=restic)
 
 
+def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None) -> dict[str, Any]:
+    """Execute an approved reconciliation plan through the shared chain."""
+    if set(args) != {"plan"} or not isinstance(args.get("plan"), dict):
+        raise OperationError("state.reconcile requires exactly one argument: 'plan'")
+    from .nostr_state import apply_reconciliation_plan
+
+    plan = args["plan"]
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
+    return {"changes": report, "_ok": all(row["status"] == "executed" for row in report)}
+
+
+def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise OperationError(f"state.reconcile does not accept extra args: {sorted(args)}")
+    from .nostr_operationsd import YnhExecutorBackend
+
+    return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
+
+
 # The default registry: read-only tools plus one minimal write operation
 # (service.restart). Read tools are safe by construction; the write tool is
 # safe by gating — `services.write` scope + admin approval on top of the
@@ -260,6 +279,12 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_rollback_apply,
         scope=SCOPE_STATE_WRITE,
         description="execute an assisted rollback plan (write operation, admin-approval-gated)",
+    ),
+    "state.reconcile": ToolSpec(
+        name="state.reconcile",
+        handler=_safe_reconcile_apply,
+        scope=SCOPE_STATE_WRITE,
+        description="apply an approved, bounded reconciliation plan",
     ),
 }
 

@@ -13,6 +13,8 @@ configuration, linked to the Nostr operation events that changed it:
   nostrhost-state announce                   publish the NIP-34 repo event
   nostrhost-state replicate [--output PATH]  export a portable recovery bundle
   nostrhost-state restore BUNDLE DESTINATION verify and restore a bundle
+  nostrhost-state reconcile [--json]    report desired/live drift (no apply)
+  nostrhost-state reconcile apply PLAN --approve
   nostrhost-state rollback plan [--from K] [--to C] [--json] [--restic ID]
   nostrhost-state rollback apply <plan.json> [--approve]
 
@@ -147,6 +149,38 @@ def cmd_restore(args) -> int:
     return EXIT_OK
 
 
+def cmd_reconcile(args) -> int:
+    if args.reconcile_action == "apply":
+        try:
+            with open(args.plan, encoding="utf-8") as fh:
+                plan = json.load(fh)
+            from yunohost.nostr_state import apply_reconciliation_plan
+            from yunohost.nostr_operationsd import YnhExecutorBackend
+
+            report = apply_reconciliation_plan(
+                plan, backend=YnhExecutorBackend(), approve=args.approve, repo=default_repo()
+            )
+        except Exception as exc:  # noqa: BLE001 - CLI boundary
+            print(f"error: reconciliation apply failed: {exc}", file=sys.stderr)
+            return EXIT_ERR
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return EXIT_OK if all(row["status"] == "executed" for row in report) else EXIT_ERR
+    try:
+        from yunohost.nostr_state import YunohostBackend
+
+        plan = default_repo().reconciliation_plan(export_state(YunohostBackend()))
+    except Exception as exc:  # noqa: BLE001 - CLI must report backend failures
+        print(f"error: reconciliation failed: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    if args.json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+    else:
+        print(f"reconciliation plan: {len(plan['changes'])} change(s); apply=false")
+        for change in plan["changes"]:
+            print(f"  {change['risk']:<6} {change['action']:<7} {change['path']}")
+    return EXIT_OK
+
+
 def cmd_rollback_plan(args) -> int:
     from yunohost.nostr_rollback import RollbackError, build_rollback_plan, render_plan, write_plan
 
@@ -242,6 +276,12 @@ def main(argv: list[str] | None = None) -> int:
     restore = sub.add_parser("restore", help="verify and restore a state bundle")
     restore.add_argument("bundle")
     restore.add_argument("destination")
+    reconcile = sub.add_parser("reconcile", help="report or apply a reconciliation plan")
+    reconcile_sub = reconcile.add_subparsers(dest="reconcile_action")
+    reconcile.add_argument("--json", action="store_true", help="emit a machine-readable plan")
+    reconcile_apply = reconcile_sub.add_parser("apply", help="apply a saved plan with explicit approval")
+    reconcile_apply.add_argument("plan", help="JSON plan produced by `reconcile --json`")
+    reconcile_apply.add_argument("--approve", action="store_true", help="approve and execute bounded steps")
 
     rb = sub.add_parser("rollback", help="assisted rollback (Stage B)")
     rbsub = rb.add_subparsers(dest="rollback_command", required=True)
@@ -264,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
             _require_bootstrapped()
         if args.command == "rollback":
             return {"plan": cmd_rollback_plan, "apply": cmd_rollback_apply}[args.rollback_command](args)
-        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce, "replicate": cmd_replicate, "restore": cmd_restore}[args.command](args)
+        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce, "replicate": cmd_replicate, "restore": cmd_restore, "reconcile": cmd_reconcile}[args.command](args)
     except (StateError, IdentityError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR

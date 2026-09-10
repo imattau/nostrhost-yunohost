@@ -338,6 +338,12 @@ class OperationEngine:
                     record.args, backend=self._backend, restic=self._restic, repo=state_repo
                 )
                 operation_ok = bool(result.pop("_ok", True))
+            elif record.tool == "state.reconcile":
+                from .nostr_operations import _run_reconcile_apply
+
+                state_repo = getattr(self._state, "repo", None)
+                result = _run_reconcile_apply(record.args, backend=self._backend, repo=state_repo)
+                operation_ok = bool(result.pop("_ok", True))
             else:
                 result = self._backend.execute(record.tool, record.args)
                 operation_ok = True
