@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import DirectoryProvider, NativeOperationExecutor, ProviderError, ServiceProvider, SourceProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PostgresProvider, ProviderError, ServiceProvider, SourceProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -65,4 +65,44 @@ def test_native_executor_dispatches_only_registered_provider(tmp_path: Path):
     operation = DirectoryProvider(root=tmp_path).plan({"path": "/opt/example", "mode": 0o750})[0]
     assert executor.execute(operation)["changed"] is True
     with pytest.raises(ProviderError, match="no native provider"):
-        executor.execute(operation.__class__("database.ensure", "example:database", {}))
+        executor.execute(operation.__class__("timer.ensure", "example:timer", {}))
+
+
+def test_apt_provider_uses_python_apt_shape():
+    class Package:
+        is_installed = False
+        def mark_install(self): self.is_installed = True
+    class Cache(dict):
+        def commit(self): self.committed = True
+    cache = Cache(ffmpeg=Package())
+    provider = AptProvider(cache_factory=lambda: cache)
+    result = provider.apply(provider.plan({"packages": ["ffmpeg"]})[0])
+    assert result["changed"] and cache["ffmpeg"].is_installed and cache.committed
+
+
+def test_postgres_provider_uses_parameterized_existence_query():
+    class Cursor:
+        def execute(self, query, args): self.call = (query, args)
+        def fetchone(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    class Connection:
+        def __init__(self): self.cursor_obj = Cursor()
+        def cursor(self): return self.cursor_obj
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    connection = Connection()
+    result = PostgresProvider(connection_factory=lambda: connection).inspect({"name": "example_db"})
+    assert result == {"name": "example_db", "exists": False}
+    assert connection.cursor_obj.call[1] == ("example_db",)
+
+
+def test_caddy_provider_validates_and_loads_json():
+    class Response:
+        def raise_for_status(self): pass
+    class Client:
+        def post(self, path, *, json): self.call = (path, json); return Response()
+    client = Client()
+    provider = CaddyProvider(client=client, config_builder=lambda args: {"apps": {"http": {"routes": [args]}}})
+    result = provider.apply(provider.plan({"domain": "example.test", "upstream": "127.0.0.1:8090"})[0])
+    assert result["loaded"] and client.call[0] == "/load"

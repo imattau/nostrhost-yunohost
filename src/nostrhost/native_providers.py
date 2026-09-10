@@ -188,6 +188,121 @@ class ServiceProvider:
         return "\n".join(lines)
 
 
+class AptProvider:
+    resource_type = "package.apt"
+
+    def __init__(self, *, cache_factory: Callable[[], Any] | None = None) -> None:
+        self.cache_factory = cache_factory
+
+    def _cache(self) -> Any:
+        if self.cache_factory:
+            return self.cache_factory()
+        try:
+            import apt
+        except ImportError as exc:  # pragma: no cover - Debian runtime dependency
+            raise ProviderError("python-apt is required for native apt resources") from exc
+        return apt.Cache()
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        cache = self._cache()
+        packages = desired.get("packages", [desired.get("package")])
+        return {"installed": [name for name in packages if name and name in cache and cache[name].is_installed]}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        packages = desired.get("packages", [desired.get("package")])
+        return [Operation("package.apt.ensure", ":".join(packages), {"packages": packages}, risk="medium", reverse="package.apt.remove", summary=f"ensure apt packages {', '.join(packages)}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        cache = self._cache()
+        packages = operation.args["packages"]
+        for name in packages:
+            if name not in cache:
+                raise ProviderError(f"apt package is unavailable: {name}")
+            cache[name].mark_install()
+        cache.commit()
+        return {"packages": packages, "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        packages = desired.get("packages", [desired.get("package")])
+        return [Operation("package.apt.remove", ":".join(packages), {"packages": packages}, reverse="package.apt.ensure", summary=f"remove apt packages {', '.join(packages)}")]
+
+
+class PostgresProvider:
+    resource_type = "database"
+
+    def __init__(self, *, connection_factory: Callable[[], Any] | None = None) -> None:
+        self.connection_factory = connection_factory
+
+    def _connection(self) -> Any:
+        if self.connection_factory:
+            return self.connection_factory()
+        try:
+            import psycopg
+        except ImportError as exc:  # pragma: no cover - optional Debian runtime dependency
+            raise ProviderError("psycopg is required for native PostgreSQL resources") from exc
+        return psycopg.connect("dbname=postgres", autocommit=True)
+
+    @staticmethod
+    def _name(value: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value):
+            raise ProviderError(f"unsafe PostgreSQL database name: {value!r}")
+        return value
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        name = self._name(desired.get("name") or "nostrhost")
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            return {"name": name, "exists": cursor.fetchone() is not None}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        name = self._name(desired.get("name") or "nostrhost")
+        return [Operation("database.ensure", name, {"type": "postgresql", "name": name, "backup": desired.get("backup", True)}, risk="high", reverse="database.remove", summary=f"ensure PostgreSQL database {name}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        name = self._name(operation.args["name"])
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(f'CREATE DATABASE "{name}"')
+        return {"name": name, "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        name = self._name(desired.get("name") or "nostrhost")
+        return [Operation("database.remove", name, {"name": name}, risk="high", reverse="database.ensure", summary=f"remove PostgreSQL database {name}")]
+
+
+class CaddyProvider:
+    resource_type = "web.route"
+
+    def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+        self.client = client
+        self.config_builder = config_builder
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        response = self.client.get("/config")
+        response.raise_for_status()
+        return {"config": response.json()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("web.route.ensure", desired.get("domain") or desired["upstream"], desired, risk="medium", reverse="web.route.remove", summary="validate and load Caddy JSON configuration")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        config = self.config_builder(operation.args)
+        response = self.client.post("/load", json=config)
+        response.raise_for_status()
+        return {"loaded": True, "domain": operation.args.get("domain")}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("web.route.remove", desired.get("domain") or desired["upstream"], desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
+
+
 class NativeOperationExecutor:
     """Apply only operations backed by registered native providers."""
 
@@ -197,15 +312,22 @@ class NativeOperationExecutor:
     def execute(self, operation: Operation) -> Any:
         operation_type = operation.name.rsplit(".", 1)[0]
         provider = self.providers.get(operation_type)
+        if provider is None and operation.name.startswith("package.apt."):
+            provider = self.providers.get("package.apt")
         if provider is None:
             raise ProviderError(f"no native provider registered for {operation.name}")
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
-    return {
+    providers: dict[str, Provider] = {
         "directory": DirectoryProvider(root=root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
+        "package.apt": AptProvider(cache_factory=apt_cache_factory),
+        "database": PostgresProvider(connection_factory=postgres_connection_factory),
     }
+    if caddy_client is not None and caddy_config_builder is not None:
+        providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
+    return providers
