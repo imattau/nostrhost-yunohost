@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from nostrhost.package_engine import PackageError, PackageManifest, load_package, migrate_manifest, plan_package
+from nostrhost.native_providers import NativeOperationExecutor, native_providers
+from nostrhost.package_engine import PackageError, PackageManifest, apply_operation_plan, load_package, migrate_manifest, plan_package
 
 
 def example() -> dict:
@@ -94,3 +95,9 @@ def test_all_declared_domains_are_plannable():
     }
     names = [operation.name for operation in plan_package(PackageManifest.parse_obj(raw))]
     assert {"settings.ensure", "secret.ensure", "backup.register", "hook.python.ensure"} <= set(names)
+
+
+def test_apply_preflights_native_provider_coverage():
+    plan = plan_package(PackageManifest.parse_obj(example()))
+    with pytest.raises(PackageError, match="native providers are unavailable"):
+        apply_operation_plan(plan, NativeOperationExecutor(native_providers(root=Path("/tmp"))))

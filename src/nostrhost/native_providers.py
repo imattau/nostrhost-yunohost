@@ -26,6 +26,13 @@ class ProviderError(RuntimeError):
     """A native provider could not apply an operation safely."""
 
 
+class PackageProvider:
+    """Package identity bookkeeping; resource mutations belong to providers."""
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        return {"package": operation.args["id"], "version": operation.args["version"], "changed": False}
+
+
 def _safe_name(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.@:-]*", value):
         raise ProviderError(f"unsafe systemd unit name: {value!r}")
@@ -409,11 +416,20 @@ class NativeOperationExecutor:
     def __init__(self, providers: dict[str, Provider]) -> None:
         self.providers = providers
 
-    def execute(self, operation: Operation) -> Any:
+    def provider_for(self, operation: Operation) -> Provider | PackageProvider | None:
         operation_type = operation.name.rsplit(".", 1)[0]
         provider = self.providers.get(operation_type)
         if provider is None and operation.name.startswith("package.apt."):
             provider = self.providers.get("package.apt")
+        if provider is None and operation.name == "package.ensure":
+            provider = self.providers.get("package")
+        return provider
+
+    def can_execute(self, operation: Operation) -> bool:
+        return self.provider_for(operation) is not None
+
+    def execute(self, operation: Operation) -> Any:
+        provider = self.provider_for(operation)
         if provider is None:
             raise ProviderError(f"no native provider registered for {operation.name}")
         return provider.apply(operation)
@@ -422,6 +438,7 @@ class NativeOperationExecutor:
 def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
+        "package": PackageProvider(),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),

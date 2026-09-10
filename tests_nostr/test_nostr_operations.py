@@ -54,6 +54,8 @@ def test_registry_has_the_safe_tools():
     assert known_tools() == [
         "app.list",
         "app.remove",
+        "package.plan",
+        "package.reconcile",
         "rollback.apply",
         "service.control",
         "service.restart",
@@ -66,9 +68,11 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("service.status").scope == "services.read"
     assert tool_spec("service.restart").scope == "services.write"
     assert tool_spec("rollback.apply").scope == "state.write"
+    assert tool_spec("package.plan").require_approval is False
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        assert spec.require_approval is True  # nothing auto-runs in Phase 3
+        if name != "package.plan":
+            assert spec.require_approval is True
     assert tool_spec("app.upgrade") is None
 
 

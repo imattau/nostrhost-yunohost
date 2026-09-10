@@ -257,6 +257,38 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     return plan
 
 
+def operation_from_dict(value: dict[str, Any]) -> Operation:
+    """Restore an executor-neutral operation received over the control plane."""
+    required = {"name", "resource", "args"}
+    if not required <= value.keys() or not isinstance(value["args"], dict):
+        raise PackageError("operation requires name, resource, and object args")
+    return Operation(
+        name=value["name"], resource=value["resource"], args=value["args"],
+        depends_on=tuple(value.get("depends_on", ())), risk=value.get("risk", "low"),
+        reversible=bool(value.get("reversible", True)), reverse=value.get("reverse"),
+        summary=value.get("summary", ""),
+    )
+
+
+def apply_operation_plan(plan: list[Operation], executor: Any) -> list[Any]:
+    """Apply a validated plan in dependency order through one executor."""
+    if hasattr(executor, "can_execute"):
+        unsupported = [operation.name for operation in plan if not executor.can_execute(operation)]
+        if unsupported:
+            raise PackageError("native providers are unavailable for: " + ", ".join(unsupported))
+    pending = list(plan)
+    completed: set[str] = set()
+    results: list[Any] = []
+    while pending:
+        ready = next((operation for operation in pending if set(operation.depends_on) <= completed), None)
+        if ready is None:
+            raise PackageError("operation plan contains an unknown dependency or cycle")
+        results.append(executor.execute(ready))
+        completed.add(ready.resource)
+        pending.remove(ready)
+    return results
+
+
 def load_package(path: Path) -> PackageManifest:
     try:
         with path.open("rb") as stream:
