@@ -608,12 +608,20 @@ class HealthProvider:
             raise ProviderError("an httpx client is required for native health checks")
         attempts = desired.get("retries", 0) + 1
         last_status = None
+        last_error = None
         for attempt in range(attempts):
-            response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+            try:
+                response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+            except Exception as exc:
+                last_error = str(exc) or exc.__class__.__name__
+                continue
             last_status = response.status_code
             if response.is_success:
                 return {"status_code": response.status_code, "healthy": True, "attempts": attempt + 1}
-        return {"status_code": last_status, "healthy": False, "attempts": attempts}
+        result = {"status_code": last_status, "healthy": False, "attempts": attempts}
+        if last_error:
+            result["error"] = last_error
+        return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("health.http.check", desired["path"], desired, reversible=False, summary="check HTTP health endpoint")]
@@ -621,7 +629,8 @@ class HealthProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         result = self.inspect(operation.args)
         if not result["healthy"]:
-            raise ProviderError(f"health check returned HTTP {result['status_code']}")
+            detail = result.get("error") or f"HTTP {result['status_code']}"
+            raise ProviderError(f"health check failed after {result['attempts']} attempt(s): {detail}")
         return result
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:

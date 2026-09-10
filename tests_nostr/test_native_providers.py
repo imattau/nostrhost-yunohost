@@ -334,6 +334,22 @@ def test_health_provider_retries_with_bounded_attempts():
     assert client.calls == 3
 
 
+def test_health_provider_retries_transport_failure_then_succeeds():
+    class Response:
+        status_code = 200
+        is_success = True
+    class Client:
+        def __init__(self): self.calls = 0
+        def get(self, path, *, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("connection refused")
+            return Response()
+    client = Client()
+    result = HealthProvider(client=client).inspect({"path": "/health", "retries": 2})
+    assert result == {"status_code": 200, "healthy": True, "attempts": 2}
+
+
 def test_port_provider_checks_bind_availability():
     class Probe:
         def bind(self, address): self.address = address
