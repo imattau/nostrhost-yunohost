@@ -4,6 +4,7 @@ dovecot:
   log: [/var/log/mail.log,/var/log/mail.err]
   needs_exposed_ports: [993]
   category: email
+  ignore_if_package_is_not_installed: dovecot-core
 fail2ban:
   log: /var/log/fail2ban.log
   category: security
@@ -26,11 +27,13 @@ nginx:
 opendkim:
   category: email
   test_conf: opendkim -n
+  ignore_if_package_is_not_installed: opendkim
 postfix:
   log: [/var/log/mail.log,/var/log/mail.err]
   actual_systemd_service: postfix@-
   needs_exposed_ports: [25, 587]
   category: email
+  ignore_if_package_is_not_installed: postfix
 postgresql:
   actual_systemd_service: 'postgresql@15-main'
   category: database
