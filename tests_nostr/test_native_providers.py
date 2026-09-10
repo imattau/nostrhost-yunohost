@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -207,6 +207,16 @@ def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_
     ]
 
 
+def test_sysusers_removal_removes_declaration_without_deleting_account(tmp_path: Path):
+    provider = SysusersProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    ensure = provider.plan({"name": "example"})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"name": "example"})[0]
+    result = provider.apply(remove)
+    assert result["changed"]
+    assert not (tmp_path / "etc/sysusers.d/nostrhost-example.conf").exists()
+
+
 def test_secret_provider_generates_mode_600_credential(tmp_path: Path):
     provider = SecretProvider(credential_dir=tmp_path / "credentials")
     operation = provider.plan({"name": "database_password", "length": 32})[0]
@@ -216,6 +226,27 @@ def test_secret_provider_generates_mode_600_credential(tmp_path: Path):
     first = target.read_text()
     provider.apply(operation)
     assert target.read_text() == first
+
+
+def test_secret_provider_removes_credential(tmp_path: Path):
+    provider = SecretProvider(credential_dir=tmp_path / "credentials")
+    ensure = provider.plan({"name": "api_key", "length": 16})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"name": "api_key"})[0]
+    assert provider.apply(remove)["changed"]
+    assert not (tmp_path / "credentials/api_key").exists()
+
+
+def test_timer_provider_disables_and_removes_units(tmp_path: Path):
+    calls = []
+    provider = TimerProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    ensure = provider.plan({"name": "example", "exec": "/bin/true", "on_calendar": "daily"})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"name": "example"})[0]
+    provider.apply(remove)
+    assert not (tmp_path / "example.timer").exists()
+    assert not (tmp_path / "example.service").exists()
+    assert calls[-1] == (["systemctl", "disable", "--now", "example.timer"], {"check": True})
 
 
 def test_port_provider_checks_bind_availability():

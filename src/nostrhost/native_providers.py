@@ -206,6 +206,10 @@ class SysusersProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         args = operation.args
         name = self._name(args["name"])
+        if operation.name == "system_user.remove":
+            definition = self.definition_dir / f"nostrhost-{name}.conf"
+            definition.unlink(missing_ok=True)
+            return {"name": name, "definition": str(definition), "changed": True}
         self.definition_dir.mkdir(parents=True, exist_ok=True)
         file = self.definition_dir / f"nostrhost-{name}.conf"
         home = args.get("home") or f"/var/lib/{name}"
@@ -244,6 +248,9 @@ class SecretProvider:
         name = self._name(operation.args["name"])
         self.credential_dir.mkdir(parents=True, exist_ok=True)
         target = self.credential_dir / name
+        if operation.name == "secret.remove":
+            target.unlink(missing_ok=True)
+            return {"name": name, "credential": str(target), "changed": True}
         if not target.exists():
             target.write_text(secrets.token_urlsafe(operation.args.get("length", 32)), encoding="utf-8")
             os.chmod(target, 0o600)
@@ -501,6 +508,11 @@ class TimerProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         args = operation.args
         name = _safe_name(args.get("name") or operation.resource.split(":")[-1])
+        if operation.name == "timer.remove":
+            self.command(["systemctl", "disable", "--now", f"{name}.timer"], check=True)
+            for suffix in (".timer", ".service"):
+                (self.unit_dir / f"{name}{suffix}").unlink(missing_ok=True)
+            return {"timer": str(self.unit_dir / f"{name}.timer"), "changed": True}
         self.unit_dir.mkdir(parents=True, exist_ok=True)
         (self.unit_dir / f"{name}.service").write_text(f"[Unit]\nDescription=NostrHost timer action {name}\n\n[Service]\nType=oneshot\nExecStart={args['exec']}\n", encoding="utf-8")
         timer = self.unit_dir / f"{name}.timer"
