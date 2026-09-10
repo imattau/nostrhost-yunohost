@@ -30,6 +30,7 @@ tests, mirroring nostr_identity.py.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -321,6 +322,53 @@ def build_approval(admin_sk: str, admin_pubkey: str, request_id: str, note: str 
     return _sign_event(admin_sk, admin_pubkey, KIND_OPERATION_APPROVAL, content, _e_tag(request_id))
 
 
+def build_approval_template(admin_pubkey: str, request_id: str, note: str | None = None) -> dict[str, Any]:
+    """Build the unsigned NIP-46 approval event passed to a remote signer.
+
+    The signer (normally a bunker reached through NIP-46) must return this
+    event with its ``id`` and ``sig`` fields populated.  The ``nip46`` marker
+    makes the privileged approval explicit in the audit chain while keeping
+    the existing 2201 state transition and relay compatibility.
+    """
+    if not _is_hex64(admin_pubkey) or not _is_hex64(request_id):
+        raise OperationError("approval pubkey and request id must be 64-hex")
+    content = json.dumps({"note": note}, default=_json_default) if note is not None else ""
+    return {
+        "pubkey": admin_pubkey,
+        "created_at": int(time.time()),
+        "kind": KIND_OPERATION_APPROVAL,
+        "tags": _e_tag(request_id) + [["t", "nip46"]],
+        "content": content,
+    }
+
+
+def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Validate a remote-signed NIP-46 approval before it is published."""
+    if event.get("kind") != KIND_OPERATION_APPROVAL or event.get("pubkey") is None:
+        raise OperationError("NIP-46 signer returned a non-approval event")
+    tags = event.get("tags") or []
+    if _e_tag(request_id)[0] not in tags:
+        raise OperationError("NIP-46 approval does not target the requested operation")
+    if ["t", "nip46"] not in tags:
+        raise OperationError("NIP-46 approval is missing its audit marker")
+    required = ("id", "sig", "created_at", "content")
+    if any(key not in event for key in required) or not _is_hex64(str(event["id"])):
+        raise OperationError("NIP-46 signer returned an incomplete event")
+    serialized = json.dumps(
+        [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]],
+        separators=(",", ":"), ensure_ascii=False,
+    ).encode()
+    if hashlib.sha256(serialized).hexdigest() != event["id"]:
+        raise OperationError("NIP-46 approval id does not match its contents")
+    try:
+        from coincurve import PublicKeyXOnly
+        if not PublicKeyXOnly(bytes.fromhex(str(event["pubkey"]))).verify(bytes.fromhex(str(event["sig"])), bytes.fromhex(event["id"])):
+            raise OperationError("NIP-46 approval signature is invalid")
+    except ValueError as exc:
+        raise OperationError("NIP-46 approval contains invalid key or signature encoding") from exc
+    return event
+
+
 def build_rejection(admin_sk: str, admin_pubkey: str, request_id: str, reason: str | None = None) -> dict[str, Any]:
     """Build (without publishing) a kind-2202 rejection for a request."""
     content = json.dumps({"reason": reason}, default=_json_default) if reason is not None else ""
@@ -416,6 +464,28 @@ def approve_operation(
     """Publish a kind-2201 approval as an admin (default: operator key)."""
     sk, pubkey = _admin_keys(admin_sk, control_relay)
     event = build_approval(sk, pubkey, request_id, note)
+    (transport or publish_to_relay)(_control_relay(control_relay), event)
+    return event
+
+
+def approve_operation_nip46(
+    request_id: str,
+    *,
+    signer: Callable[[dict[str, Any]], dict[str, Any]],
+    admin_pubkey: str,
+    control_relay: str | None = None,
+    note: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Request a privileged approval from a NIP-46 signer and publish it.
+
+    ``signer`` is deliberately injectable: the web portal can provide its
+    bunker signer, while tests and other adapters can use a local fake.
+    """
+    unsigned = build_approval_template(admin_pubkey, request_id, note)
+    event = validate_signed_approval(signer(unsigned), request_id)
+    if event["pubkey"] != admin_pubkey:
+        raise OperationError("NIP-46 signer returned an event from an unexpected approval identity")
     (transport or publish_to_relay)(_control_relay(control_relay), event)
     return event
 
