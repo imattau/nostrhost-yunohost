@@ -617,9 +617,10 @@ class RuntimeProvider:
     resource_type = "runtime"
     executables = {"node": "node", "python": "python3", "go": "go", "composer": "composer", "php": "php"}
 
-    def __init__(self, *, command: Callable[..., Any] | None = None, executable_lookup: Callable[[str], str | None] | None = None) -> None:
+    def __init__(self, *, command: Callable[..., Any] | None = None, executable_lookup: Callable[[str], str | None] | None = None, installer: Callable[[dict[str, Any]], Any] | None = None) -> None:
         self.command = command or subprocess.run
         self.executable_lookup = executable_lookup or shutil.which
+        self.installer = installer
 
     def _executable(self, runtime_type: str) -> str:
         try:
@@ -644,9 +645,20 @@ class RuntimeProvider:
         return [Operation("runtime.ensure", desired["type"], desired, risk="medium", reverse="runtime.remove", summary=f"validate {desired['type']} runtime {desired['version']}")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
-        result = self.inspect(operation.args)
+        try:
+            result = self.inspect(operation.args)
+        except ProviderError:
+            if self.installer is None:
+                raise
+            self.installer(dict(operation.args))
+            result = self.inspect(operation.args)
         if not result["matches"]:
-            raise ProviderError(f"runtime version mismatch: requested {operation.args['version']}, detected {result['version']}")
+            if self.installer is None:
+                raise ProviderError(f"runtime version mismatch: requested {operation.args['version']}, detected {result['version']}")
+            self.installer(dict(operation.args))
+            result = self.inspect(operation.args)
+            if not result["matches"]:
+                raise ProviderError(f"runtime version mismatch after installation: requested {operation.args['version']}, detected {result['version']}")
         result["changed"] = False
         return result
 
@@ -1367,7 +1379,7 @@ class NativeOperationExecutor:
         return provider.apply(operation)
 
 
-def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
+def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, runtime_installer: Callable[[dict[str, Any]], Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
         "package": PackageProvider(),
@@ -1376,7 +1388,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "permission": PermissionProvider(),
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
-        "runtime": RuntimeProvider(command=command),
+        "runtime": RuntimeProvider(command=command, installer=runtime_installer),
         "fpm": FpmProvider(root=root, command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),
         "package.apt": AptProvider(cache_factory=apt_cache_factory),

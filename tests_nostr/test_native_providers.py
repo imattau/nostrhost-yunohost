@@ -118,6 +118,27 @@ def test_runtime_provider_rejects_missing_runtime():
         provider.apply(provider.plan({"type": "go", "version": "1.24"})[0])
 
 
+def test_runtime_provider_invokes_explicit_installer_then_rechecks():
+    installed = False
+    calls = []
+
+    class Result:
+        stdout = "Python 3.12.4\n"
+        stderr = ""
+
+    def lookup(name):
+        return "/usr/bin/python3" if installed else None
+
+    def install(desired):
+        nonlocal installed
+        installed = True
+        calls.append(desired)
+
+    provider = RuntimeProvider(command=lambda *args, **kwargs: Result(), executable_lookup=lookup, installer=install)
+    result = provider.apply(provider.plan({"type": "python", "version": "3.12"})[0])
+    assert result["matches"] and calls == [{"type": "python", "version": "3.12"}]
+
+
 def test_fpm_provider_renders_owned_pool_and_reloads_matching_service(tmp_path: Path):
     calls = []
     provider = FpmProvider(root=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
