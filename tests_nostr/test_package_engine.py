@@ -144,3 +144,21 @@ def test_reconciliation_skips_verified_cached_source(tmp_path: Path):
     provider.apply(provider.plan(desired)[0])
     operation = Operation("source.fetch", url, desired)
     assert _operation_satisfied(operation, provider.inspect(desired))
+
+
+def test_reconciliation_skips_unchanged_extracted_source(tmp_path: Path):
+    import hashlib
+    import tarfile
+
+    from nostrhost.native_providers import SourceProvider
+
+    archive = tmp_path / "source.tar"
+    payload = tmp_path / "payload.txt"
+    payload.write_text("native")
+    with tarfile.open(archive, "w") as tar:
+        tar.add(payload, arcname="payload.txt")
+    url = "https://example.test/source.tar"
+    desired = {"url": url, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "destination": "/opt/example"}
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(archive.read_bytes()))
+    provider.apply(provider.plan(desired)[0])
+    assert _operation_satisfied(Operation("source.fetch", url, desired), provider.inspect(desired))

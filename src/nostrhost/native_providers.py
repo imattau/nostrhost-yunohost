@@ -318,6 +318,13 @@ class SourceProvider:
         result = {"exists": path.exists(), "path": str(path)}
         if path.is_file():
             result["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        if destination:
+            provenance = path / ".nostrhost-source.json"
+            if provenance.is_file():
+                try:
+                    result.update(json.loads(provenance.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError):
+                    result["provenance_valid"] = False
         return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
@@ -344,6 +351,7 @@ class SourceProvider:
                     self._extract(archive, target)
                 else:
                     shutil.copy2(archive, target / "source")
+                (target / ".nostrhost-source.json").write_text(json.dumps({"url": args["url"], "sha256": args["sha256"]}, sort_keys=True) + "\n", encoding="utf-8")
                 return {"path": str(target), "verified": True}
             cached = self.cache_dir / hashlib.sha256(args["url"].encode()).hexdigest()
             shutil.copy2(archive, cached)
