@@ -89,13 +89,13 @@ class ToolSpec:
     description: str = ""
 
 
-def _safe_package_plan(package: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
+def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
     if args or not isinstance(package, dict):
-        raise OperationError("package.plan requires exactly one package object")
+        raise OperationError("package.plan requires a package object and optional catalogue provenance")
     from nostrhost.package_engine import package_plan_envelope
 
     try:
-        return package_plan_envelope(package)
+        return package_plan_envelope(package, catalogue=catalogue)
     except (TypeError, ValueError) as exc:
         raise OperationError(f"invalid native package: {exc}") from exc
 

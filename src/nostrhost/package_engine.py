@@ -473,19 +473,31 @@ def operation_plan_digest(plan: list[Operation]) -> str:
     return hashlib.sha256(_canonical_json([operation.json_dict() for operation in plan])).hexdigest()
 
 
-def package_plan_envelope(package_data: dict[str, Any]) -> dict[str, Any]:
+def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the control-plane envelope for one validated native package."""
     if not isinstance(package_data, dict):
         raise PackageError("package plan requires an object")
     package = validate_package(PackageManifest.parse_obj(package_data))
     plan = plan_package(package)
-    return {
+    envelope = {
         "schema": PLAN_SCHEMA,
         "package": {"id": package.app.id, "version": package.app.version},
         "manifest_sha256": hashlib.sha256(_canonical_json(package_data)).hexdigest(),
         "plan_sha256": operation_plan_digest(plan),
         "operations": [operation.json_dict() for operation in plan],
     }
+    if catalogue is not None:
+        if not isinstance(catalogue, dict):
+            raise PackageError("catalogue provenance must be an object")
+        native = catalogue.get("native") if isinstance(catalogue.get("native"), dict) else catalogue
+        if native.get("app_id") != package.app.id or native.get("version") != package.app.version:
+            raise PackageError("catalogue provenance does not match package identity")
+        envelope["catalogue"] = {
+            key: native[key]
+            for key in ("app_id", "version", "repository", "revision", "manifest_sha256", "content_sha256", "architectures", "package_path", "event_id")
+            if key in native
+        }
+    return envelope
 
 
 def validate_plan_envelope(envelope: dict[str, Any]) -> list[Operation]:
@@ -501,6 +513,10 @@ def validate_plan_envelope(envelope: dict[str, Any]) -> list[Operation]:
     package = envelope.get("package")
     if not isinstance(package, dict) or not package.get("id") or not package.get("version"):
         raise PackageError("native package plan envelope requires package id and version")
+    catalogue = envelope.get("catalogue")
+    if catalogue is not None:
+        if not isinstance(catalogue, dict) or catalogue.get("app_id") != package["id"] or catalogue.get("version") != package["version"]:
+            raise PackageError("native package plan catalogue provenance does not match package identity")
     return plan
 
 

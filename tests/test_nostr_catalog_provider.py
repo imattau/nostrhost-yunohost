@@ -27,6 +27,8 @@ def test_load_native_catalog_maps_verified_projection(tmp_path):
     assert result["hello_nostr"]["source"] == "nostr"
     assert result["hello_nostr"]["git"]["revision"] == "c" * 40
     assert result["hello_nostr"]["manifest"]["name"] == {"en": "Hello Nostr"}
+    assert result["hello_nostr"]["native"]["package_path"] == "package.toml"
+    assert result["hello_nostr"]["native"]["app_id"] == "hello_nostr"
 
 
 def test_load_native_catalog_ignores_bad_state(tmp_path):

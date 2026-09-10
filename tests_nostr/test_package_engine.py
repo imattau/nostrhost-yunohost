@@ -46,6 +46,14 @@ def test_plan_envelope_binds_manifest_and_operations():
         validate_plan_envelope(envelope)
 
 
+def test_plan_envelope_binds_catalogue_provenance():
+    provenance = {"app_id": "example", "version": "1.2.0", "repository": "nostr://repo", "revision": "c" * 40}
+    envelope = package_plan_envelope(example(), catalogue=provenance)
+    assert envelope["catalogue"]["revision"] == "c" * 40
+    with pytest.raises(PackageError, match="provenance"):
+        package_plan_envelope(example(), catalogue={**provenance, "app_id": "other"})
+
+
 def test_removal_plan_reverses_only_owned_resources():
     package = PackageManifest.parse_obj(example() | {
         "settings": {"values": {"mode": "safe"}},

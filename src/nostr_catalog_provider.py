@@ -74,6 +74,17 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
             },
             "repository": "nostrhost",
             "source": "nostr",
+            "native": {
+                "app_id": app_id,
+                "version": version,
+                "repository": repository,
+                "revision": commit,
+                "manifest_sha256": declaration.get("ManifestHash", ""),
+                "content_sha256": declaration.get("ContentHash", ""),
+                "architectures": declaration.get("Architectures") or [],
+                "package_path": declaration.get("PackagePath", "package.toml"),
+                "event_id": item.get("event_id", ""),
+            },
             **({"nostr_verified": verified} if mode == "prefer" else {}),
         }
     return apps
