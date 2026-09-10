@@ -58,6 +58,18 @@ def test_invalid_source_hash_and_path_are_rejected():
         PackageManifest.parse_obj(invalid)
 
 
+def test_source_architecture_variant_is_selected_for_plan(monkeypatch):
+    import nostrhost.package_engine as engine
+
+    monkeypatch.setattr(engine.host_platform, "machine", lambda: "x86_64")
+    package = PackageManifest.parse_obj({
+        "app": {"id": "example", "version": "1"},
+        "source": {"main": {"variants": {"amd64": {"url": "https://example.test/amd64.tar", "sha256": "a" * 64}, "arm64": {"url": "https://example.test/arm64.tar", "sha256": "b" * 64}}}},
+    })
+    operation = next(operation for operation in plan_package(package) if operation.name == "source.fetch")
+    assert operation.args["url"].endswith("amd64.tar") and operation.args["sha256"] == "a" * 64
+
+
 def test_schema_has_native_resource_shape():
     schema = PackageManifest.schema()
     assert "app" in schema["properties"]

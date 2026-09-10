@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import platform as host_platform
 import re
 import socket
 import tomllib
@@ -37,16 +38,28 @@ class AppResource(BaseModel):
         return value
 
 
-class SourceResource(BaseModel):
-    id: str = "main"
+class SourceVariant(BaseModel):
     url: str = Field(..., min_length=1)
     sha256: str = Field(..., min_length=64, max_length=64)
+
+    @validator("sha256")
+    def valid_hash(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            raise ValueError("sha256 must be a 64-character hexadecimal digest")
+        return value
+
+
+class SourceResource(BaseModel):
+    id: str = "main"
+    url: str | None = Field(None, min_length=1)
+    sha256: str | None = Field(None, min_length=64, max_length=64)
     extract: bool = True
     destination: Path | None = None
     format: Literal["auto", "tar", "zip", "file"] = "auto"
     rename: str | None = None
     strip_components: int = Field(0, ge=0, le=16)
     platform: str | None = None
+    variants: dict[str, SourceVariant] = Field(default_factory=dict)
 
     @validator("rename")
     def safe_rename(cls, value: str | None) -> str | None:
@@ -55,10 +68,18 @@ class SourceResource(BaseModel):
         return value
 
     @validator("sha256")
-    def valid_hash(cls, value: str) -> str:
+    def valid_hash(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
         if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise ValueError("sha256 must be a 64-character hexadecimal digest")
         return value
+
+    @root_validator
+    def has_source(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if not values.get("variants") and not (values.get("url") and values.get("sha256")):
+            raise ValueError("source requires url/sha256 or architecture variants")
+        return values
 
 
 class PackagesResource(BaseModel):
@@ -476,7 +497,15 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         deps = (user_op.resource,) if user_op else (package_op.resource,)
         plan.append(_op("access.ensure", f"{app}:access:{name}", {"path": str(access.path), "owner": access.owner, "group": access.group, "mode": access.mode, "recursive": access.recursive}, deps=deps, reverse="access.remove", summary=f"enforce access policy on {access.path}"))
     for name, source in package.sources.items():
-        plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None, "format": source.format, "rename": source.rename, "strip_components": source.strip_components, "platform": source.platform}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
+        selected = source
+        if source.variants:
+            architecture = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "armhf", "i386": "i386"}.get(host_platform.machine(), host_platform.machine())
+            try:
+                variant = source.variants[architecture]
+            except KeyError as exc:
+                raise PackageError(f"source {name} has no variant for architecture {architecture}") from exc
+            selected = source.copy(update={"url": variant.url, "sha256": variant.sha256})
+        plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": selected.url, "sha256": selected.sha256, "extract": selected.extract, "destination": str(selected.destination) if selected.destination else None, "format": selected.format, "rename": selected.rename, "strip_components": selected.strip_components, "platform": selected.platform}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
     for name, config in package.config.items():
         config_args = {**config.dict(), "destination": str(config.destination)}
         if template_root is not None:
