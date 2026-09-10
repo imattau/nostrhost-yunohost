@@ -116,11 +116,17 @@ def portalapi(debug: bool, host: str, port: int) -> NoReturn:
     # They are registered via moulinette's `routes` kwarg, which skips the
     # default authenticator; only challenge/login are public by design.
     from .nostr_login import auth_request_route, challenge_route, login_route
+    from .nostr_oidc import authorize, discovery, jwks, token, userinfo
 
     nostr_routes = {
         ("GET", "/nostr/challenge"): challenge_route,
         ("POST", "/nostr/login"): login_route,
         ("GET", "/nostr/auth-request"): auth_request_route,
+        ("GET", "/.well-known/openid-configuration"): discovery,
+        ("GET", "/oidc/authorize"): authorize,
+        ("POST", "/oidc/token"): token,
+        ("GET", "/oidc/userinfo"): userinfo,
+        ("GET", "/oidc/jwks.json"): jwks,
     }
 
     ret = moulinette.api(

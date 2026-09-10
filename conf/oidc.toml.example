@@ -1,0 +1,6 @@
+# OIDC clients are explicit and must use exact redirect URIs.
+# Copy to /etc/nostrhost/oidc.toml and replace these example values.
+
+[clients.example]
+redirect_uris = ["https://app.example.test/oidc/callback"]
+client_secret = "replace-with-a-long-random-secret"
