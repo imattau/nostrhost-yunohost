@@ -21,7 +21,6 @@ Depends: python3-all (>= 3.11),
  , udisks2, udisks2-bcache, udisks2-btrfs, udisks2-lvm2, udisks2-zram
  , smartmontools
  , python3-zmq
- , nginx, nginx-extras (>=1.22)
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, fail2ban, bind9-dnsutils
  , openssl, ca-certificates, netcat-openbsd, iproute2
@@ -42,7 +41,6 @@ Conflicts: iptables-persistent
  , bind9
  , openresolv
  , systemd-resolved
- , nginx-extras (>= 1.23)
  , openssl (>= 3.1)
  , slapd (>= 2.6)
  , dovecot-core (>= 1:2.4)

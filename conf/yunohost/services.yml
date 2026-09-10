@@ -14,11 +14,6 @@ mysql:
   actual_systemd_service: mariadb
   category: database
   ignore_if_package_is_not_installed: mariadb-server
-nginx:
-  log: /var/log/nginx
-  test_conf: nginx -t
-  needs_exposed_ports: [80, 443]
-  category: web
 caddy:
   log: /var/log/caddy
   test_conf: caddy validate --config /etc/caddy/Caddyfile
