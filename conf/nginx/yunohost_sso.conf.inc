@@ -5,7 +5,7 @@ location /yunohost/sso/ {
     alias /usr/share/yunohost/portal/;
     default_type text/html;
     index index.html;
-    try_files $uri $uri/ /index.html;
+    try_files $uri $uri/ /yunohost/sso/index.html;
 
     location = /yunohost/sso/index.html {
         etag off;
