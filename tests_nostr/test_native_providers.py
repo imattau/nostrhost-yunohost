@@ -16,6 +16,15 @@ def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
     assert target.stat().st_mode & 0o7777 == 0o750
 
 
+def test_directory_provider_removes_only_empty_declared_directory(tmp_path: Path):
+    provider = DirectoryProvider(root=tmp_path)
+    ensure = provider.plan({"path": "/var/lib/example", "mode": 0o750})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"path": "/var/lib/example"})[0]
+    assert provider.apply(remove)["changed"]
+    assert not (tmp_path / "var/lib/example").exists()
+
+
 def test_source_provider_verifies_and_extracts_without_shell(tmp_path: Path):
     archive = tmp_path / "source.tar.gz"
     import tarfile
@@ -79,7 +88,7 @@ def test_runtime_provider_rejects_missing_runtime():
 
 
 def test_service_provider_renders_hardened_unit(tmp_path: Path):
-    provider = ServiceProvider(unit_dir=tmp_path)
+    provider = ServiceProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
     operation = provider.plan({"name": "example", "exec": "/opt/example/server", "user": "example", "security": {}})[0]
     provider.apply(operation)
     unit = (tmp_path / "example.service").read_text()
@@ -103,6 +112,17 @@ def test_service_provider_uses_bounded_systemctl_arguments(tmp_path: Path):
     operation = operation.__class__("service.start", operation.resource, {"name": "example"})
     assert provider.apply(operation)["action"] == "start"
     assert calls == [(["systemctl", "start", "example"], {"check": True})]
+
+
+def test_service_provider_removes_unit_and_reloads_systemd(tmp_path: Path):
+    calls = []
+    provider = ServiceProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    ensure = provider.plan({"name": "example", "exec": "/bin/true"})[0]
+    provider.apply(ensure)
+    remove = provider.remove({"name": "example"})[0]
+    provider.apply(remove)
+    assert not (tmp_path / "example.service").exists()
+    assert calls[-1] == (["systemctl", "daemon-reload"], {"check": True})
 
 
 def test_native_executor_dispatches_only_registered_provider(tmp_path: Path):

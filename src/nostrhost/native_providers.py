@@ -65,6 +65,14 @@ class DirectoryProvider:
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         path = _target(self.root, operation.args["path"])
+        if operation.name == "directory.remove":
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                return {"path": str(path), "changed": False}
+            except OSError as exc:
+                raise ProviderError(f"directory is not empty or cannot be removed: {path}") from exc
+            return {"path": str(path), "changed": True}
         path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, operation.args["mode"])
         if operation.args.get("owner") or operation.args.get("group"):
@@ -439,6 +447,11 @@ class ServiceProvider:
         if action in {"enable", "disable", "start", "stop", "restart"}:
             self.command(["systemctl", action, name], check=True)
             return {"service": name, "action": action, "changed": True}
+        if action == "remove":
+            destination = self.unit_dir / f"{name}.service"
+            destination.unlink(missing_ok=True)
+            self.command(["systemctl", "daemon-reload"], check=True)
+            return {"unit": str(destination), "changed": True}
         self.unit_dir.mkdir(parents=True, exist_ok=True)
         unit = self.render_unit(name, args)
         destination = self.unit_dir / f"{name}.service"
@@ -446,6 +459,7 @@ class ServiceProvider:
         temporary.write_text(unit, encoding="utf-8")
         os.chmod(temporary, 0o644)
         temporary.replace(destination)
+        self.command(["systemctl", "daemon-reload"], check=True)
         return {"unit": str(destination), "changed": True}
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
