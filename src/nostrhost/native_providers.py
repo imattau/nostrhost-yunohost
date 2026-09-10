@@ -663,6 +663,23 @@ class JsonStateProvider:
         return [Operation(f"{self.resource_type}.unregister", desired["name"], desired, reverse=f"{self.resource_type}.register", summary=f"unregister {self.resource_type} state")]
 
 
+class BackupProvider(JsonStateProvider):
+    """Register backup inputs without owning the Restic data plane."""
+
+    resource_type = "backup"
+
+    def __init__(self, *, state_dir: Path) -> None:
+        super().__init__(state_dir=state_dir, resource_type="backup")
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        if not operation.name.endswith(".unregister"):
+            paths = operation.args.get("paths", [])
+            if any(not Path(path).is_absolute() or ".." in Path(path).parts for path in paths):
+                raise ProviderError("backup paths must be absolute and cannot contain '..'")
+            operation = Operation(operation.name, operation.resource, {**operation.args, "format": "nostrhost-backup-v1"}, operation.depends_on, operation.risk, operation.reversible, operation.reverse, operation.summary)
+        return super().apply(operation)
+
+
 class AptProvider:
     resource_type = "package.apt"
 
@@ -897,7 +914,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
-        "backup": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups"), resource_type="backup"),
+        "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
     }
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder, remove_config_builder=caddy_remove_config_builder)

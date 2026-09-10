@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, JsonStateProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -305,6 +305,20 @@ def test_json_state_provider_unregisters_state_atomically(tmp_path: Path):
     remove = provider.remove({"name": "example"})[0]
     assert provider.apply(remove)["changed"]
     assert not target.exists()
+
+
+def test_backup_provider_persists_validated_manifest(tmp_path: Path):
+    provider = BackupProvider(state_dir=tmp_path)
+    operation = provider.plan({"name": "example", "paths": ["/var/lib/example"], "database": True})[0]
+    provider.apply(operation)
+    assert '"format": "nostrhost-backup-v1"' in (tmp_path / "example.json").read_text()
+
+
+def test_backup_provider_rejects_relative_paths(tmp_path: Path):
+    provider = BackupProvider(state_dir=tmp_path)
+    operation = provider.plan({"name": "example", "paths": ["relative/data"]})[0]
+    with pytest.raises(ProviderError, match="backup paths"):
+        provider.apply(operation)
 
 
 def test_port_provider_checks_bind_availability():
