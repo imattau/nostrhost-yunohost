@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import sys
+import types
+
 import pytest
 
-from yunohost.nostrhost_native_policy import NativePolicyAdapter, _native_policy_key
+from yunohost.nostrhost_native_policy import NativePolicyAdapter, _backup_created_at, _native_policy_key
 
 
 class Rule:
@@ -44,3 +48,10 @@ def test_native_policy_checks_shared_hard_requirements():
     assert result["policy_key"] == "apps.upgrade"
     assert result["owner_signature_required"] is True
     assert checks == [("space", 123), ("backup", {"nightly": 456.0}, 789.0)]
+
+
+def test_backup_created_at_normalizes_yunohost_datetime(monkeypatch):
+    backup = types.ModuleType("yunohost.backup")
+    backup.backup_list = lambda with_info=True: {"archives": {"nightly": {"created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}}}
+    monkeypatch.setitem(sys.modules, "yunohost.backup", backup)
+    assert _backup_created_at()["nightly"] == datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()

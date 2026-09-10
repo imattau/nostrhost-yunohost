@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,8 +41,15 @@ def _backup_created_at() -> dict[str, float]:
         if not isinstance(info, dict):
             continue
         created_at = info.get("created_at")
-        if isinstance(created_at, (int, float)):
+        if isinstance(created_at, datetime):
+            result[str(name)] = created_at.timestamp()
+        elif isinstance(created_at, (int, float)):
             result[str(name)] = float(created_at)
+        elif isinstance(created_at, str):
+            try:
+                result[str(name)] = datetime.fromisoformat(created_at).timestamp()
+            except ValueError:
+                continue
     return result
 
 
