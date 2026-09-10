@@ -1,0 +1,39 @@
+# Port of the retired fail2ban [sasl] jail to CrowdSec.
+#
+# The retired fail2ban filter (filter.d/postfix-sasl.conf) matched a single
+# postfix line:
+#   warning: <host>[<ip>]: SASL (LOGIN|PLAIN|(CRAM|DIGEST)-MD5) authentication
+#   failed
+# with [sasl] maxretry = 5.
+#
+# This scenario REUSES the crowdsecurity/postfix collection's postfix-logs
+# parser rather than re-deriving one (see docs/CROWDSEC-MIGRATION.md §8.2).
+# postfix-logs tags every SASL failure as log_type_enh = 'spam-attempt' AND
+# sets evt.Parsed.message_failure (the failure reason). The stock
+# postfix-spam scenario uses the same log_type_enh but is broader (it also
+# fires on "lost connection" spam and postfix 'reject' actions). Matching on
+# evt.Parsed.message_failure narrows this scenario to SASL auth failures only,
+# reproducing the fail2ban [sasl] jail exactly.
+#
+# fail2ban semantics ported:
+#   maxretry = 5                     -> capacity
+#   findtime = 10m  ([DEFAULT])      -> leakspeed = 600s / 5 = 120s
+#   bantime  = 10m  ([DEFAULT])      -> decision duration set by the bouncer
+#                                       (P4), like all stock scenarios
+#
+# groupby source_ip keeps the bucket per attacker, matching fail2ban's
+# per-IP counting.
+type: leaky
+name: nostrhost/postfix-sasl-bf
+description: "Detect brute force against the postfix SMTP SASL authentication (SASL auth failed)"
+filter: |
+  evt.Meta.log_type_enh == 'spam-attempt'
+  && evt.Parsed.message_failure != ''
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: "120s"
+blackhole: 1m
+labels:
+  service: postfix
+  type: bruteforce
+  remediation: true
