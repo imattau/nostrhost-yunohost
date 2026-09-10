@@ -20,7 +20,7 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from .package_engine import Operation, Provider
@@ -522,10 +522,10 @@ class SourceProvider:
                 target = _target(self.root, destination)
                 target.mkdir(parents=True, exist_ok=True)
                 if args.get("extract", True):
-                    self._extract(archive, target)
+                    self._extract(archive, target, args.get("format", "auto"), int(args.get("strip_components", 0)))
                 else:
-                    shutil.copy2(archive, target / "source")
-                (target / ".nostrhost-source.json").write_text(json.dumps({"url": args["url"], "sha256": args["sha256"]}, sort_keys=True) + "\n", encoding="utf-8")
+                    shutil.copy2(archive, target / (args.get("rename") or "source"))
+                (target / ".nostrhost-source.json").write_text(json.dumps({"url": args["url"], "sha256": args["sha256"], "format": args.get("format", "auto"), "rename": args.get("rename"), "strip_components": args.get("strip_components", 0)}, sort_keys=True) + "\n", encoding="utf-8")
                 return {"path": str(target), "verified": True}
             cached = self.cache_dir / hashlib.sha256(args["url"].encode()).hexdigest()
             shutil.copy2(archive, cached)
@@ -550,29 +550,58 @@ class SourceProvider:
                     output.write(chunk)
 
     @staticmethod
-    def _extract(archive: Path, destination: Path) -> None:
+    def _extract(archive: Path, destination: Path, archive_format: str = "auto", strip_components: int = 0) -> None:
         base = destination.resolve()
 
-        def safe_target(name: str) -> Path:
-            target = (destination / name).resolve()
+        def safe_target(name: str) -> Path | None:
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ProviderError("archive contains a path traversal entry")
+            parts = path.parts[strip_components:]
+            if not parts:
+                return None
+            target = (destination / Path(*parts)).resolve()
             if target != base and base not in target.parents:
                 raise ProviderError("archive contains a path traversal entry")
             return target
 
-        if tarfile.is_tarfile(archive):
+        if archive_format not in {"auto", "tar", "zip", "file"}:
+            raise ProviderError(f"unsupported source format: {archive_format}")
+        if archive_format == "file":
+            raise ProviderError("file sources cannot be extracted")
+        if archive_format in {"auto", "tar"} and tarfile.is_tarfile(archive):
             with tarfile.open(archive) as tar:
                 for member in tar.getmembers():
                     safe_target(member.name)
                     if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                         raise ProviderError("archive contains a link or special file")
-                tar.extractall(destination)
-        elif zipfile.is_zipfile(archive):
+                for member in tar.getmembers():
+                    target = safe_target(member.name)
+                    if target is None:
+                        continue
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        source = tar.extractfile(member)
+                        if source is None:
+                            raise ProviderError("archive file could not be read")
+                        target.write_bytes(source.read())
+        elif archive_format in {"auto", "zip"} and zipfile.is_zipfile(archive):
             with zipfile.ZipFile(archive) as archive_file:
                 for member in archive_file.infolist():
                     safe_target(member.filename)
                     if stat.S_IFMT(member.external_attr >> 16) != stat.S_IFREG and not member.is_dir():
                         raise ProviderError("archive contains a link or special file")
-                archive_file.extractall(destination)
+                for member in archive_file.infolist():
+                    target = safe_target(member.filename)
+                    if target is None:
+                        continue
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(archive_file.read(member))
         else:
             raise ProviderError("source is not a supported tar or zip archive")
 

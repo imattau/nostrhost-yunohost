@@ -43,6 +43,16 @@ class SourceResource(BaseModel):
     sha256: str = Field(..., min_length=64, max_length=64)
     extract: bool = True
     destination: Path | None = None
+    format: Literal["auto", "tar", "zip", "file"] = "auto"
+    rename: str | None = None
+    strip_components: int = Field(0, ge=0, le=16)
+    platform: str | None = None
+
+    @validator("rename")
+    def safe_rename(cls, value: str | None) -> str | None:
+        if value is not None and (not value or Path(value).name != value):
+            raise ValueError("source rename must be a filename")
+        return value
 
     @validator("sha256")
     def valid_hash(cls, value: str) -> str:
@@ -452,7 +462,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         deps = (user_op.resource,) if user_op else (package_op.resource,)
         plan.append(_op("access.ensure", f"{app}:access:{name}", {"path": str(access.path), "owner": access.owner, "group": access.group, "mode": access.mode, "recursive": access.recursive}, deps=deps, reverse="access.remove", summary=f"enforce access policy on {access.path}"))
     for name, source in package.sources.items():
-        plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
+        plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": source.url, "sha256": source.sha256, "extract": source.extract, "destination": str(source.destination) if source.destination else None, "format": source.format, "rename": source.rename, "strip_components": source.strip_components, "platform": source.platform}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
     for name, config in package.config.items():
         config_args = {**config.dict(), "destination": str(config.destination)}
         if template_root is not None:

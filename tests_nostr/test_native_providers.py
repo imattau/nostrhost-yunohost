@@ -76,6 +76,27 @@ def test_source_provider_rejects_archive_links(tmp_path: Path):
         provider.apply(operation)
 
 
+def test_source_provider_supports_strip_components_and_file_rename(tmp_path: Path):
+    archive = tmp_path / "source.tar"
+    import tarfile
+
+    payload = b"native"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("release-1.0/bin/app")
+        info.size = len(payload)
+        tar.addfile(info, __import__("io").BytesIO(payload))
+
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(archive.read_bytes()))
+    desired = {"url": "https://example.test/source.tar", "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "destination": "/opt/example", "format": "tar", "strip_components": 2}
+    provider.apply(provider.plan(desired)[0])
+    assert (tmp_path / "opt/example/app").read_bytes() == payload
+
+    file_provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache2", downloader=lambda _url, destination: destination.write_bytes(payload))
+    file_desired = {"url": "https://example.test/app.bin", "sha256": hashlib.sha256(payload).hexdigest(), "destination": "/opt/file", "extract": False, "format": "file", "rename": "app.bin"}
+    file_provider.apply(file_provider.plan(file_desired)[0])
+    assert (tmp_path / "opt/file/app.bin").read_bytes() == payload
+
+
 def test_runtime_provider_validates_version_with_bounded_arguments():
     calls = []
 
