@@ -4,6 +4,7 @@ import hashlib
 import pytest
 
 from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.package_engine import Operation
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -254,6 +255,26 @@ def test_postgres_provider_creates_declared_user_and_grants():
     provider.apply(provider.plan(desired)[0])
     assert connection.cursor_obj.calls[1] == ('CREATE ROLE "app" LOGIN PASSWORD %s', ("secret:db_password",))
     assert connection.cursor_obj.calls[2] == ('GRANT CONNECT ON DATABASE "example_db" TO "app"', None)
+
+
+def test_database_provider_uses_bounded_dump_and_restore_commands(tmp_path: Path):
+    calls = []
+    provider = PostgresProvider(command=lambda args, **kwargs: calls.append((args, kwargs)))
+    dump = Operation("database.dump", "example_db", {"name": "example_db", "output": str(tmp_path / "db.dump")})
+    restore = Operation("database.restore", "example_db", {"name": "example_db", "input": str(tmp_path / "db.dump")})
+    provider.apply(dump)
+    provider.apply(restore)
+    assert calls == [
+        (["pg_dump", "--dbname", "example_db", "--format", "custom", "--file", str(tmp_path / "db.dump")], {"check": True}),
+        (["pg_restore", "--dbname", "example_db", str(tmp_path / "db.dump")], {"check": True}),
+    ]
+
+
+def test_database_dump_rejects_traversal_path():
+    provider = PostgresProvider(command=lambda *_args, **_kwargs: None)
+    operation = Operation("database.dump", "example_db", {"name": "example_db", "output": "/var/lib/../etc/db.dump"})
+    with pytest.raises(ProviderError, match="cannot contain '..'"):
+        provider.apply(operation)
 
 
 def test_mongo_provider_creates_declared_user():

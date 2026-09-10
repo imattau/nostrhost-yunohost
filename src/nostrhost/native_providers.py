@@ -1007,9 +1007,10 @@ class AptProvider:
 class PostgresProvider:
     resource_type = "database"
 
-    def __init__(self, *, connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
+    def __init__(self, *, connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None, command: Callable[..., Any] | None = None) -> None:
         self.connection_factory = connection_factory
         self.credential_reader = credential_reader
+        self.command = command or subprocess.run
 
     def _connection(self) -> Any:
         if self.connection_factory:
@@ -1038,6 +1039,14 @@ class PostgresProvider:
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
+        if operation.name in {"database.dump", "database.restore"}:
+            path_key = "output" if operation.name == "database.dump" else "input"
+            path = Path(operation.args.get(path_key, ""))
+            if not path.is_absolute() or ".." in path.parts:
+                raise ProviderError(f"database {path_key} path must be absolute and cannot contain '..'")
+            argv = self._backup_argv(operation.name, name, path)
+            self.command(argv, check=True)
+            return {"name": name, path_key: str(path), "changed": True}
         with self._connection() as connection, connection.cursor() as cursor:
             if operation.name == "database.remove":
                 cursor.execute(f'DROP DATABASE IF EXISTS "{name}"')
@@ -1053,6 +1062,12 @@ class PostgresProvider:
                 if privileges:
                     cursor.execute(f'GRANT {", ".join(privileges)} ON DATABASE "{name}" TO "{username}"')
         return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
+
+    @staticmethod
+    def _backup_argv(action: str, name: str, path: Path) -> list[str]:
+        if action == "database.dump":
+            return ["pg_dump", "--dbname", name, "--format", "custom", "--file", str(path)]
+        return ["pg_restore", "--dbname", name, str(path)]
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
         return self.inspect(desired)
@@ -1086,6 +1101,13 @@ class MySQLProvider(PostgresProvider):
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
+        if operation.name in {"database.dump", "database.restore"}:
+            path_key = "output" if operation.name == "database.dump" else "input"
+            path = Path(operation.args.get(path_key, ""))
+            if not path.is_absolute() or ".." in path.parts:
+                raise ProviderError(f"database {path_key} path must be absolute and cannot contain '..'")
+            self.command(self._backup_argv(operation.name, name, path), check=True)
+            return {"name": name, path_key: str(path), "changed": True}
         with self._connection() as connection, connection.cursor() as cursor:
             if operation.name == "database.remove":
                 cursor.execute(f"DROP DATABASE IF EXISTS `{name}`")
@@ -1105,15 +1127,22 @@ class MySQLProvider(PostgresProvider):
                     cursor.execute(f'GRANT {", ".join(privileges)} ON `{name}`.* TO %s@%s', (username, host))
         return {"name": name, "users": list(operation.args.get("users", {})), "changed": True}
 
+    @staticmethod
+    def _backup_argv(action: str, name: str, path: Path) -> list[str]:
+        if action == "database.dump":
+            return ["mysqldump", "--single-transaction", "--result-file", str(path), name]
+        return ["mysql", name, "--execute", f"source {path}"]
+
 
 class MongoProvider:
     """Native MongoDB database/user operations through PyMongo."""
 
     resource_type = "database"
 
-    def __init__(self, *, client_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
+    def __init__(self, *, client_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None, command: Callable[..., Any] | None = None) -> None:
         self.client_factory = client_factory
         self.credential_reader = credential_reader
+        self.command = command or subprocess.run
 
     def _client(self) -> Any:
         if self.client_factory:
@@ -1146,6 +1175,14 @@ class MongoProvider:
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
+        if operation.name in {"database.dump", "database.restore"}:
+            path_key = "output" if operation.name == "database.dump" else "input"
+            path = Path(operation.args.get(path_key, ""))
+            if not path.is_absolute() or ".." in path.parts:
+                raise ProviderError(f"database {path_key} path must be absolute and cannot contain '..'")
+            argv = (["mongodump", "--db", name, "--archive", str(path)] if operation.name == "database.dump" else ["mongorestore", "--db", name, "--archive", str(path)])
+            self.command(argv, check=True)
+            return {"name": name, path_key: str(path), "changed": True}
         client = self._client()
         try:
             if operation.name == "database.remove":
@@ -1214,6 +1251,8 @@ class RedisProvider:
         return [Operation("database.ensure", str(index), {"type": "redis", "name": str(index), "backup": desired.get("backup", True)}, risk="medium", reverse="database.remove", summary=f"validate Redis database {index}")]
 
     def apply(self, operation: Operation) -> dict[str, Any]:
+        if operation.name in {"database.dump", "database.restore"}:
+            raise ProviderError("Redis logical databases do not support database dump/restore operations")
         index = self._index(operation.args.get("name"))
         client = self._client(index)
         try:
@@ -1237,11 +1276,11 @@ class DatabaseProvider:
 
     resource_type = "database"
 
-    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None) -> None:
+    def __init__(self, *, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, command: Callable[..., Any] | None = None) -> None:
         self.providers = {
-            "postgresql": PostgresProvider(connection_factory=postgres_connection_factory, credential_reader=credential_reader),
-            "mysql": MySQLProvider(connection_factory=mysql_connection_factory, credential_reader=credential_reader),
-            "mongodb": MongoProvider(client_factory=mongo_client_factory, credential_reader=credential_reader),
+            "postgresql": PostgresProvider(connection_factory=postgres_connection_factory, credential_reader=credential_reader, command=command),
+            "mysql": MySQLProvider(connection_factory=mysql_connection_factory, credential_reader=credential_reader, command=command),
+            "mongodb": MongoProvider(client_factory=mongo_client_factory, credential_reader=credential_reader, command=command),
             "redis": RedisProvider(client_factory=redis_client_factory),
         }
 
