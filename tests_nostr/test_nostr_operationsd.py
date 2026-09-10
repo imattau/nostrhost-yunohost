@@ -54,7 +54,7 @@ class FakeBackend:
 class Harness:
     """A wired engine: real signing, captured publishes, fake backend."""
 
-    def __init__(self):
+    def __init__(self, policy=None):
         self.server_sk, self.server_pk = new_key()
         self.admin_sk, self.admin_pk = new_key()
         self.agent_sk, self.agent_pk = new_key()
@@ -65,6 +65,7 @@ class Harness:
             server_sk=self.server_sk,
             admins=[self.admin_pk],
             backend=self.backend,
+            policy=policy,
         )
 
     def grant(self, scopes, subject_pk=None):
@@ -112,6 +113,32 @@ def test_e2e_request_approval_execute_result():
     body = _content(results[0])
     assert body["ok"] is True
     assert body["result"]["versions"]["yunohost"] == "12.1.41.2"
+
+
+def test_policy_adapter_receives_actor_and_is_published_in_result():
+    decisions = []
+
+    def policy(tool, args, actor):
+        decisions.append((tool, args, actor))
+        return {"allow": True, "version": "policy-v1", "plan_sha256": "abc"}
+
+    h = Harness(policy=policy)
+    h.grant(["server.read"])
+    ev, _ = h.request("system.version")
+    assert h.approve(ev["id"])
+    assert len(decisions) == 2  # request-time and approval-time evaluation
+    assert decisions[0][0] == "system.version" and decisions[0][2] == h.agent_pk
+    body = _content(h.events_by_kind(2204)[0])
+    assert body["policy"] == {"allow": True, "version": "policy-v1", "plan_sha256": "abc"}
+
+
+def test_policy_adapter_can_deny_before_provider_execution():
+    h = Harness(policy=lambda _tool, _args, _actor: {"allow": False, "reason": "plan is untrusted"})
+    h.grant(["server.read"])
+    ev, handled = h.request("system.version")
+    assert handled and h.engine.state(ev["id"]) == OpState.REJECTED
+    assert h.backend.calls == []
+    assert _content(h.events_by_kind(2204)[0])["reason"] == "policy_denied:plan is untrusted"
 
 
 def test_e2e_preserves_actor_separately_from_request_signer():

@@ -95,6 +95,7 @@ class OperationRecord:
     state: OpState = OpState.REQUESTED
     reason: str | None = None
     result: dict[str, Any] | None = None
+    policy: dict[str, Any] | None = None
 
 
 class OperationEngine:
@@ -111,6 +112,7 @@ class OperationEngine:
         backend: ExecutorBackend | None = None,
         state: Any = None,
         restic: Any = None,
+        policy: Callable[[str, dict[str, Any], str], dict[str, Any] | bool | None] | None = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
@@ -119,6 +121,7 @@ class OperationEngine:
         self._backend = backend or YnhExecutorBackend()
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
+        self._policy = policy  # optional nostrhost-policy adapter
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
         self.delegations: dict[str, dict[str, Any]] = {}
@@ -180,6 +183,12 @@ class OperationEngine:
             self._reject(record, "unauthorized")
             return True
 
+        try:
+            self._evaluate_policy(record)
+        except Exception as exc:  # noqa: BLE001 - policy denial is a rejected request
+            self._reject(record, f"policy_denied:{exc}")
+            return True
+
         if not spec.require_approval:
             self._execute(record)  # auto path: REQUESTED -> EXECUTING
         else:
@@ -193,6 +202,11 @@ class OperationEngine:
         if event.get("pubkey") not in self._admins:
             logger.warning("approval for %s by non-admin ignored", request_id[:16])
             return False
+        try:
+            self._evaluate_policy(record)
+        except Exception as exc:  # noqa: BLE001 - policy may change while awaiting approval
+            self._reject(record, f"policy_denied:{exc}")
+            return True
         try:
             next_state(record.state, KIND_OPERATION_APPROVAL)
         except InvalidTransition as exc:
@@ -320,6 +334,24 @@ class OperationEngine:
     def _direct_authorized(self, pubkey: str, scope: str) -> bool:
         return pubkey in self._admins or scope in self.scopes[pubkey]
 
+    def _evaluate_policy(self, record: OperationRecord) -> None:
+        """Run the host policy adapter before request/approval execution.
+
+        The callback receives the complete tool arguments and actor identity;
+        a false result or ``{"allow": false}`` denies the request. A dict
+        decision is retained for the audit/result boundary, allowing the
+        injected ``nostrhost-policy`` adapter to include its version and plan
+        digest without making this daemon depend on that package directly.
+        """
+        if self._policy is None:
+            return
+        decision = self._policy(record.tool, dict(record.args), record.actor)
+        if decision is False or (isinstance(decision, dict) and decision.get("allow") is False):
+            reason = decision.get("reason", "policy rejected operation") if isinstance(decision, dict) else "policy rejected operation"
+            raise ValueError(str(reason))
+        if isinstance(decision, dict):
+            record.policy = dict(decision)
+
     def _execute(self, record: OperationRecord) -> None:
         if record.state not in (OpState.REQUESTED, OpState.APPROVED):
             logger.warning("cannot execute %s from %s", record.request_id[:16], record.state.value)
@@ -352,11 +384,13 @@ class OperationEngine:
                 result = self._backend.execute(record.tool, record.args)
                 operation_ok = True
             body: dict[str, Any] = {"ok": operation_ok, "result": result}
+            if record.policy:
+                body["policy"] = record.policy
         except Exception as exc:  # noqa: BLE001 - a failed tool is a 2204, not a crash
             logger.error("execution of %s failed: %s", record.tool, exc)
             body = {"ok": False, "error": str(exc)}
         if self._state is not None:
-            self._state.post(record.request_id, record.tool, body["ok"], body, actor=record.actor)
+            self._state.post(record.request_id, record.tool, body["ok"], body, actor=record.actor, args=record.args)
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, actor_pubkey=record.actor, **body))
         record.state = next_state(record.state, KIND_EXECUTION_RESULT, ok=body["ok"])
         record.result = body

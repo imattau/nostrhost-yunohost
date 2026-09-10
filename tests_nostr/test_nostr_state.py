@@ -76,7 +76,7 @@ def test_state_repo_commit_history_known_good_and_diff(tmp_path: Path):
     repo = StateRepo(tmp_path / "state", "a" * 64)
     tree = export_state(FakeBackend())
 
-    first = repo.commit(tree, op_event_id="e" * 64, phase="pre", health="pending")
+    first = repo.commit(tree, op_event_id="e" * 64, phase="pre", health="pending", plan_sha256="p" * 64)
     second = repo.commit(tree, op_event_id="e" * 64, phase="post", known_good=True, health="passed")
 
     assert first != second
@@ -90,8 +90,10 @@ def test_state_repo_commit_history_known_good_and_diff(tmp_path: Path):
     assert manifest["state"]["known_good"] is True
     assert manifest["operation"]["event"] == "e" * 64
     assert manifest["operation"]["phase"] == "post"
+    assert manifest["operation"]["plan_sha256"] == ""
     assert manifest["health"]["result"] == "passed"
     assert (tmp_path / "state" / "apps" / "hello_nostr_ynh.toml").exists()
+    assert tomllib.loads(repo.show(first, "manifest.toml"))["operation"]["plan_sha256"] == "p" * 64
 
     hist = repo.history()
     assert len(hist) == 2
