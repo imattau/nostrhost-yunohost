@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AptProvider, CaddyProvider, DirectoryProvider, NativeOperationExecutor, PortProvider, PostgresProvider, ProviderError, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TmpfilesProvider, native_providers
 
 
 def test_directory_provider_uses_python_filesystem_apis(tmp_path: Path):
@@ -142,3 +142,22 @@ def test_secret_provider_generates_mode_600_credential(tmp_path: Path):
     first = target.read_text()
     provider.apply(operation)
     assert target.read_text() == first
+
+
+def test_port_provider_checks_bind_availability():
+    class Probe:
+        def bind(self, address): self.address = address
+        def close(self): pass
+    provider = PortProvider(socket_factory=lambda *_args: Probe())
+    operation = provider.plan({"name": "http", "port": 1})[0]
+    result = provider.apply(operation)
+    assert result["port"] == 1
+    assert isinstance(result["available"], bool)
+
+
+def test_directory_provider_resolves_numeric_ownership(tmp_path: Path):
+    calls = []
+    provider = DirectoryProvider(root=tmp_path, chown=lambda *args: calls.append(args))
+    operation = provider.plan({"path": "/var/lib/example", "mode": 0o750, "owner": "root", "group": "root"})[0]
+    assert provider.apply(operation)["changed"] is True
+    assert calls and calls[0][1:] == (0, 0)

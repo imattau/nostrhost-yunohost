@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import grp
+import pwd
 import re
 import secrets
 import shutil
@@ -49,8 +51,9 @@ def _target(root: Path, absolute: str | Path) -> Path:
 class DirectoryProvider:
     resource_type = "directory"
 
-    def __init__(self, *, root: Path = Path("/")) -> None:
+    def __init__(self, *, root: Path = Path("/"), chown: Callable[..., Any] | None = None) -> None:
         self.root = root
+        self.chown = chown or os.chown
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         path = _target(self.root, desired["path"])
@@ -64,7 +67,12 @@ class DirectoryProvider:
         path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, operation.args["mode"])
         if operation.args.get("owner") or operation.args.get("group"):
-            raise ProviderError("name-to-id ownership resolution is delegated to the user provider")
+            try:
+                uid = pwd.getpwnam(operation.args["owner"]).pw_uid if operation.args.get("owner") else -1
+                gid = grp.getgrnam(operation.args["group"]).gr_gid if operation.args.get("group") else -1
+                self.chown(path, uid, gid)
+            except KeyError as exc:
+                raise ProviderError(f"unknown directory owner or group: {exc.args[0]}") from exc
         return {"path": str(path), "changed": True}
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +173,41 @@ class SecretProvider:
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("secret.remove", desired["name"], {"name": desired["name"]}, risk="high", reverse="secret.ensure", summary="remove systemd credential")]
+
+
+class PortProvider:
+    """Check bind availability without invoking netstat/lsof shell commands."""
+
+    def __init__(self, *, socket_factory: Callable[..., Any] | None = None) -> None:
+        self.socket_factory = socket_factory
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        import socket
+
+        port = int(desired["port"])
+        probe = (self.socket_factory or socket.socket)(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return {"port": port, "available": False}
+        finally:
+            probe.close()
+        return {"port": port, "available": True}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("port.validate", desired["name"], desired, summary=f"validate port {desired['port']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        result = self.inspect(operation.args)
+        if not result["available"]:
+            raise ProviderError(f"port is unavailable: {result['port']}")
+        return result
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return []
 
 
 class SourceProvider:
@@ -527,6 +570,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "database": PostgresProvider(connection_factory=postgres_connection_factory),
         "system_user": SysusersProvider(root=root, command=command),
         "secret": SecretProvider(credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
+        "port": PortProvider(),
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
