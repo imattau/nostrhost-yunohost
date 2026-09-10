@@ -316,6 +316,10 @@ class SourceProvider:
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         args = operation.args
+        if operation.name == "source.remove":
+            cached = self.cache_dir / hashlib.sha256(args["url"].encode()).hexdigest()
+            cached.unlink(missing_ok=True)
+            return {"path": str(cached), "changed": True}
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="nostrhost-source-", dir=self.cache_dir) as temporary:
             archive = Path(temporary) / "source"
@@ -340,7 +344,7 @@ class SourceProvider:
         return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
-        return [Operation("source.remove", desired["url"], {"url": desired["url"]}, reverse="source.fetch", summary="remove cached source")]
+        return [Operation("source.remove", desired["url"], {"url": desired["url"], "destination": desired.get("destination")}, reverse="source.fetch", summary="remove cached source")]
 
     @staticmethod
     def _download(url: str, destination: Path) -> None:
@@ -651,6 +655,9 @@ class PostgresProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
         with self._connection() as connection, connection.cursor() as cursor:
+            if operation.name == "database.remove":
+                cursor.execute(f'DROP DATABASE IF EXISTS "{name}"')
+                return {"name": name, "changed": True}
             cursor.execute(f'CREATE DATABASE "{name}"')
         return {"name": name, "changed": True}
 
@@ -687,6 +694,9 @@ class MySQLProvider(PostgresProvider):
     def apply(self, operation: Operation) -> dict[str, Any]:
         name = self._name(operation.args["name"])
         with self._connection() as connection, connection.cursor() as cursor:
+            if operation.name == "database.remove":
+                cursor.execute(f"DROP DATABASE IF EXISTS `{name}`")
+                return {"name": name, "changed": True}
             cursor.execute(f"CREATE DATABASE `{name}`")
         return {"name": name, "changed": True}
 

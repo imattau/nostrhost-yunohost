@@ -51,6 +51,15 @@ def test_source_provider_rejects_hash_mismatch(tmp_path: Path):
         provider.apply(operation)
 
 
+def test_source_provider_removes_cached_archive(tmp_path: Path):
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(b"source"))
+    desired = {"url": "https://example.test/source", "sha256": hashlib.sha256(b"source").hexdigest()}
+    provider.apply(provider.plan(desired)[0])
+    remove = provider.remove(desired)[0]
+    result = provider.apply(remove)
+    assert result["changed"] and not Path(result["path"]).exists()
+
+
 def test_source_provider_rejects_archive_links(tmp_path: Path):
     archive = tmp_path / "unsafe.tar"
     import tarfile
@@ -160,6 +169,21 @@ def test_postgres_provider_uses_parameterized_existence_query():
     result = PostgresProvider(connection_factory=lambda: connection).inspect({"name": "example_db"})
     assert result == {"name": "example_db", "exists": False}
     assert connection.cursor_obj.call[1] == ("example_db",)
+
+
+def test_postgres_provider_removes_database_with_native_driver():
+    class Cursor:
+        def execute(self, query, args=None): self.call = (query, args)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    class Connection:
+        def cursor(self): return Cursor()
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    connection = Connection()
+    provider = PostgresProvider(connection_factory=lambda: connection)
+    operation = provider.remove({"name": "example_db"})[0]
+    assert provider.apply(operation)["changed"]
 
 
 def test_database_provider_dispatches_mysql_without_postgres_fallback():
