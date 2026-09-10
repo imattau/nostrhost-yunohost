@@ -1,0 +1,46 @@
+# CrowdSec acquisitions managed by the regenconf `crowdsec` category
+# (hooks/conf_regen/52-crowdsec).
+#
+# This is the port of the retired fail2ban jail logpaths (see
+# docs/CROWDSEC-MIGRATION.md §4 / §8). Sources are split by the type that
+# routes them to the right parser stage:
+#
+#   type: caddy   -> crowdsecurity/caddy-logs parser (Caddy JSON access log);
+#                    source for the nostrhost/yunohost-auth-bf and
+#                    nostrhost/yunohost-portal-auth-bf scenarios (web-layer
+#                    login brute force).
+#   type: syslog  -> crowdsecurity/syslog-logs parser; sources for the sshd,
+#                    postfix (SASL) and base scenarios.
+#
+# The packaged crowdsec scenarios are copied to /etc/crowdsec/scenarios/ by
+# the same hook; the hub collections (crowdsecurity/caddy, /sshd, /postfix,
+# /linux) that provide their parsers are installed at package install time.
+---
+filenames:
+  - /var/log/caddy/access.log
+labels:
+  type: caddy
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=postfix.service"
+labels:
+  type: syslog
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=dovecot.service"
+labels:
+  type: syslog
+---
+filenames:
+  - /var/log/auth.log
+  - /var/log/syslog
+labels:
+  type: syslog

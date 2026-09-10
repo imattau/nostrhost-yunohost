@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2026 NostrHost Contributors
+#
+# This file is part of NostrHost's YunoHost fork.
+#
+# Regenerate CrowdSec configuration (regenconf category: crowdsec).
+#
+# This is the replacement for the retired `52-fail2ban` category: it renders
+# the acquisition list (acquis.yaml), installs the packaged local scenarios,
+# and reloads the CrowdSec daemon so it picks up changes. See
+# docs/CROWDSEC-MIGRATION.md for the migration rationale.
+#
+# The hub collections that provide the base parsers/scenarios
+# (crowdsecurity/caddy, /sshd, /postfix, /linux) are installed at package
+# install time (debian/postinst), not here: this hook only manages the
+# sources and the nostrhost-local scenarios shipped with the package.
+
+set -eu
+
+# Source YNH helpers
+# shellcheck source=../../helpers/helpers
+source /usr/share/yunohost/helpers
+
+do_pre_regen() {
+    pending_dir=$1
+
+    cd /usr/share/yunohost/conf/crowdsec
+
+    crowdsec_dir="${pending_dir}/etc/crowdsec"
+    mkdir -p "${crowdsec_dir}/scenarios"
+
+    cp acquis.yaml "${crowdsec_dir}/acquis.yaml"
+    cp scenarios/*.yaml "${crowdsec_dir}/scenarios/"
+}
+
+do_post_regen() {
+    regen_conf_files=$1
+
+    chown root:root /etc/crowdsec/acquis.yaml
+    chmod 0644 /etc/crowdsec/acquis.yaml
+    chown -R root:root /etc/crowdsec/scenarios
+    chmod -R u=rwX,g=rX,o-w /etc/crowdsec/scenarios
+
+    if [[ -n "$regen_conf_files" ]]; then
+        systemctl reload crowdsec
+    fi
+}
+
+"do_$1_regen" "$(echo "${*:2}" | xargs)"

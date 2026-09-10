@@ -347,9 +347,12 @@ def reconfigure_ssh(setting_name, old_value, new_value):
 
 
 @post_change_hook("ssh_port")
-def reconfigure_ssh_and_fail2ban(setting_name, old_value, new_value):
+def reconfigure_ssh_and_crowdsec(setting_name, old_value, new_value):
     if old_value != new_value:
-        regen_conf(names=["ssh", "fail2ban"])
+        # CrowdSec's sshd acquisition is a journald unit (port-agnostic), so
+        # this mainly regenerates the ssh daemon config; crowdsec is regen'd
+        # to keep its managed config consistent on any ssh change.
+        regen_conf(names=["ssh", "crowdsec"])
         firewall_reload()
 
 
