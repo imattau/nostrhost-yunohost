@@ -455,6 +455,14 @@ def certificate_renew(
 
 
 def _email_renewing_failed(domain, exception_message, stack=""):
+    from .nostr_notify import SEVERITY_WARNING, publish_notice
+
+    publish_notice(
+        "certificate",
+        SEVERITY_WARNING,
+        f"Certificate renewing for {domain} failed: {exception_message}",
+    )
+
     from_ = f"certmanager@{domain} (Certificate Manager)"
     to_ = "root"
     subject_ = f"Certificate renewing attempt for {domain} failed!"

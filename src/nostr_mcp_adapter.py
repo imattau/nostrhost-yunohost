@@ -115,4 +115,4 @@ class NostrMCPAdapter:
 
     def result(self, request_id: str) -> dict[str, Any] | None:
         """Return the latest projected result, or ``None`` while pending."""
-    return self.results.get(request_id)
+        return self.results.get(request_id)
