@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from nostrhost.native_providers import NativeOperationExecutor, native_providers
+from nostrhost.native_providers import NativeOperationExecutor, PackageProvider, native_providers
 from nostrhost.package_engine import Operation, PackageError, PackageManifest, _operation_satisfied, apply_operation_plan, apply_reconciled_plan, load_package, migrate_manifest, plan_package, reconcile_operation_plan, validate_package
 
 
@@ -202,6 +202,17 @@ def test_reconciliation_skips_directory_when_observed_state_matches(tmp_path: Pa
     assert [operation.name for operation in pending] == ["package.ensure"]
     assert skipped == ["example:directory:data"]
     assert len(apply_reconciled_plan(plan, executor)) == 1
+
+
+def test_reconciliation_skips_package_when_version_matches(tmp_path: Path):
+    provider = PackageProvider(state_dir=tmp_path / "packages")
+    desired = {"id": "example", "version": "1"}
+    provider.apply(Operation("package.ensure", "example", desired))
+    operation = Operation("package.ensure", "example", desired)
+    assert _operation_satisfied(operation, provider.inspect(desired))
+
+    provider.apply(Operation("package.remove", "example", {"id": "example"}))
+    assert provider.inspect(desired)["exists"] is False
 
 
 def test_reconciliation_detects_config_and_service_drift(tmp_path: Path):

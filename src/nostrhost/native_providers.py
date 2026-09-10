@@ -33,8 +33,45 @@ class ProviderError(RuntimeError):
 class PackageProvider:
     """Package identity bookkeeping; resource mutations belong to providers."""
 
+    def __init__(self, *, state_dir: Path | None = None) -> None:
+        self.state_dir = state_dir
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        if self.state_dir is None:
+            return {"exists": False, "version": None}
+        target = self.state_dir / f"{_safe_name(desired['id'])}.json"
+        if not target.is_file():
+            return {"exists": False, "version": None}
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProviderError(f"invalid native package state: {target}") from exc
+        return {"exists": True, "version": data.get("version"), "state": str(target)}
+
     def apply(self, operation: Operation) -> dict[str, Any]:
-        return {"package": operation.args["id"], "version": operation.args["version"], "changed": False}
+        package_id = _safe_name(operation.args["id"])
+        if self.state_dir is None:
+            result = {"package": package_id, "changed": False}
+            if operation.name != "package.remove":
+                result["version"] = operation.args["version"]
+            return result
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        target = self.state_dir / f"{package_id}.json"
+        if operation.name == "package.remove":
+            existed = target.exists()
+            target.unlink(missing_ok=True)
+            return {"package": package_id, "changed": existed}
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"id": package_id, "version": operation.args["version"]}, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o640)
+        temporary.replace(target)
+        return {"package": package_id, "version": operation.args["version"], "changed": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("package.remove", desired["id"], desired, reverse="package.ensure", summary=f"remove native package {desired['id']}")]
 
 
 def _safe_name(value: str) -> str:
@@ -625,25 +662,28 @@ class RuntimeProvider:
     """
 
     resource_type = "runtime"
-    executables = {"node": "node", "python": "python3", "go": "go", "composer": "composer", "php": "php"}
+    executables = {"node": "node", "python": "python3", "go": "go", "ruby": "ruby", "composer": "composer", "php": "php"}
 
     def __init__(self, *, command: Callable[..., Any] | None = None, executable_lookup: Callable[[str], str | None] | None = None, installer: Callable[[dict[str, Any]], Any] | None = None) -> None:
         self.command = command or subprocess.run
         self.executable_lookup = executable_lookup or shutil.which
         self.installer = installer
 
-    def _executable(self, runtime_type: str) -> str:
+    def _executable(self, desired: dict[str, Any]) -> str:
         try:
-            name = self.executables[runtime_type]
+            name = self.executables[desired["type"]]
         except KeyError as exc:
-            raise ProviderError(f"unsupported runtime: {runtime_type}") from exc
-        executable = self.executable_lookup(name)
+            raise ProviderError(f"unsupported runtime: {desired.get('type')}") from exc
+        prefix = desired.get("prefix")
+        candidate = (Path(prefix) / "bin" / name) if prefix else None
+        executable = self.executable_lookup(str(candidate)) if candidate else self.executable_lookup(name)
         if not executable:
-            raise ProviderError(f"runtime executable is not installed: {name}")
+            location = str(candidate) if candidate else name
+            raise ProviderError(f"runtime executable is not installed: {location}")
         return executable
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
-        executable = self._executable(desired["type"])
+        executable = self._executable(desired)
         result = self.command([executable, "--version"], check=True, capture_output=True, text=True)
         output = f"{result.stdout}\n{result.stderr}".strip()
         requested = desired["version"].lstrip("v")
@@ -1200,6 +1240,13 @@ class MongoProvider:
             if close:
                 close()
 
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        name = self._name(desired.get("name") or "nostrhost")
+        return [Operation("database.remove", name, {"type": "mongodb", "name": name}, risk="high", reverse="database.ensure", summary=f"remove MongoDB database {name}")]
+
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
         return [Operation("database.ensure", name, {"type": "mongodb", "name": name, "backup": desired.get("backup", True), "users": desired.get("users", {})}, risk="high", reverse="database.remove", summary=f"ensure MongoDB database {name}")]
@@ -1401,7 +1448,7 @@ class NativeOperationExecutor:
 def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, runtime_installer: Callable[[dict[str, Any]], Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
-        "package": PackageProvider(),
+        "package": PackageProvider(state_dir=(root / "var/lib/nostrhost/state/packages") if root != Path("/") else Path("/var/lib/nostrhost/state/packages")),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "access": AccessProvider(root=root),
         "permission": PermissionProvider(),

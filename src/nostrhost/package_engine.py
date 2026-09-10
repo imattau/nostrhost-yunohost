@@ -201,7 +201,7 @@ class ConfigFileResource(BaseModel):
 
 
 class RuntimeResource(BaseModel):
-    type: Literal["node", "python", "go", "composer", "php"]
+    type: Literal["node", "python", "go", "ruby", "composer", "php"]
     version: str = Field(..., min_length=1)
     prefix: Path | None = None
 
@@ -650,6 +650,8 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         if packages is None and operation.args.get("package"):
             packages = [operation.args["package"]]
         return bool(packages) and set(packages) <= set(actual.get("installed", []))
+    if operation.name == "package.ensure":
+        return actual.get("exists") is True and actual.get("version") == operation.args.get("version")
     if operation.name == "runtime.ensure":
         return actual.get("matches") is True
     if operation.name == "config.ensure":
@@ -765,7 +767,7 @@ def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
         out["access"] = resources["access"]
     if resources.get("database"):
         out["database"] = {key: value for key, value in resources["database"].items() if key in {"type", "name", "backup", "users"}}
-    for runtime_type in ("nodejs", "python", "go", "composer", "php"):
+    for runtime_type in ("nodejs", "python", "go", "ruby", "composer", "php"):
         if resources.get(runtime_type):
             out["runtime"] = {"type": "node" if runtime_type == "nodejs" else runtime_type, "version": resources[runtime_type]["version"], "prefix": resources[runtime_type].get("prefix")}
             break

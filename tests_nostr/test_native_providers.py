@@ -118,6 +118,19 @@ def test_runtime_provider_rejects_missing_runtime():
         provider.apply(provider.plan({"type": "go", "version": "1.24"})[0])
 
 
+def test_runtime_provider_supports_ruby_and_isolated_prefix():
+    calls = []
+
+    class Result:
+        stdout = "ruby 3.3.0p0\n"
+        stderr = ""
+
+    provider = RuntimeProvider(command=lambda args, **kwargs: (calls.append(args) or Result()), executable_lookup=lambda name: name)
+    result = provider.apply(provider.plan({"type": "ruby", "version": "3.3", "prefix": "/opt/example-runtime"})[0])
+    assert result["matches"]
+    assert calls == [["/opt/example-runtime/bin/ruby", "--version"]]
+
+
 def test_runtime_provider_invokes_explicit_installer_then_rechecks():
     installed = False
     calls = []
