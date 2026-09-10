@@ -37,6 +37,7 @@ APPS_CATALOG_CACHE = "/var/cache/yunohost/repo"
 APPS_CATALOG_LOGOS = "/usr/share/yunohost/applogos"
 APPS_CATALOG_CONF = "/etc/yunohost/apps_catalog.yml"
 APPS_CATALOG_API_VERSION = 3
+NATIVE_CATALOG_STATE = "/var/lib/nostrhost/catalogue.json"
 APPS_CATALOG_DEFAULT_URL = "https://app.yunohost.org/default"
 DEFAULT_APPS_CATALOG_LIST: list[dict[Literal["id", "url"], str]] = [
     {"id": "default", "url": APPS_CATALOG_DEFAULT_URL}
@@ -293,6 +294,10 @@ def _load_apps_catalog() -> AppCatalog:
         stats = f.stat()
         timestamps.append(stats.st_mtime)
         timestamps.append(stats.st_ctime)
+    native_state = Path(os.environ.get("NOSTRHOST_CATALOG_STATE", NATIVE_CATALOG_STATE))
+    if native_state.exists():
+        stats = native_state.stat()
+        timestamps.extend((stats.st_mtime, stats.st_ctime))
 
     timestamp = max(timestamps) if timestamps else 0
     global _apps_catalog_cache
@@ -355,6 +360,15 @@ def _load_apps_catalog() -> AppCatalog:
         # (we use .get here, only because the dev catalog doesnt include the categories/antifeatures keys)
         merged_catalog["categories"] += apps_catalog_content.get("categories", [])
         merged_catalog["antifeatures"] += apps_catalog_content.get("antifeatures", [])
+
+    # The native Nostr catalogue is an optional, read-only provider. Its Go
+    # synchronizer has already applied publisher trust and event validation;
+    # preserve configured YunoHost catalogues on duplicate app IDs.
+    from .nostr_catalog_provider import load_native_catalog
+
+    for app, info in load_native_catalog(native_state).items():
+        if app not in merged_catalog["apps"]:
+            merged_catalog["apps"][app] = info
 
     # Save as cache for next call
     _apps_catalog_cache = merged_catalog
