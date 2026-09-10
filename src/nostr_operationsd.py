@@ -103,6 +103,7 @@ class OperationEngine:
         admins: tuple[str, ...] | list[str],
         backend: ExecutorBackend | None = None,
         state: Any = None,
+        restic: Any = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
@@ -110,6 +111,7 @@ class OperationEngine:
         self._admins = tuple(admins)
         self._backend = backend or YnhExecutorBackend()
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
+        self._restic = restic  # optional ResticClient (Stage B: restore steps)
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
 
@@ -268,7 +270,12 @@ class OperationEngine:
         if self._state is not None:
             self._state.pre(record.request_id, record.tool, record.args)
         try:
-            result = self._backend.execute(record.tool, record.args)
+            if record.tool == "rollback.apply":
+                from .nostr_operations import _run_rollback_apply
+
+                result = _run_rollback_apply(record.args, backend=self._backend, restic=self._restic)
+            else:
+                result = self._backend.execute(record.tool, record.args)
             body: dict[str, Any] = {"ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001 - a failed tool is a 2204, not a crash
             logger.error("execution of %s failed: %s", record.tool, exc)
@@ -413,7 +420,10 @@ def run() -> None:
     _init_headless_yunohost()
     _require_bootstrapped()
     cfg = _operator_config()
-    engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins)
+    restic = _restic_from_config()
+    engine = OperationEngine(
+        publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins, restic=restic
+    )
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
 
@@ -426,14 +436,29 @@ def run() -> None:
             server_sk=cfg.server_sk,
             admins=cfg.admins,
             state=state,
+            restic=restic,
         )
     except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
         logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
-        engine = OperationEngine(publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins)
+        engine = OperationEngine(
+            publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins, restic=restic
+        )
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))
     except KeyboardInterrupt:
         pass
+
+
+def _restic_from_config() -> Any:
+    """A ResticClient when restic is configured (else None). Restore-required
+    rollback steps are then executable through the chain; without it they are
+    blocked with a clear report rather than silently skipped."""
+    from .nostr_restic import ResticClient, load_restic_config
+
+    conf = load_restic_config()
+    if conf is None:
+        return None
+    return ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
 
 
 def _publish_default(relay_url: str, event: dict[str, Any]) -> None:

@@ -359,6 +359,106 @@ def test_service_restart_handler_argument_validation():
         _safe_service_restart(name="nginx", extra="boom")
 
 
+def _sample_plan() -> dict:
+    return {
+        "schema": 1,
+        "from": "a" * 64,
+        "to": "b" * 64,
+        "restic_snapshot": "",
+        "steps": [
+            {
+                "section": "services",
+                "file": "services/dnsmasq.toml",
+                "action": "modify",
+                "change_class": "runtime-setting",
+                "reversibility": "automatic",
+                "automatic": True,
+                "restore_required": False,
+                "tool": "service.control",
+                "args": {"name": "dnsmasq", "action": "restart"},
+                "reverse": "control",
+            }
+        ],
+        "approved": False,
+    }
+
+
+def test_rollback_apply_full_chain_granted_and_approved():
+    """rollback.apply is a first-class chain operation: scope-granted agent
+    requests, admin approval gates execution, and the plan steps run through
+    the same backend the engine uses (audited 2203/2204 signed by the server
+    key)."""
+    h = Harness()
+    h.grant(["state.write"])
+
+    ev, handled = h.request("rollback.apply", args={"plan": _sample_plan()})
+    request_id = ev["id"]
+    assert handled
+    assert h.engine.state(request_id) == OpState.REQUESTED  # approval-gated
+    assert h.backend.calls == []
+
+    assert h.approve(request_id)
+    assert h.engine.state(request_id) == OpState.SUCCEEDED
+    assert ("service.control", {"name": "dnsmasq", "action": "restart"}) in h.backend.calls
+
+    started = h.events_by_kind(2203)
+    results = h.events_by_kind(2204)
+    assert len(started) == len(results) == 1
+    assert started[0]["pubkey"] == h.server_pk
+    assert results[0]["pubkey"] == h.server_pk
+    body = _content(results[0])
+    assert body["ok"] is True
+    steps = body["result"]["steps"]
+    assert steps[0]["status"] == "executed"
+
+
+def test_rollback_apply_denied_without_state_scope():
+    h = Harness()
+    h.grant(["services.write"])  # wrong scope for rollback.apply
+    ev, handled = h.request("rollback.apply", args={"plan": _sample_plan()})
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert h.backend.calls == []
+    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+
+
+def test_rollback_apply_admin_can_request_and_approve():
+    h = Harness()
+    ev, handled = h.request(
+        "rollback.apply", args={"plan": _sample_plan()}, requester_sk=h.admin_sk, requester_pk=h.admin_pk
+    )
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.REQUESTED
+    assert h.approve(ev["id"])
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert ("service.control", {"name": "dnsmasq", "action": "restart"}) in h.backend.calls
+
+
+def test_rollback_apply_unapproved_never_executes():
+    h = Harness()
+    h.grant(["state.write"])
+    ev, handled = h.request("rollback.apply", args={"plan": _sample_plan()})
+    request_id = ev["id"]
+    assert handled
+    assert h.backend.calls == []
+    assert h.events_by_kind(2203) == []
+    assert h.events_by_kind(2204) == []
+    assert h.engine.state(request_id) == OpState.REQUESTED
+
+
+def test_rollback_apply_bad_plan_reports_failed_result():
+    h = Harness()
+    h.grant(["state.write"])
+    ev, handled = h.request("rollback.apply", args={"plan": {"steps": []}})
+    request_id = ev["id"]
+    assert handled
+    assert h.approve(request_id)
+    assert h.engine.state(request_id) == OpState.FAILED
+    body = _content(h.events_by_kind(2204)[0])
+    assert body["ok"] is False
+    assert "steps" in body["error"]
+
+
 def test_app_remove_handler_argument_validation():
     """The rollback app-removal handler is bounded: single app id, explicit
     purge flag, no extra args."""

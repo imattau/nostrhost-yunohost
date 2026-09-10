@@ -61,6 +61,7 @@ SCOPE_APPS_READ = "apps.read"
 SCOPE_APPS_WRITE = "apps.write"
 SCOPE_SERVICES_READ = "services.read"
 SCOPE_SERVICES_WRITE = "services.write"
+SCOPE_STATE_WRITE = "state.write"
 
 
 class OperationError(ValueError):
@@ -162,6 +163,47 @@ def _safe_service_control(name: str = "", action: str = "", **args: Any) -> dict
     return {"service": name, "action": action, "status": service_status(name)["status"]}
 
 
+def _run_rollback_apply(args: dict[str, Any], *, backend: Any, restic: Any) -> dict[str, Any]:
+    """Execute a rollback plan through the operation chain (the shared path).
+
+    ``args`` must be exactly ``{"plan": {...}}`` — a plan produced by
+    ``build_rollback_plan``. The plan's own steps run through the *same*
+    ``backend`` the engine executes (so a fake backend keeps tests off real
+    yunohost), restore-required steps through ``restic``, and only automatic
+    steps with a registry tool are touched. ``approve=True`` is correct here
+    because the operation chain already gated this request (scope + kind-2201
+    admin approval); a bare ``apply_rollback_plan`` still refuses without it.
+    """
+    if set(args) != {"plan"} or not isinstance(args.get("plan"), dict):
+        raise OperationError("rollback.apply requires exactly one argument: 'plan' (a rollback plan dict)")
+    plan = args["plan"]
+    if not isinstance(plan.get("steps"), list) or not plan["steps"]:
+        raise OperationError("rollback.apply requires a plan with a non-empty 'steps' list")
+    if plan.get("approved"):
+        raise OperationError("rollback plan already executed")
+    from .nostr_rollback import apply_rollback_plan
+
+    report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True)
+    return {"steps": report}
+
+
+def _safe_rollback_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
+    """Standalone rollback.apply handler (bare-backend path).
+
+    Bounded by construction: the only accepted argument is the plan itself.
+    Sub-step execution and Restic restore are wired from the live config, so
+    the tool stays bounded to registry tools + restore even outside the
+    daemon. The daemon overrides this with the chain path
+    (:func:`_run_rollback_apply` with its own backend + restic)."""
+    if args:
+        raise OperationError(f"rollback.apply does not accept extra args: {sorted(args)}")
+    from .nostr_operationsd import YnhExecutorBackend
+    from .nostr_restic import restic_client
+
+    restic = restic_client() if isinstance(plan, dict) and plan.get("restic_snapshot") else None
+    return _run_rollback_apply({"plan": plan}, backend=YnhExecutorBackend(), restic=restic)
+
+
 # The default registry: read-only tools plus one minimal write operation
 # (service.restart). Read tools are safe by construction; the write tool is
 # safe by gating — `services.write` scope + admin approval on top of the
@@ -202,6 +244,12 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_service_control,
         scope=SCOPE_SERVICES_WRITE,
         description="start/stop/restart one named service (rollback reverse-action)",
+    ),
+    "rollback.apply": ToolSpec(
+        name="rollback.apply",
+        handler=_safe_rollback_apply,
+        scope=SCOPE_STATE_WRITE,
+        description="execute an assisted rollback plan (write operation, admin-approval-gated)",
     ),
 }
 

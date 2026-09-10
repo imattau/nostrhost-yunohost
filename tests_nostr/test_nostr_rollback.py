@@ -235,3 +235,58 @@ def test_render_plan_human_readable(tmp_path: Path):
     text = render_plan(plan)
     assert "external-side-effect" in text
     assert plan["summary"]["impossible"] == 1
+
+
+def test_run_rollback_apply_executes_through_shared_backend(tmp_path: Path):
+    """The operation-chain rollback path (rollback.apply) executes plan steps
+    through the injected backend + restic, exactly like the CLI apply path —
+    the difference is that the approval gate happened in the signed chain."""
+    from yunohost.nostr_operations import _run_rollback_apply
+
+    repo, good = _seed_repo(tmp_path)
+    changed = dict(good)
+    changed["services"] = {"dnsmasq.toml": {"status": "dead", "type": "system"}}
+    changed["apps"] = dict(good["apps"])
+    changed["apps"]["new_app_ynh.toml"] = {"label": "New", "version": "1.0", "status": "running"}
+    repo.commit(changed, op_event_id="k" * 64, phase="post", health="failed")
+    plan = build_rollback_plan(repo)
+
+    backend = ExecBackend()
+    result = _run_rollback_apply({"plan": plan}, backend=backend, restic=None)
+    assert plan["approved"] is True and plan["_ok"] is True
+    by_section = {e["step"]["section"]: e for e in result["steps"]}
+    assert by_section["services"]["status"] == "executed"
+    assert by_section["apps"]["status"] == "executed"
+    executed_tools = [c[0] for c in backend.calls]
+    assert "service.control" in executed_tools and "app.remove" in executed_tools
+
+
+def test_run_rollback_apply_restore_step_uses_restic(tmp_path: Path):
+    import textwrap
+
+    from yunohost.nostr_operations import _run_rollback_apply
+
+    fake = tmp_path / "restic"
+    fake.write_text(
+        textwrap.dedent(
+            '''#!/usr/bin/env python3
+import json, os, sys
+if os.environ.get("RESTIC_PASSWORD") != "sekret-pass":
+    sys.exit(9)
+sid = next(a for a in sys.argv[1:] if not a.startswith("-"))
+print(json.dumps({"message_type": "summary", "files_restored": 1, "snapshot_id": sid}))
+'''
+        )
+    )
+    fake.chmod(0o755)
+
+    repo, good = _seed_repo(tmp_path)
+    changed = dict(good)
+    changed["apps"] = {}
+    repo.commit(changed, op_event_id="l" * 64, phase="post", health="failed")
+    plan = build_rollback_plan(repo)
+
+    restic = ResticClient(repo="x", password="sekret-pass", binary=str(fake))
+    result = _run_rollback_apply({"plan": plan}, backend=ExecBackend(), restic=restic)
+    assert result["steps"][0]["status"] == "restored"
+    assert plan["_ok"] is True

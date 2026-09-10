@@ -49,11 +49,20 @@ class FakeTransport:
 
 
 def test_registry_has_the_safe_tools():
-    assert known_tools() == ["app.list", "app.remove", "service.control", "service.restart", "service.status", "system.version"]
+    assert known_tools() == [
+        "app.list",
+        "app.remove",
+        "rollback.apply",
+        "service.control",
+        "service.restart",
+        "service.status",
+        "system.version",
+    ]
     assert tool_spec("system.version").scope == "server.read"
     assert tool_spec("app.list").scope == "apps.read"
     assert tool_spec("service.status").scope == "services.read"
     assert tool_spec("service.restart").scope == "services.write"
+    assert tool_spec("rollback.apply").scope == "state.write"
     for name, spec in TOOLS.items():
         assert spec.handler is not None
         assert spec.require_approval is True  # nothing auto-runs in Phase 3
@@ -120,3 +129,51 @@ def test_grant_capability_publishes():
     ev = grant_capability("d" * 64, ["services.read"], admin_sk=admin_sk, transport=transport)
     assert ev["kind"] == KIND_CAPABILITY
     assert ["d", "d" * 64] in ev["tags"]
+
+
+def _sample_plan() -> dict:
+    return {
+        "schema": 1,
+        "from": "a" * 64,
+        "to": "b" * 64,
+        "restic_snapshot": "",
+        "steps": [
+            {
+                "section": "services",
+                "file": "services/dnsmasq.toml",
+                "action": "modify",
+                "change_class": "runtime-setting",
+                "reversibility": "automatic",
+                "automatic": True,
+                "restore_required": False,
+                "tool": "service.control",
+                "args": {"name": "dnsmasq", "action": "restart"},
+                "reverse": "control",
+            }
+        ],
+        "approved": False,
+    }
+
+
+def test_rollback_apply_handler_validates_args():
+    from yunohost.nostr_operations import OperationError, _safe_rollback_apply
+
+    with pytest.raises(OperationError):
+        _safe_rollback_apply()  # no plan
+    with pytest.raises(OperationError):
+        _safe_rollback_apply(plan="not-a-plan")  # non-dict plan
+    with pytest.raises(OperationError):
+        _safe_rollback_apply(plan={"steps": []}, extra="boom")  # extra args
+
+
+def test_rollback_apply_shared_executor_rejects_bad_plan():
+    from yunohost.nostr_operations import OperationError, _run_rollback_apply
+
+    with pytest.raises(OperationError):
+        _run_rollback_apply({}, backend=object(), restic=None)  # missing plan key
+    with pytest.raises(OperationError):
+        _run_rollback_apply({"plan": {"steps": []}}, backend=object(), restic=None)  # empty steps
+    plan = _sample_plan()
+    plan["approved"] = True
+    with pytest.raises(OperationError, match="already executed"):
+        _run_rollback_apply({"plan": plan}, backend=object(), restic=None)
