@@ -59,6 +59,16 @@ class PackagesResource(BaseModel):
         return value
 
 
+class PortsResource(BaseModel):
+    named: dict[str, int] = Field(default_factory=dict)
+
+    @validator("named")
+    def valid_ports(cls, value: dict[str, int]) -> dict[str, int]:
+        if len(value) != len(set(value.values())) or any(not 1 <= port <= 65535 for port in value.values()):
+            raise ValueError("ports must be unique integers between 1 and 65535")
+        return value
+
+
 class UserResource(BaseModel):
     name: str | None = None
     system: bool = True
@@ -155,6 +165,7 @@ class PackageManifest(BaseModel):
     sources: dict[str, SourceResource] = Field(default_factory=dict, alias="source")
     runtime: RuntimeResource | None = None
     packages: PackagesResource = Field(default_factory=PackagesResource)
+    ports: PortsResource = Field(default_factory=PortsResource)
     user: UserResource | None = None
     directories: dict[str, DirectoryResource] = Field(default_factory=dict)
     database: DatabaseResource | None = None
@@ -223,6 +234,8 @@ def plan_package(package: PackageManifest) -> list[Operation]:
     plan.append(package_op)
     for name in package.packages.apt:
         plan.append(_op("package.apt.ensure", f"{app}:apt:{name}", {"package": name}, deps=(package_op.resource,), risk="medium", reverse="package.apt.remove", summary=f"ensure apt package {name}"))
+    for name, port in package.ports.named.items():
+        plan.append(_op("port.validate", f"{app}:port:{name}", {"name": name, "port": port}, deps=(package_op.resource,), summary=f"validate port {port}"))
     user_op: Operation | None = None
     if package.user:
         user = package.user.name or app
