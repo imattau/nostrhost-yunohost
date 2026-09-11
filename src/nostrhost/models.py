@@ -2,10 +2,13 @@
 
 The operation registry is NostrHost's authoritative interface description:
 from a single ``OperationSpec`` the CLI, HTTP API, MCP schema, admin form and
-AI tool contract are derived (see the moulinette-removal plan).  Stage 1
-ships the pydantic models plus a loader for the catalog JSON the converter
-(``tools/actionsmap_converter.py``) emits from ``share/actionsmap.yml``; it
-does not yet change how the fork dispatches actions.
+AI tool contract are derived (see the moulinette-removal plan).  Stage 1 ships
+the pydantic models plus a loader for the catalog JSON the converter
+(``tools/actionsmap_converter.py``) emits from ``share/actionsmap.yml``.
+``OperationCatalog.from_actionsmap`` (Stage 3) builds the catalog directly
+from the action maps so the runtime ``OperationRegistry`` has a single source
+of truth without a separate build step; the converter tool delegates to the
+same code.
 
 ``OperationResult`` is the envelope result models the executor produces for
 the operation event stream (REQUESTED/APPROVED/EXECUTING/SUCCEEDED/FAILED),
@@ -33,6 +36,93 @@ OperationStatus = Literal[
 _SAFE_SEGMENT = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
 _DOTTED_NAME = re.compile(r"^[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_.-]+)+$")
 
+# Actions whose backing function lives in a different module than the
+# category name (the derived module/function would not import).
+OPERATION_OVERRIDES: dict[str, dict[str, str]] = {
+    "app.catalog": {"module": "app_catalog", "function": "app_catalog"},
+    "app.search": {"module": "app_catalog", "function": "app_search"},
+}
+
+# Actions declared in the maps but not yet implemented upstream (FIXME
+# stubs); the registry marks them non-executable.
+UNIMPLEMENTED_OPERATIONS: frozenset[str] = frozenset({
+    "portal.apps",
+    "portal.reset_password",
+    "portal.register",
+})
+
+# Arg shapes that imply a boolean store_true flag vs a value argument.
+FLAG_ACTIONS = {"store_true", "store_false"}
+
+
+def _pattern(value: Any) -> str | None:
+    """``extra.pattern`` is ``[regex, "i18n_key"]`` or a list of such; take the
+    first regex string. Also handles ``!!str`` scalar patterns."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and value:
+        first = value[0]
+        return str(first) if first is not None else None
+    if isinstance(value, dict):
+        return value.get("pattern")
+    return None
+
+
+def _arg_kind(name: str, data: dict[str, Any]) -> Literal["positional", "option", "flag"]:
+    if data.get("action") in FLAG_ACTIONS:
+        return "flag"
+    if name.startswith("-"):
+        return "option"
+    return "positional"
+
+
+def _extract_args(arguments: dict[str, Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for name, data in (arguments or {}).items():
+        if not isinstance(data, dict):
+            continue
+        extra = data.get("extra") or {}
+        out.append({
+            "flag": name,
+            "full": data.get("full"),
+            "kind": _arg_kind(name, data),
+            "required": bool(extra.get("required", False)),
+            "pattern": _pattern(extra.get("pattern")),
+            "password": bool(extra.get("password")),
+            "ask": extra.get("ask"),
+            "default": data.get("default"),
+            "nargs": data.get("nargs"),
+            "action": data.get("action"),
+            "choices": data.get("choices"),
+            "autocomplete": extra.get("autocomplete"),
+            "help": data.get("help"),
+        })
+    return out
+
+
+def _function(cli_seg: list[str]) -> str:
+    """Backing Python function for a CLI path (dashes normalized)."""
+    return "_".join(seg.replace("-", "_") for seg in cli_seg)
+
+
+def _api_route(route: str | None) -> ApiRoute | None:
+    if not isinstance(route, str):
+        return None
+    parts = route.split(" ", 1)
+    if len(parts) == 2 and parts[0] in HTTP_METHODS:
+        return ApiRoute(method=parts[0], path=parts[1])  # type: ignore[arg-type]
+    # bare path with no verb (defaults to the action's own method)
+    return ApiRoute(method="GET", path=route)  # type: ignore[arg-type]
+
+
+def _auth(act: dict[str, Any], default: str | None) -> str | None:
+    auth = act.get("authentication")
+    if isinstance(auth, dict):
+        return auth.get("api") or auth.get("cli")
+    return default
+
 
 class ApiRoute(BaseModel):
     """An HTTP route exposed by an operation."""
@@ -56,6 +146,7 @@ class ArgumentSpec(BaseModel):
     """
 
     flag: str = ""
+    full: str | None = None
     kind: Literal["positional", "option", "flag"] = "option"
     required: bool = False
     pattern: str | None = None
@@ -89,6 +180,7 @@ class OperationSpec(BaseModel):
     auth: str | None = None
     help: str | None = None
     args: list[ArgumentSpec] = Field(default_factory=list)
+    implemented: bool = True
 
     @validator("name")
     def valid_name(cls, value: str) -> str:
@@ -168,6 +260,117 @@ class OperationCatalog(BaseModel):
         """Load a catalog JSON artifact written by the converter."""
         with open(path, encoding="utf-8") as fh:
             return cls.parse_obj(json.load(fh))
+
+    @classmethod
+    def from_actionsmap(
+        cls,
+        paths: list[str | Path],
+        *,
+        apply_overrides: bool = True,
+    ) -> "OperationCatalog":
+        """Build the catalog directly from ``actionsmap.yml`` files.
+
+        This is the Stage-3 single source of truth: the runtime registry and
+        the ``actionsmap_converter`` tool both consume it, so the parsed
+        operations (name, cli path, function, module, api route, auth, args)
+        never drift between the build artifact and the running system.
+
+        ``OPERATION_OVERRIDES`` corrects the module/function derivation for
+        actions whose backing function lives in a different module, and
+        ``UNIMPLEMENTED_OPERATIONS`` marks declared-but-not-implemented
+        actions (FIXME stubs) so the registry refuses to dispatch them.
+        """
+        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415 - only needed when building from YAML
+
+        operations: list[OperationSpec] = []
+        seen: set[str] = set()
+        for path in paths:
+            with open(path, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            global_conf = data.get("_global") or {}
+            auth = (global_conf.get("authentication") or {}).get("api")
+            for category, cat_node in data.items():
+                if category == "_global" or not isinstance(cat_node, dict):
+                    continue
+                actions = cat_node.get("actions") or {}
+                subcategories = cat_node.get("subcategories") or {}
+                for act_name, act in (actions or {}).items():
+                    if not isinstance(act, dict):
+                        continue
+                    op = cls._spec(f"{category}.{act_name}", [category, act_name], act, auth)
+                    if op.name not in seen:
+                        seen.add(op.name)
+                        operations.append(op)
+                for sub_name, sub_node in (subcategories or {}).items():
+                    cls._walk(
+                        f"{category}.{sub_name}",
+                        [category, sub_name],
+                        category,
+                        sub_node,
+                        auth,
+                        operations,
+                        seen,
+                    )
+        if apply_overrides:
+            operations = cls._apply_overrides(operations)
+        return cls(
+            version=1,
+            sources=[str(p) for p in paths],
+            operations=operations,
+        )
+
+    @staticmethod
+    def _spec(name: str, cli_seg: list[str], act: dict[str, Any], auth: str | None) -> OperationSpec:
+        return OperationSpec(
+            name=name,
+            cli_path=cli_seg,
+            function=_function(cli_seg),
+            module=cli_seg[0],
+            api=_api_route(act.get("api")),
+            auth=_auth(act, auth),
+            help=act.get("action_help"),
+            args=[ArgumentSpec.parse_obj(a) for a in _extract_args(act.get("arguments"))],
+        )
+
+    @staticmethod
+    def _walk(prefix: str, cli: list[str], module: str, node: dict[str, Any],
+              auth: str | None, out: list[OperationSpec], seen: set[str]) -> None:
+        actions = node.get("actions") if isinstance(node, dict) else None
+        if isinstance(actions, dict):
+            for act_name, act in actions.items():
+                if not isinstance(act, dict):
+                    continue
+                op = OperationCatalog._spec(f"{prefix}.{act_name}", cli + [act_name], act, auth)
+                if op.name not in seen:
+                    seen.add(op.name)
+                    out.append(op)
+            return
+        for name, sub in (node or {}).items():
+            if not isinstance(sub, dict):
+                continue
+            OperationCatalog._walk(
+                f"{prefix}.{name}" if prefix else name,
+                cli + [name],
+                module,
+                sub,
+                auth,
+                out,
+                seen,
+            )
+
+    @staticmethod
+    def _apply_overrides(operations: list[OperationSpec]) -> list[OperationSpec]:
+        updated: list[OperationSpec] = []
+        for op in operations:
+            override = OPERATION_OVERRIDES.get(op.name)
+            data = op.dict()
+            if override:
+                data["module"] = override["module"]
+                data["function"] = override["function"]
+            if op.name in UNIMPLEMENTED_OPERATIONS:
+                data["implemented"] = False
+            updated.append(OperationSpec.parse_obj(data))
+        return updated
 
 
 class OperationResult(BaseModel):
