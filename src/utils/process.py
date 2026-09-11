@@ -117,9 +117,12 @@ def call_async_output(args, callback, **kwargs) -> int | None:
 # The API uses monkey.patch_all() and we have to switch to a proper greenlet
 # thread for the LogPipe stuff to work properly (maybe we should also enable
 # gevent on the CLI, idk...)
-from gevent import monkey
+try:
+    from gevent import monkey
+except ImportError:  # nostrhost: gevent is legacy (moulinette API); native Bottle API doesn't use it
+    monkey = None
 
-if monkey.is_module_patched("threading"):
+if monkey is not None and monkey.is_module_patched("threading"):
     from gevent import Greenlet
     from gevent.fileobject import FileObjectThread
 
