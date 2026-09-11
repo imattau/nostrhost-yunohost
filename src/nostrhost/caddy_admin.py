@@ -119,10 +119,16 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     route: dict[str, Any] = {"@id": _route_id(desired), "terminal": True}
 
     match: list[dict[str, Any]] = []
+    # host + path are ANDed in a SINGLE matcher object (multiple objects in
+    # Caddy's match array are OR'd, which would let an app route shadow the
+    # whole domain). The app route must only match its own path prefix.
+    matcher: dict[str, Any] = {}
     if domain:
-        match.append({"host": [domain]})
+        matcher["host"] = [domain]
     if path:
-        match.append({"path": [f"{path}/*"]})
+        matcher["path"] = [f"{path}/*"]
+    if matcher:
+        match.append(matcher)
     if match:
         route["match"] = match
 
