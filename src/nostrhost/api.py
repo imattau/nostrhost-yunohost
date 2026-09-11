@@ -150,20 +150,53 @@ def _optional_list(value: str | None) -> list[str] | None:
     return [item for item in value.split(",") if item]
 
 
+def _default_event_stream(request_id: str) -> Any:
+    """Live relay subscription for one operation's chain events."""
+    from nostrhost import events as events_module
+
+    return events_module.stream_operation_events(
+        request_id,
+        relay_url=_config_control_relay() or "ws://127.0.0.1:4848",
+        timeout=60.0,
+    )
+
+
 def build_app(
     *,
     authorizer: Callable[[], str] | None = None,
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
+    event_stream: Callable[[str], Any] | None = None,
 ) -> Bottle:
-    """Build the native API Bottle app."""
+    """Build the native API Bottle app.
+
+    ``event_stream(request_id)`` yields operation chain events for the SSE
+    ``/events/<id>`` endpoint (default: live relay subscription).
+    """
     app = Bottle()
     auth = authorizer or default_authorizer(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
     app.install(_AuthErrorsPlugin(auth))
+    stream = event_stream or _default_event_stream
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
         return {"ok": True, "version": API_VERSION}
+
+    @app.get("/events/<request_id>")
+    def events(request_id: str) -> Any:
+        """Server-Sent Events: live progress/result for one operation."""
+        from nostrhost import events as events_module
+
+        def frame() -> Any:
+            yield events_module.sse_ping()
+            for event in stream(request_id):
+                yield events_module.sse_format(event)
+
+        response = HTTPResponse(
+            frame(),
+            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+        return response
 
     # -- system -------------------------------------------------------------
 

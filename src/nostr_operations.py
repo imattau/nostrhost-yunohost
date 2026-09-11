@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .nostr_identity import IdentityError, _operator_config, _sign_event, publish_to_relay
+from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
 KIND_OPERATION_REQUEST = 2200
@@ -45,6 +45,7 @@ KIND_OPERATION_APPROVAL = 2201
 KIND_OPERATION_REJECTION = 2202
 KIND_EXECUTION_STARTED = 2203
 KIND_EXECUTION_RESULT = 2204
+KIND_EXECUTION_PROGRESS = 2205
 KIND_CAPABILITY = 31100
 KIND_DELEGATION = 27236
 KIND_DELEGATION_REVOCATION = 27237
@@ -56,6 +57,7 @@ CHAIN_KINDS = (
     KIND_OPERATION_REJECTION,
     KIND_EXECUTION_STARTED,
     KIND_EXECUTION_RESULT,
+    KIND_EXECUTION_PROGRESS,
 )
 
 # Scope names (nostrhost-policy vocabulary). Read scopes cover the safe
@@ -485,6 +487,72 @@ def build_execution_result(
     if actor_pubkey:
         tags.append(["actor", actor_pubkey.lower()])
     return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_RESULT, content, tags)
+
+
+def build_execution_progress(
+    server_sk: str,
+    server_pubkey: str,
+    request_id: str,
+    *,
+    stage: str,
+    progress: float | None = None,
+    message: str | None = None,
+    actor_pubkey: str | None = None,
+) -> dict[str, Any]:
+    """Build (without publishing) a kind-2205 execution-progress event.
+
+    ``stage`` names the execution phase (e.g. ``database``), ``progress`` is
+    an optional 0..1 completion estimate, ``message`` an optional human
+    update.  Links to the request via the ``e`` tag so subscribers can filter.
+    """
+    if actor_pubkey is not None and not _is_hex64(actor_pubkey):
+        raise OperationError("actor pubkey must be 64-hex")
+    content: dict[str, Any] = {"operation": request_id, "stage": stage}
+    if progress is not None:
+        content["progress"] = max(0.0, min(1.0, float(progress)))
+    if message is not None:
+        content["message"] = message
+    tags = _e_tag(request_id)
+    if actor_pubkey:
+        tags.append(["actor", actor_pubkey.lower()])
+    return _sign_event(
+        server_sk,
+        server_pubkey,
+        KIND_EXECUTION_PROGRESS,
+        json.dumps(content, default=_json_default),
+        tags,
+    )
+
+
+def execution_progress(
+    request_id: str,
+    stage: str,
+    *,
+    progress: float | None = None,
+    message: str | None = None,
+    server_sk: str | None = None,
+    control_relay: str | None = None,
+    actor_pubkey: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish a kind-2205 execution-progress event as the operator/server.
+
+    Tools and the executor call this to report an operation's live progress;
+    interfaces (admin UI via SSE, CLI, MCP) subscribe to the chain to render
+    it.  The event links to the request and is signed by the server key.
+    """
+    cfg = _operator_config(server_sk, control_relay)
+    event = build_execution_progress(
+        cfg.operator_sk,
+        cfg.operator_pubkey,
+        request_id,
+        stage=stage,
+        progress=progress,
+        message=message,
+        actor_pubkey=actor_pubkey,
+    )
+    (transport or publish_to_relay)(_control_relay(control_relay), event)
+    return event
 
 
 def build_capability(

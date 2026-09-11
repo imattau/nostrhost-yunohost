@@ -32,7 +32,7 @@ import logging
 import secrets
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .nostr_identity import (
@@ -55,6 +55,7 @@ from .nostr_operations import (
     KIND_EXECUTION_RESULT,
     KIND_EXECUTION_STARTED,
     _derive_pubkey,
+    build_execution_progress,
     build_execution_result,
     build_execution_started,
     tool_spec,
@@ -380,6 +381,7 @@ class OperationEngine:
         if self._state is not None:
             self._state.pre(record.request_id, record.tool, record.args, actor=record.actor)
         try:
+            self._progress(record, "executing", 0.0, f"starting {record.tool}")
             if record.tool == "rollback.apply":
                 from .nostr_operations import _run_rollback_apply
 
@@ -395,8 +397,10 @@ class OperationEngine:
                 result = _run_reconcile_apply(record.args, backend=self._backend, repo=state_repo)
                 operation_ok = bool(result.pop("_ok", True))
             else:
+                self._progress(record, "executing", 0.5, f"running {record.tool}")
                 result = self._backend.execute(record.tool, record.args)
                 operation_ok = True
+            self._progress(record, "executing", 1.0, f"{record.tool} finished")
             body: dict[str, Any] = {"ok": operation_ok, "result": result}
             if record.policy:
                 body["policy"] = record.policy
@@ -416,6 +420,23 @@ class OperationEngine:
         body = {"reason": reason}
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, ok=False, actor_pubkey=record.actor, **body))
         logger.info("request %s rejected: %s", record.request_id[:16], reason)
+
+    def _progress(self, record: OperationRecord, stage: str, progress: float, message: str) -> None:
+        """Publish a kind-2205 execution-progress event for ``record``."""
+        try:
+            self._publish(
+                build_execution_progress(
+                    self._server_sk,
+                    self._server_pubkey,
+                    record.request_id,
+                    stage=stage,
+                    progress=progress,
+                    message=message,
+                    actor_pubkey=record.actor,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - progress is best-effort
+            logger.warning("failed to publish progress for %s: %s", record.request_id[:16], exc)
 
     # -- helpers ----------------------------------------------------------- #
 
