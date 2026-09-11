@@ -10,6 +10,7 @@ Package: yunohost
 Essential: yes
 Architecture: all
 Depends: python3-all (>= 3.11),
+ , python3-nostrhost
  , python3-psutil, python3-requests, python3-dnspython, python3-openssl
  , python3-miniupnpc, python3-dbus, python3-jinja2 (>= 3.0)
  , python3-toml, python3-packaging, python3-publicsuffix2
@@ -50,6 +51,22 @@ Description: manageable and configured self-hosting server
  the default install). It also provides facilities to manage users,
  domains, apps and so.
  .
- This package contains YunoHost scripts and binaries to be used by the
- moulinette. It allows one to manage the server with a command-line tool
- and an API.
+ This package contains YunoHost scripts and binaries. The CLI and API
+ entry points live in the python3-nostrhost package (the native
+ replacement for the retired moulinette framework).
+
+Package: python3-nostrhost
+Architecture: all
+Section: python
+Depends: python3-all (>= 3.11), yunohost
+ , python3-typer, python3-bottle, python3-requests
+ , python3-nostrhost-auth
+Description: native nostrhost framework — moulinette replacement
+ nostrhost is the native framework layer that replaces the retired
+ moulinette in the YunoHost fork: interface primitives (core, i18n, ui,
+ logging, locking, auth) plus the native Typer command-line tool
+ (/usr/bin/nostrhost) and the Bottle+NIP-98 HTTP API (/usr/bin/nostr-api).
+ .
+ It depends on yunohost (its CLI/API import yunohost.nostr_operations and
+ friends), while yunohost depends back on it for the framework primitives
+ — a legal circular dependency resolved by apt.

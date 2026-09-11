@@ -1,0 +1,12 @@
+# YunoHost core package. The nostrhost framework + CLI/API entry points ship
+# in python3-nostrhost (see debian/python3-nostrhost.install).
+bin/* !bin/nostrhost !bin/nostr-api /usr/bin/
+share/* /usr/share/yunohost/
+hooks/* /usr/share/yunohost/hooks/
+helpers/* /usr/share/yunohost/
+conf/* /usr/share/yunohost/conf/
+locales/* /usr/share/yunohost/locales/
+doc/yunohost.8.gz /usr/share/man/man8/
+doc/bash_completion.d/* /etc/bash_completion.d/
+doc/zsh_completion.d/* /usr/share/zsh/vendor-completions/
+src/* !src/nostrhost /usr/lib/python3/dist-packages/yunohost/
