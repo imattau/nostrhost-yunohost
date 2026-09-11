@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """nostr-securityd — CrowdSec security-event projector daemon (P5).
 
 Subscribes to the local CrowdSec LAPI (polling `cscli alerts list -o json`)
