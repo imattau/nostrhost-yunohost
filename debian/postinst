@@ -31,39 +31,65 @@ provision_crowdsec() {
     BOUNCER_CONF="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
     BOUNCER_NAME="yunohost-crowdsec-bouncer"
 
-    # 1) CAPI opt-out. Ship the "# no thanks" file so the daemon stays
-    #    network-quiet by default (§1, §8.1). Never overwrite an existing
-    #    file: an admin who has opted IN keeps their CAPI credentials.
-    if [ ! -f /etc/crowdsec/online_api_credentials.yaml ]; then
+    # 1) CAPI opt-out. On a fresh install the crowdsec package's own postinst
+    #    runs first and auto-registers with CAPI (writes a real
+    #    online_api_credentials.yaml) before this function ever sees the box;
+    #    that auto-registration is a package default, NOT an admin choice, so
+    #    `force` (fresh install) overwrites it with the "# no thanks" opt-out
+    #    to keep §1's "CAPI off until evaluated" honest. On upgrade, only fill
+    #    the file in if absent so a deliberate admin opt-in is preserved.
+    if [ "${1:-}" = "force" ] || [ ! -f /etc/crowdsec/online_api_credentials.yaml ]; then
         printf '# no thanks\n' > /etc/crowdsec/online_api_credentials.yaml
         chown root:root /etc/crowdsec/online_api_credentials.yaml
         chmod 0600 /etc/crowdsec/online_api_credentials.yaml
+        # The crowdsec package's auto-registration already pulled the CAPI
+        # community blocklist into LAPI before we ran; that is a package
+        # default, not an admin choice, so on fresh install drop those
+        # decisions. `--all` is safe here: at package-install time no local
+        # scenario has fired yet, so the store is empty except for the
+        # auto-pulled CAPI blocklist. Only in the `force` branch — an upgrade
+        # must never remove decisions belonging to a deliberate opt-in.
+        cscli decisions delete --all >/dev/null 2>&1 || true
     fi
 
     # 2) Base hub collections (parsers/scenarios). The Debian crowdsec
     #    package vendors an offline hub at /usr/share/crowdsec/hub, so this
-    #    needs no first-boot network. Best-effort.
+    #    needs no first-boot network. Best-effort. (1.4.x: `cscli hub` has no
+    #    `install` subcommand — the collections/parsers/scenarios install
+    #    lives under `cscli collections install`.)
     cscli hub update >/dev/null 2>&1 || true
     for collection in crowdsecurity/caddy crowdsecurity/sshd crowdsecurity/postfix crowdsecurity/linux; do
-        cscli hub install "${collection}" >/dev/null 2>&1 || true
+        cscli collections install "${collection}" >/dev/null 2>&1 || true
     done
 
-    # 3) Firewall bouncer registration against the local LAPI (idempotent).
-    if [ ! -f "${BOUNCER_CONF}" ]; then
+    # 3) Firewall bouncer config (nftables mode) against the local LAPI.
+    #    The Debian crowdsec-firewall-bouncer package ships a template with
+    #    placeholders plus a `.local` override carrying a key it auto-registered;
+    #    reuse that key when present, otherwise register our own bouncer.
+    CURRENT_KEY=""
+    if [ -f "${BOUNCER_CONF}" ] && grep -qE "^api_key: [0-9a-f]{16,}" "${BOUNCER_CONF}"; then
+        CURRENT_KEY="$(grep -oE "^api_key: [0-9a-f]{16,}" "${BOUNCER_CONF}" | awk '{print $2}')"
+    elif [ -f "${BOUNCER_CONF}.local" ] && grep -qE "^api_key: [0-9a-f]{16,}" "${BOUNCER_CONF}.local"; then
+        CURRENT_KEY="$(grep -oE "^api_key: [0-9a-f]{16,}" "${BOUNCER_CONF}.local" | awk '{print $2}')"
+    fi
+    if [ -z "${CURRENT_KEY}" ]; then
         systemctl start crowdsec >/dev/null 2>&1 || true
         cscli bouncers delete "${BOUNCER_NAME}" >/dev/null 2>&1 || true
-        API_KEY="$(cscli bouncers add "${BOUNCER_NAME}" -o raw 2>/dev/null | tail -n1)"
-        if [ -z "${API_KEY}" ]; then
+        CURRENT_KEY="$(cscli bouncers add "${BOUNCER_NAME}" -o raw 2>/dev/null | tail -n1)"
+        if [ -z "${CURRENT_KEY}" ]; then
             # 1.4.x fallback: `API key for '<name>': <key>` on stdout.
-            API_KEY="$(cscli bouncers add "${BOUNCER_NAME}" 2>/dev/null | grep -oE '[0-9a-f-]{36,}' | tail -n1)"
+            CURRENT_KEY="$(cscli bouncers add "${BOUNCER_NAME}" 2>/dev/null | grep -oE '[0-9a-f]{16,}' | tail -n1)"
         fi
-        if [ -n "${API_KEY}" ]; then
-            sed "s|__API_KEY__|${API_KEY}|" \
-                /usr/share/yunohost/conf/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml \
-                > "${BOUNCER_CONF}"
-            chown root:root "${BOUNCER_CONF}"
-            chmod 0600 "${BOUNCER_CONF}"
-        fi
+    fi
+    if [ -n "${CURRENT_KEY}" ]; then
+        sed "s|__API_KEY__|${CURRENT_KEY}|" \
+            /usr/share/yunohost/conf/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml \
+            > "${BOUNCER_CONF}"
+        chown root:root "${BOUNCER_CONF}"
+        chmod 0600 "${BOUNCER_CONF}"
+        # The Debian package's `.local` override would clobber our rendered
+        # values (mode/api_key); drop it so our config is authoritative.
+        rm -f "${BOUNCER_CONF}.local"
     fi
 
     # 4) Enable the bouncer service; (re)start it once its config exists.
@@ -83,7 +109,13 @@ do_configure() {
     # Runs on both fresh install and upgrade; every step is idempotent.
     # crowdsec + crowdsec-firewall-bouncer are hard Depends, so the daemon
     # (and its LAPI on 127.0.0.1:8080) is already up by the time we run.
-    provision_crowdsec
+    # `force` on fresh install: the crowdsec package auto-registers CAPI
+    # before us, which must be overridden to the opt-out (§1).
+    if [ -f /etc/yunohost/installed ]; then
+        provision_crowdsec
+    else
+        provision_crowdsec force
+    fi
 
     if [ ! -f /etc/yunohost/installed ]; then
         # If apps/ is not empty, we're probably already installed in the past and

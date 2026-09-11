@@ -12,6 +12,12 @@
 #   type: syslog  -> crowdsecurity/syslog-logs parser; sources for the sshd,
 #                    postfix (SASL) and base scenarios.
 #
+# sshd is acquired via /var/log/auth.log only (P4): sshd logs to auth.log on
+# any listening port, and the journald `ssh.service` unit carries the same
+# lines — acquiring both double-counts every sshd failure in the
+# crowdsecurity/sshd scenarios (observed live during P4's gate: 3 real
+# failures counted as 6, tripping ssh-bf early).
+#
 # The packaged crowdsec scenarios are copied to /etc/crowdsec/scenarios/ by
 # the same hook; the hub collections (crowdsecurity/caddy, /sshd, /postfix,
 # /linux) that provide their parsers are installed at package install time.
@@ -20,12 +26,6 @@ filenames:
   - /var/log/caddy/access.log
 labels:
   type: caddy
----
-source: journalctl
-journalctl_filter:
-  - "_SYSTEMD_UNIT=ssh.service"
-labels:
-  type: syslog
 ---
 source: journalctl
 journalctl_filter:

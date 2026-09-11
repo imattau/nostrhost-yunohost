@@ -11,6 +11,10 @@
 # re-render them, mirroring the retired 15-nginx category. The base
 # Caddyfile carries the global options block (admin API, ports, storage,
 # and the access-log directive consumed by CrowdSec's caddy-logs parser).
+#
+# regenconf drives hooks with `pre` and `post` actions only (see
+# src/regenconf.py), so ALL rendering happens in do_pre_regen, mirroring
+# 40-nftables/52-crowdsec; do_regen is not part of that flow.
 
 set -e
 source /usr/share/yunohost/helpers
@@ -20,13 +24,6 @@ do_init_regen() {
 }
 
 do_pre_regen() {
-    pending_dir=$1
-    caddy_dir="${pending_dir}/etc/caddy"
-    mkdir -p "$caddy_dir/conf.d"
-    exit 0
-}
-
-do_regen() {
     pending_dir=$1
     caddy_dir="${pending_dir}/etc/caddy"
     mkdir -p "$caddy_dir/conf.d"
@@ -41,3 +38,21 @@ do_regen() {
     done
     exit 0
 }
+
+do_post_regen() {
+    regen_conf_files=$1
+
+    chown -R root:root /etc/caddy
+    chmod -R u=rwX,go=rX /etc/caddy
+
+    if [[ -n "$regen_conf_files" ]] && systemctl is-active caddy --quiet; then
+        # Best-effort reload so a changed base Caddyfile (global options,
+        # e.g. the access-log directive) takes effect immediately. Native
+        # route reconciliation goes through the Caddy admin API and is not
+        # affected by this.
+        caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || systemctl reload caddy >/dev/null 2>&1 || true
+    fi
+    exit 0
+}
+
+"do_$1_regen" "$(echo "${*:2}" | xargs)"

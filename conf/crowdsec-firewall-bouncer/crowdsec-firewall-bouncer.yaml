@@ -6,11 +6,14 @@
 # `cscli bouncers add` against the local CrowdSec daemon. The rendered file
 # lives at /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml (0600).
 #
-# The bouncer owns a dedicated nftables table + `crowdsec-blacklists` sets and
-# hooks them into the `input` chain of `table inet filter` — additive to
-# YunoHost's port-based rules, which are managed separately by the `nftables`
-# regenconf category (conf/nftables/). It never edits YunoHost's own table
-# definition. See docs/CROWDSEC-MIGRATION.md §4 (P4).
+# Schema matches the Debian crowdsec-firewall-bouncer 0.0.25 default config
+# (bookworm main — the §1 package-source decision). The bouncer owns a
+# dedicated nftables table + crowdsec-blacklists sets and hooks them into the
+# `input` chain of `table inet filter` via `crowdsec-chain` (set-only: false
+# lets the bouncer add its own jump rule) — additive to YunoHost's port-based
+# rules, which are managed separately by the `nftables` regenconf category
+# (conf/nftables/). It never edits YunoHost's own table definition. See
+# docs/CROWDSEC-MIGRATION.md §4 (P4).
 
 # Local CrowdSec LAPI (loopback only — CAPI/console stay off, §1).
 api_url: http://127.0.0.1:8080/
@@ -21,13 +24,24 @@ mode: nftables
 # Poll LAPI for new decisions on this interval.
 update_frequency: 10s
 
+daemonize: true
+pid_dir: /var/run/
+
 log_mode: file
 log_dir: /var/log/crowdsec-firewall-bouncer/
 log_level: info
 
+deny_action: DROP
+
+## nftables
 nftables:
-  nftables: nft
-  ipv6: true
-  chain: input
-  table: filter
-  deny-action: drop
+  ipv4:
+    enabled: true
+    set-only: false
+    table: crowdsec
+    chain: crowdsec-chain
+  ipv6:
+    enabled: true
+    set-only: false
+    table: crowdsec6
+    chain: crowdsec6-chain
