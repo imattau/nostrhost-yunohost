@@ -1,6 +1,17 @@
 # YunoHost core package. The nostrhost framework + CLI/API entry points ship
 # in python3-nostrhost (see debian/python3-nostrhost.install).
-bin/* !bin/nostrhost !bin/nostr-api /usr/bin/
+bin/nostrhost-bootstrap /usr/bin/
+bin/nostrhost-package /usr/bin/
+bin/nostrhost-restic /usr/bin/
+bin/nostrhost-state /usr/bin/
+bin/nostr-identity-admin /usr/bin/
+bin/nostr-identityd /usr/bin/
+bin/nostr-opctl /usr/bin/
+bin/nostr-operationsd /usr/bin/
+bin/nostr-securityd /usr/bin/
+bin/yunomdns /usr/bin/
+bin/yunopaste /usr/bin/
+bin/yunoprompt /usr/bin/
 share/* /usr/share/yunohost/
 hooks/* /usr/share/yunohost/hooks/
 helpers/* /usr/share/yunohost/
@@ -9,4 +20,7 @@ locales/* /usr/share/yunohost/locales/
 doc/yunohost.8.gz /usr/share/man/man8/
 doc/bash_completion.d/* /etc/bash_completion.d/
 doc/zsh_completion.d/* /usr/share/zsh/vendor-completions/
-src/* !src/nostrhost /usr/lib/python3/dist-packages/yunohost/
+# The historical layout installs the whole src/ tree (including src/nostrhost)
+# into the yunohost package; the live copy of nostrhost ships as a top-level
+# package in python3-nostrhost.
+src/* /usr/lib/python3/dist-packages/yunohost/
