@@ -19,156 +19,24 @@
 #
 
 import os
-import sys
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import argparse
-
     from nostrhost.locking import LockManager
 
-from pathlib import Path
-
-import moulinette
-from nostrhost.i18n import tr, set_locale, set_locales_dir, colorize, get_locale
+from nostrhost.i18n import get_locale, set_locale, set_locales_dir
 
 from .utils.logging import init_logging
+
+# The legacy YunoHost framework entry points (``cli`` / ``api`` / ``portalapi``
+# via moulinette) have been retired: the native administration surface is the
+# ``nostrhost`` CLI and the ``nostr-api`` HTTP API.  This module keeps only the
+# helpers the daemons, scripts and tests use.
 
 
 def is_installed() -> bool:
     """Returns whether YunoHost is installed on the system."""
     return os.path.isfile("/etc/yunohost/installed")
-
-
-def cli(
-    debug: bool,
-    quiet: bool,
-    output_as: str,
-    timeout: int | None,
-    args: list[str],
-    parser: "argparse.ArgumentParser",
-) -> NoReturn:
-    """Entry point for YunoHost CLI"""
-    init_logging(interface="cli", debug=debug, quiet=quiet)
-
-    # Check that YunoHost is installed
-    if not is_installed():
-        check_command_is_valid_before_postinstall(args)
-
-    ret = moulinette.cli(
-        args,
-        actionsmap="/usr/share/yunohost/actionsmap.yml",
-        locales_dir="/usr/share/yunohost/locales/",
-        output_as=output_as,
-        timeout=timeout,
-        top_parser=parser,
-        umask=0o022,
-    )
-    sys.exit(ret)
-
-
-def api(debug: bool, host: str, port: int, actionsmap: str | None = None) -> NoReturn:
-    """Entry point for YunoHost API server"""
-    actionsmap = actionsmap or "/usr/share/yunohost/actionsmap.yml"
-    path = Path(actionsmap).resolve()
-    if path.exists():
-        actionsmap = str(path)
-
-    allowed_cors_origins = []
-    allowed_cors_origins_file = "/etc/yunohost/.admin-api-allowed-cors-origins"
-
-    if os.path.exists(allowed_cors_origins_file):
-        allowed_cors_origins = open(allowed_cors_origins_file).read().strip().split(",")
-
-    init_logging(interface="api", debug=debug)
-
-    def is_installed_api() -> dict[Literal["installed"], bool]:
-        return {"installed": is_installed()}
-
-    # FIXME : someday, maybe find a way to disable route /postinstall if
-    # postinstall already done ...
-
-    ret = moulinette.api(
-        host=host,
-        port=port,
-        actionsmap=actionsmap,
-        locales_dir="/usr/share/yunohost/locales/",
-        routes={("GET", "/installed"): is_installed_api},
-        allowed_cors_origins=allowed_cors_origins,
-        umask=0o022,
-    )
-    sys.exit(ret)
-
-
-def portalapi(debug: bool, host: str, port: int) -> NoReturn:
-    """Entry point for YunoHost Portal API server"""
-    allowed_cors_origins = []
-    allowed_cors_origins_file = "/etc/yunohost/.portal-api-allowed-cors-origins"
-
-    if os.path.exists(allowed_cors_origins_file):
-        allowed_cors_origins = open(allowed_cors_origins_file).read().strip().split(",")
-
-    # FIXME : is this the logdir we want ? (yolo to work around permission issue)
-    init_logging(interface="portalapi", debug=debug, logdir="/var/log")
-
-    # Passwordless Nostr sign-in (§8) and the internal auth-request bridge.
-    # They are registered via moulinette's `routes` kwarg, which skips the
-    # default authenticator; only challenge/login are public by design.
-    from .nostr_login import auth_request_route, challenge_route, login_route
-    from .nostr_oidc import authorize, discovery, jwks, token, userinfo
-    from .nostr_account import (
-        identities_route,
-        link_challenge_route,
-        link_route,
-        rename_route,
-        revoke_route,
-        unlink_route,
-    )
-
-    nostr_routes = {
-        ("GET", "/nostr/challenge"): challenge_route,
-        ("POST", "/nostr/login"): login_route,
-        ("GET", "/nostr/auth-request"): auth_request_route,
-        ("GET", "/nostr/identities"): identities_route,
-        ("POST", "/nostr/link/challenge"): link_challenge_route,
-        ("POST", "/nostr/link"): link_route,
-        ("POST", "/nostr/identities/revoke"): revoke_route,
-        ("POST", "/nostr/identities/rename"): rename_route,
-        ("POST", "/nostr/unlink"): unlink_route,
-        ("GET", "/.well-known/openid-configuration"): discovery,
-        ("GET", "/oidc/authorize"): authorize,
-        ("POST", "/oidc/token"): token,
-        ("GET", "/oidc/userinfo"): userinfo,
-        ("GET", "/oidc/jwks.json"): jwks,
-    }
-
-    ret = moulinette.api(
-        host=host,
-        port=port,
-        actionsmap="/usr/share/yunohost/actionsmap-portal.yml",
-        locales_dir="/usr/share/yunohost/locales/",
-        allowed_cors_origins=allowed_cors_origins,
-        routes=nostr_routes,
-        umask=0o022,
-    )
-    sys.exit(ret)
-
-
-def check_command_is_valid_before_postinstall(args: list[str]) -> None:
-    """Asserts if the given command is valid before running postinstall, or exits 1"""
-    allowed_if_not_postinstalled = [
-        "tools postinstall",
-        "tools versions",
-        "tools shell",
-        "backup list",
-        "backup restore",
-        "log display",
-    ]
-
-    if len(args) < 2 or (args[0] + " " + args[1] not in allowed_if_not_postinstalled):
-        init_i18n()
-        print(colorize(tr("error"), "red") + " " + tr("yunohost_not_installed"))
-        sys.exit(1)
 
 
 def init(
@@ -192,9 +60,8 @@ def init(
 
 def init_i18n() -> None:
     """
-    Initialize the i18n locale dir and locale.
-    This should only be called when not willing to go through moulinette.cli
-    or moulinette.api but still willing to call tr/g...
+    Initialize the i18n locale dir and locale, so callers can use tr() without
+    going through a CLI/API framework.
     """
     set_locales_dir("/usr/share/yunohost/locales/")
     set_locale(get_locale())

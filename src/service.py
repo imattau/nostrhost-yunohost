@@ -42,7 +42,7 @@ from .utils.file_utils import (
 )
 from .utils.process import check_output
 
-MOULINETTE_LOCK = "/var/run/moulinette_yunohost.lock"
+OPERATION_LOCK = "/var/run/nostrhost/locks/yunohost.lock"
 
 SERVICES_CONF = "/etc/yunohost/services.yml"
 SERVICES_CONF_BASE = "/usr/share/yunohost/conf/yunohost/services.yml"
@@ -662,7 +662,7 @@ def _give_lock(action, service, p):
     if son_PID != 0:
         # Append the PID to the lock file
         logger.debug(f"Giving a lock to PID {son_PID} for service {service} !")
-        append_to_file(MOULINETTE_LOCK, f"\n{son_PID}")
+        append_to_file(OPERATION_LOCK, f"\n{son_PID}")
 
     return son_PID
 
@@ -670,9 +670,9 @@ def _give_lock(action, service, p):
 def _remove_lock(PID_to_remove):
     # FIXME ironically not concurrency safe because it's not atomic...
 
-    PIDs = read_file(MOULINETTE_LOCK).split("\n")
+    PIDs = read_file(OPERATION_LOCK).split("\n")
     PIDs_to_keep = [PID for PID in PIDs if int(PID) != PID_to_remove]
-    write_to_file(MOULINETTE_LOCK, "\n".join(PIDs_to_keep))
+    write_to_file(OPERATION_LOCK, "\n".join(PIDs_to_keep))
 
 
 def _get_services():

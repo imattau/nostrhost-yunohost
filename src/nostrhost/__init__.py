@@ -1,14 +1,15 @@
-"""NostrHost-specific YunoHost extensions.
+"""NostrHost-specific extensions.
 
-Stage 1 of the moulinette removal adds native replacements for the Moulinette
-primitives the fork depends on, so Stage 2 can swap imports mechanically:
+Native replacements for the framework primitives the fork used to get from
+moulinette, plus the native administration surface:
 
-* ``nostrhost.i18n``    -- ``m18n`` / ``colorize`` / ``get_locale``
-* ``nostrhost.core``    -- error hierarchy + ``Moulinette`` interface registry
-* ``nostrhost.locking`` -- ``MoulinetteLock`` (flock-based ``LockManager``)
-* ``nostrhost.logging`` -- ``getActionLogger``
-* ``nostrhost.ui``      -- ``Moulinette.prompt`` / ``display``
-* ``nostrhost.models``  -- typed operation/argument/result schemas
+* ``nostrhost.i18n``     -- translations, ``colorize``, ``get_locale``
+* ``nostrhost.core``     -- error hierarchy + interface registry
+* ``nostrhost.locking``  -- flock-based ``LockManager``
+* ``nostrhost.logging``  -- ``getActionLogger`` + TTY handler
+* ``nostrhost.ui``       -- prompt/display + result presentation
+* ``nostrhost.cli``      -- the native ``nostrhost`` Typer CLI
+* ``nostrhost.api``      -- the native HTTP API (NIP-98 auth)
 
 Submodules are imported explicitly by callers; this package intentionally does
 not eagerly import them so ``import nostrhost`` stays dependency-light.

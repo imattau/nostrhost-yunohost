@@ -11,7 +11,6 @@ requires-python = ">=3.11"
 
 # These dependencies might not be up to date, please see debian/control instead
 dependencies = [
-    "moulinette @ git+https://github.com/yunohost/moulinette@dev",
     # NostrHost derivative identity layer (roadmap §4 / Phase 3):
     # nostr-identity / nostr-identityd author and project identity events on
     # the local control relay (kind 31102) over raw NIP-01 WebSocket.
@@ -75,11 +74,6 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-# We don't provide (yet) typing in moulinette
-module = "moulinette.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 # The fork's own package: `src/*` becomes `yunohost.*` only at install time,
 # so a source-tree mypy run cannot see it as a package.
 module = "yunohost.*"
@@ -135,7 +129,6 @@ source = ["src/"]
 [tool.coverage.report]
 omit = [
     "src/vendor/*",
-    "/usr/lib/moulinette/yunohost/*",
     "/usr/lib/python3/dist-packages/yunohost/vendor/*",
 ]
 

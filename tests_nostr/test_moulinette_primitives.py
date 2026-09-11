@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 import threading
 import time
-import types
 
 import pytest
 
-from nostrhost import core, i18n, locking, logging as nh_logging, models, ui
+from nostrhost import core, i18n, locking, logging as nh_logging, ui
 
 
 # --------------------------------------------------------------------------- #
@@ -149,62 +147,6 @@ def test_interface_proxy_raises_without_interface():
     core.set_interface(None)
     with pytest.raises(RuntimeError, match="no interface registered"):
         _ = core.interface.type
-
-
-class _FakeFrameworkCli:
-    type = "cli"
-
-    def prompt(self, *args, **kwargs):
-        return "framework-answer"
-
-    def display(self, *args, **kwargs):
-        return "framework-display"
-
-
-@pytest.fixture
-def _fake_moulinette_module():
-    """Inject a stand-in ``moulinette`` module to exercise the transition
-    bridge where the real framework registers its own interface."""
-    module = types.ModuleType("moulinette")
-    fake = type("Moulinette", (), {})
-    fake._interface = _FakeFrameworkCli()
-    module.Moulinette = fake
-    sys.modules["moulinette"] = module
-    try:
-        yield module
-    finally:
-        del sys.modules["moulinette"]
-
-
-def test_interface_sync_reads_framework_interface(_fake_moulinette_module):
-    core.set_interface(None)  # clears local + mirrors None to the framework
-    _fake_moulinette_module.Moulinette._interface = _FakeFrameworkCli()
-    # no local registration -> falls back to the framework's interface
-    assert core.Moulinette.interface.type == "cli"
-    assert core.Moulinette.prompt("q") == "framework-answer"
-
-
-def test_interface_sync_local_registration_wins(_fake_moulinette_module):
-    class Local:
-        type = "api"
-
-        def prompt(self, *args, **kwargs):
-            return "local-answer"
-
-        def display(self, *args, **kwargs):
-            return "local-display"
-
-    core.set_interface(Local())
-    assert core.Moulinette.interface.type == "api"
-    assert core.Moulinette.prompt("q") == "local-answer"
-    core.set_interface(None)
-
-
-def test_interface_sync_assigning_interface_mirrors_to_framework(_fake_moulinette_module):
-    core.Moulinette._interface = _FakeFrameworkCli()
-    assert _fake_moulinette_module.Moulinette._interface.type == "cli"
-    core.set_interface(None)
-    assert _fake_moulinette_module.Moulinette._interface is None
 
 
 # --------------------------------------------------------------------------- #
@@ -394,99 +336,3 @@ def test_confirm_default_and_explicit(monkeypatch):
     assert ui.confirm("continue?") is False
     monkeypatch.setattr("builtins.input", lambda *_a, **_k: "")
     assert ui.confirm("continue?", default=True) is True
-
-
-# --------------------------------------------------------------------------- #
-# models
-
-def _catalog_payload():
-    return {
-        "version": 1,
-        "sources": ["share/actionsmap.yml"],
-        "operations": [
-            {
-                "name": "user.create",
-                "cli_path": ["user", "create"],
-                "function": "user_create",
-                "module": "user",
-                "api": {"method": "POST", "path": "/users"},
-                "auth": "ldap_admin",
-                "help": "Create user",
-                "args": [
-                    {
-                        "flag": "username",
-                        "kind": "positional",
-                        "required": True,
-                        "pattern": "^[a-z0-9]+$",
-                        "password": False,
-                        "ask": None,
-                        "default": None,
-                        "nargs": None,
-                        "action": None,
-                        "choices": None,
-                        "autocomplete": None,
-                        "help": None,
-                    }
-                ],
-            },
-            {
-                "name": "user.group.add",
-                "cli_path": ["user", "group", "add"],
-                "function": "user_group_add",
-                "module": "user",
-                "api": {"method": "PUT", "path": "/users/groups/<groupname>/add/<usernames>"},
-                "auth": "ldap_admin",
-                "help": None,
-                "args": [],
-            },
-        ],
-    }
-
-
-def test_catalog_loads_and_indexes(tmp_path):
-    path = tmp_path / "catalog.json"
-    path.write_text(json.dumps(_catalog_payload()))
-    catalog = models.OperationCatalog.load(path)
-    assert len(catalog.operations) == 2
-    assert catalog.by_name("user.create").function == "user_create"
-    assert catalog.by_name("user.group.add").api.method == "PUT"
-    assert catalog.by_name("missing") is None
-    assert len(catalog.with_api_route()) == 2
-    assert catalog.modules() == {"user": 2}
-
-
-def test_catalog_rejects_function_cli_mismatch():
-    payload = _catalog_payload()
-    payload["operations"][0]["function"] = "wrong_name"
-    with pytest.raises(Exception):
-        models.OperationCatalog.parse_obj(payload)
-
-
-def test_catalog_rejects_duplicate_names():
-    payload = _catalog_payload()
-    payload["operations"].append(payload["operations"][0])
-    with pytest.raises(Exception):
-        models.OperationCatalog.parse_obj(payload)
-
-
-def test_api_route_requires_leading_slash():
-    with pytest.raises(Exception):
-        models.ApiRoute(method="GET", path="users")
-
-
-def test_operation_result_states():
-    requested = models.OperationResult(operation="app.install")
-    assert requested.status == "REQUESTED" and not requested.succeeded()
-    failed = models.OperationResult(
-        operation="app.install",
-        status="FAILED",
-        error={"code": "resource_conflict", "message_key": "app_already_installed"},
-    )
-    assert failed.failed() and failed.error["code"] == "resource_conflict"
-    ok = models.OperationResult(operation="app.install", status="SUCCEEDED")
-    assert ok.succeeded()
-
-
-def test_operation_result_rejects_path_traversal_resource():
-    with pytest.raises(Exception):
-        models.OperationResult(operation="x", resource="../etc/passwd")

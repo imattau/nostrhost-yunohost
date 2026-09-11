@@ -23,24 +23,15 @@ from typing import Any
 from nostrhost.core import AuthenticationError, NostrHostError
 from nostrhost.i18n import tr
 
-# Transitional bridge (moulinette removal, Stage 2): the moulinette framework
-# is still the CLI/API dispatcher until Stages 4-5, and it catches
-# ``MoulinetteError``/``MoulinetteAuthenticationError`` to render HTTP
-# responses.  Keeping those bases (alongside the native ones) means a
-# ``YunohostError`` is caught correctly by both the framework and native code.
-# Once the native CLI/API replace moulinette, drop the ``MoulinetteError``
-# bases and the ``moulinette`` import below.
-from moulinette.core import MoulinetteAuthenticationError, MoulinetteError
 
-
-class YunohostError(NostrHostError, MoulinetteError):
+class YunohostError(NostrHostError):
     http_code = 500
 
     """
     Yunohost base exception
 
-    The (only?) main difference with MoulinetteError being that keys
-    are translated via m18n.n (namespace) instead of m18n.g (global?)
+    The (only?) main difference with a base exception being that keys
+    are translated via tr (namespace) instead of a global namespace.
     """
 
     def __init__(
@@ -79,5 +70,5 @@ class YunohostValidationError(YunohostError):
         return {"error": self.strerror, "error_key": self.key, **self.kwargs}
 
 
-class YunohostAuthenticationError(AuthenticationError, MoulinetteAuthenticationError):
+class YunohostAuthenticationError(AuthenticationError):
     pass

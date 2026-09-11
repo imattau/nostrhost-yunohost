@@ -193,18 +193,11 @@ do_init_regen() {
     [[ -d /etc/skel/media ]] \
         || (mkdir -p /media && ln -s /media /etc/skel/media)
 
-    # YunoHost services
-    cp yunohost-api.service /etc/systemd/system/yunohost-api.service
-    cp yunohost-portal-api.service /etc/systemd/system/yunohost-portal-api.service
+    # YunoHost services (legacy framework API retired; native surface is
+    # nostr-api / nostrhost CLI)
     cp yunoprompt.service /etc/systemd/system/yunoprompt.service
 
     systemctl daemon-reload
-
-    systemctl enable yunohost-api.service --quiet
-    systemctl start yunohost-api.service
-
-    systemctl enable yunohost-portal-api.service --quiet
-    systemctl start yunohost-portal-api.service
 
     # Enable yunoprompt (in particular for installs from ISO where we want this to show on first boot instead of asking for a login/password)
     systemctl enable yunoprompt --quiet
@@ -292,8 +285,6 @@ HandleLidSwitchDocked=ignore
 HandleLidSwitchExternalPower=ignore
 EOF
 
-    cp yunohost-api.service "$pending_dir/etc/systemd/system/yunohost-api.service"
-    cp yunohost-portal-api.service "$pending_dir/etc/systemd/system/yunohost-portal-api.service"
     cp yunoprompt.service "$pending_dir/etc/systemd/system/yunoprompt.service"
     cp proc-hidepid.service "$pending_dir/etc/systemd/system/proc-hidepid.service"
     # Delete legacy yunohost-firewall service

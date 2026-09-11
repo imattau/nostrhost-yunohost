@@ -26,7 +26,7 @@ from typing import IO, Any, Generator, NotRequired, TypedDict
 
 import psutil
 
-MOULINETTE_LOCK = Path("/var/run/moulinette_yunohost.lock")
+OPERATION_LOCK = Path("/var/run/nostrhost/locks/yunohost.lock")
 
 RUNDIR = Path("/var/run/yunohost")
 LOG_BROKER_BACKEND_ENDPOINT = f"ipc://{RUNDIR}/log_broker_backend"
@@ -229,8 +229,8 @@ def get_current_operation() -> (
     from ..log import _guess_who_started_process
 
     try:
-        pid = MOULINETTE_LOCK.read_text().split("\n")[0]
-        lock_mtime = MOULINETTE_LOCK.stat().st_mtime
+        pid = OPERATION_LOCK.read_text().split("\n")[0]
+        lock_mtime = OPERATION_LOCK.stat().st_mtime
     except FileNotFoundError:
         return None, None, None, None
 
