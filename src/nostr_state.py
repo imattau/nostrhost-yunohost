@@ -200,6 +200,10 @@ class Backend:
     def security(self) -> dict[str, Any]:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def notifications(self) -> dict[str, str]:  # pragma: no cover - interface
+        """Raw policy/recipients TOML (state/notifications/*), verbatim."""
+        raise NotImplementedError
+
     def users(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -374,6 +378,23 @@ class YunohostBackend(Backend):
         except (OSError, json.JSONDecodeError):
             return {"last_alert_id": 0, "last_event": None}
 
+    def notifications(self) -> dict[str, str]:
+        """Notification policy/recipients config (§18.6) — the same
+        ``state/notifications/{policy,recipients}.toml`` files
+        ``nostrhost-notify`` reads, preserved verbatim so the
+        ``[[recipient]]``/``[[rule]]`` table arrays round-trip exactly.
+        Including them in the tree makes the notify configuration
+        participate in state git history, backups and restore."""
+        out: dict[str, str] = {}
+        base = state_dir_from_env() / "notifications"
+        for name in ("policy", "recipients"):
+            path = base / f"{name}.toml"
+            try:
+                out[f"{name}.toml"] = path.read_text(encoding="utf-8")
+            except OSError as exc:  # noqa: BLE001 - best effort per file
+                logger.debug("notifications %s state unavailable: %s", name, exc)
+        return out
+
     def users(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         try:
@@ -400,14 +421,14 @@ class YunohostBackend(Backend):
             return {}
 
 
-def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = None) -> dict[str, dict[str, dict[str, Any]]]:
+def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = None) -> dict[str, dict[str, Any]]:
     """Compose the semantic state tree.
 
     ``capabilities`` maps subject pubkey -> granted scopes (the projected
     31100 grants from the operations engine); when absent (CLI/standalone
     use) the capabilities section is omitted rather than fabricated.
     """
-    tree: dict[str, dict[str, dict[str, Any]]] = {
+    tree: dict[str, dict[str, Any]] = {
         "system": {"host.toml": {"hostname": backend.hostname(), "os": backend.os(), "settings": backend.settings()}},
         "domains": {f"{name}.toml": data for name, data in backend.domains().items()},
         "apps": {f"{app}.toml": data for app, data in backend.apps().items()},
@@ -416,6 +437,7 @@ def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = N
         "identities": {f"{user}.toml": data for user, data in backend.users().items()},
         "package-versions": {"versions.toml": backend.packages()},
         "security": {"intrusion-protection.toml": backend.security()},
+        "notifications": backend.notifications(),
     }
     if capabilities:
         tree["capabilities"] = {

@@ -56,6 +56,9 @@ class FakeBackend:
     def security(self) -> dict:
         return {"scenarios": ["nostrhost-yunohost-auth-bf"], "collections": ["crowdsecurity/caddy"], "capi": {"enabled": False}, "bantime": "4h", "last_alert": {"last_alert_id": 0, "last_event": None}}
 
+    def notifications(self) -> dict:
+        return {"policy.toml": '[[rule]]\nrecipient = "npub1test"\nclasses = ["security"]\n', "recipients.toml": '[[recipient]]\nnpub = "npub1test"\nrole = "owner"\n'}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 
@@ -74,11 +77,26 @@ def test_export_state_renders_semantic_tree():
     assert tree["package-versions"]["versions.toml"]["yunohost"] == "12.1.41.2"
     assert tree["security"]["intrusion-protection.toml"]["scenarios"] == ["nostrhost-yunohost-auth-bf"]
     assert tree["security"]["intrusion-protection.toml"]["capi"] == {"enabled": False}
+    assert "[[rule]]" in tree["notifications"]["policy.toml"]
+    assert "[[recipient]]" in tree["notifications"]["recipients.toml"]
     caps = tree["capabilities"]
     assert list(caps) == ["abc" * 21 + "a.toml"]
     assert caps["abc" * 21 + "a.toml"]["scopes"] == ["server.read"]
     # no capabilities argument -> section omitted (never fabricated)
     assert "capabilities" not in export_state(FakeBackend())
+
+
+def test_notifications_rendered_verbatim_and_tracked(tmp_path: Path):
+    """state/notifications/* must survive the render/commit verbatim (raw
+    TOML, not re-serialized) so nostrhost-notify's go-toml still parses the
+    [[recipient]]/[[rule]] table arrays, and must be git-tracked."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="e" * 64, phase="post", known_good=True, health="passed")
+    written = (tmp_path / "state" / "notifications" / "policy.toml").read_text()
+    assert "[[rule]]" in written
+    assert "classes = [\"security\"]" in written
+    assert "notifications/policy.toml" in repo._git(["ls-files"])
+    assert "notifications/recipients.toml" in repo._git(["ls-files"])
 
 
 def test_state_repo_commit_history_known_good_and_diff(tmp_path: Path):

@@ -53,6 +53,12 @@ class FakeBackend:
     def certificates(self) -> dict:
         return {"nostrhost.test": {"CA_type": "letsencrypt", "validity_days": 60, "summary": "letsencrypt"}}
 
+    def security(self) -> dict:
+        return {"scenarios": ["nostrhost-yunohost-auth-bf"], "collections": [], "capi": {"enabled": False}, "bantime": "4h", "last_alert": {"last_alert_id": 0, "last_event": None}}
+
+    def notifications(self) -> dict:
+        return {"policy.toml": '[[rule]]\nrecipient = "npub1test"\nclasses = ["security"]\n', "recipients.toml": '[[recipient]]\nnpub = "npub1test"\nrole = "owner"\n'}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 
