@@ -53,6 +53,9 @@ class FakeBackend:
     def certificates(self) -> dict:
         return {"nostrhost.test": {"CA_type": "letsencrypt", "validity_days": 60, "summary": "letsencrypt"}}
 
+    def security(self) -> dict:
+        return {"scenarios": ["nostrhost-yunohost-auth-bf"], "collections": ["crowdsecurity/caddy"], "capi": {"enabled": False}, "bantime": "4h", "last_alert": {"last_alert_id": 0, "last_event": None}}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 
@@ -69,6 +72,8 @@ def test_export_state_renders_semantic_tree():
     assert tree["certificates"]["nostrhost.test.toml"]["summary"] == "letsencrypt"
     assert tree["identities"]["matt.toml"]["groups"] == ["all_users", "admins"]
     assert tree["package-versions"]["versions.toml"]["yunohost"] == "12.1.41.2"
+    assert tree["security"]["intrusion-protection.toml"]["scenarios"] == ["nostrhost-yunohost-auth-bf"]
+    assert tree["security"]["intrusion-protection.toml"]["capi"] == {"enabled": False}
     caps = tree["capabilities"]
     assert list(caps) == ["abc" * 21 + "a.toml"]
     assert caps["abc" * 21 + "a.toml"]["scopes"] == ["server.read"]

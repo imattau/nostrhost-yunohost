@@ -1,0 +1,13 @@
+"""nostr-securityd — CrowdSec security-event projector daemon (P5).
+
+Subscribes to the local CrowdSec LAPI (polling `cscli alerts list -o json`)
+and emits one coalesced kind-2213 `security` notice per banned source via the
+server key. Run as root. Config via /etc/nostrhost/security.toml or
+NOSTRHOST_SECURITY_CONFIG env var.
+"""
+from __future__ import annotations
+import sys
+from yunohost.nostr_security import run
+
+if __name__ == "__main__":
+    sys.exit(run())

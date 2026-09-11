@@ -197,6 +197,9 @@ class Backend:
     def certificates(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def security(self) -> dict[str, Any]:  # pragma: no cover - interface
+        raise NotImplementedError
+
     def users(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -313,6 +316,64 @@ class YunohostBackend(Backend):
             logger.warning("certificates export failed: %s", exc)
         return out
 
+    def security(self) -> dict[str, Any]:
+        """CrowdSec intrusion-protection state (CROWDSEC-MIGRATION P5).
+
+        Merges the PolicyProvider's scenario snapshot
+        (state/security/intrusion-protection.toml, P3) with live CrowdSec
+        facts: enabled hub collections, the CAPI opt-in state, the default
+        ban duration, and the projector's last-alert bookkeeping
+        (/var/lib/nostrhost/security.json). Best-effort per fact."""
+        import tomllib
+
+        out: dict[str, Any] = {}
+        try:
+            ip_file = Path("/var/lib/nostrhost/state/security/intrusion-protection.toml")
+            if ip_file.is_file():
+                out = tomllib.loads(ip_file.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("intrusion-protection state unavailable: %s", exc)
+
+        out["collections"] = sorted(
+            path.stem for path in Path("/etc/crowdsec/collections").glob("*.yaml") if path.is_file()
+        )
+        out["capi"] = {"enabled": self._capi_enabled()}
+        out["bantime"] = self._bantime()
+        out["last_alert"] = self._last_alert()
+        return out
+
+    @staticmethod
+    def _capi_enabled() -> bool:
+        """CAPI is off by default (§1): the `# no thanks` opt-out file (or no
+        file at all) means off; real credentials mean the admin opted in."""
+        try:
+            text = Path("/etc/crowdsec/online_api_credentials.yaml").read_text(encoding="utf-8")
+        except OSError:
+            return False
+        stripped = "".join(line.strip() for line in text.splitlines() if not line.strip().startswith("#"))
+        return "url:" in stripped and ("login:" in stripped or "password:" in stripped)
+
+    @staticmethod
+    def _bantime() -> str:
+        try:
+            import tomllib
+
+            profiles = tomllib.loads(Path("/etc/crowdsec/profiles.yaml").read_text(encoding="utf-8"))
+            for decision in profiles.get("decisions", []):
+                if decision.get("type") == "ban":
+                    return str(decision.get("duration", ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("bantime unavailable: %s", exc)
+        return ""
+
+    @staticmethod
+    def _last_alert() -> dict[str, Any]:
+        try:
+            data = json.loads(Path("/var/lib/nostrhost/security.json").read_text(encoding="utf-8"))
+            return {"last_alert_id": int(data.get("last_alert_id", 0)), "last_event": data.get("last_event")}
+        except (OSError, json.JSONDecodeError):
+            return {"last_alert_id": 0, "last_event": None}
+
     def users(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         try:
@@ -354,6 +415,7 @@ def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = N
         "certificates": {f"{domain}.toml": data for domain, data in backend.certificates().items()},
         "identities": {f"{user}.toml": data for user, data in backend.users().items()},
         "package-versions": {"versions.toml": backend.packages()},
+        "security": {"intrusion-protection.toml": backend.security()},
     }
     if capabilities:
         tree["capabilities"] = {

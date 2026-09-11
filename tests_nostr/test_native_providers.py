@@ -387,7 +387,10 @@ def test_build_web_route_reverse_proxy():
 
     route = build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "upstream": "127.0.0.1:8123", "auth": "none"})
     assert route["@id"] == "nostrhost-web:demo"
-    assert route["match"] == [{"host": ["example.test"]}, {"path": ["/demo/*"]}]
+    # host + path ANDed in a single matcher so the app route never shadows
+    # other /yunohost/* routes on the same domain (regression: separate
+    # match objects are OR'd in Caddy).
+    assert route["match"] == [{"host": ["example.test"], "path": ["/demo/*"]}]
     assert route["handle"] == [
         {"handler": "rewrite", "strip_path_prefix": "/demo"},
         {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8123"}]},
