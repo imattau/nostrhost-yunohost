@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +38,7 @@ from .nostr_identity import (
     _wait_auth_ok_async,
     default_auth,
 )
+from nostrhost_auth.identity.mappings import PubkeyAlreadyLinked
 
 logger = logging.getLogger("nostr-identityd")
 
@@ -126,9 +129,25 @@ def handle_identity_event(
                 logger.info("created compatibility account %s", username)
         if existing is not None:
             store.set_identity_enabled(existing.identity_id, existing.ynh_username, True)
-            logger.info("re-enabled identity %s for %s", d_tag[:16], existing.ynh_username)
+            store.update_identity_profile(
+                existing.identity_id,
+                existing.ynh_username,
+                signer_type=signer_type,
+                label=label,
+            )
+            logger.info(
+                "re-enabled identity %s for %s (signer=%s label=%r)",
+                d_tag[:16],
+                existing.ynh_username,
+                signer_type,
+                label,
+            )
         else:
-            store.add_identity(username, d_tag, signer_type=signer_type, label=label, linked_by="admin")
+            try:
+                store.add_identity(username, d_tag, signer_type=signer_type, label=label, linked_by="admin")
+            except PubkeyAlreadyLinked:
+                logger.warning("identity %s already linked to a different account; ignored", d_tag[:16])
+                return True
             logger.info("linked identity %s -> %s", d_tag[:16], username)
     else:
         if existing is not None:
@@ -142,6 +161,221 @@ def _d_tag(event: dict[str, Any]) -> str | None:
         if tag and tag[0] == "d" and len(tag) > 1:
             return tag[1]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# local control socket (privilege-separated self-service identity management)
+#
+# The portal-api service runs as the low-privilege ``ynh-portal`` user and must
+# not hold the root-only operator keys, but a user linking/revoking their own
+# Nostr identity needs the operator to author the kind-31102 definition event.
+# This UNIX socket (root:ynh-portal, 0660) is the boundary: the portal-api
+# does the user-visible verification (session + challenge signature) and this
+# daemon does the operator-signed publication, after re-validating that the
+# request is well-formed and that a revoke/rename targets the caller's own
+# identity. SO_PEERCRED restricts who may connect.
+
+CONTROL_SOCKET_DEFAULT = "/run/nostrhost/identity.sock"
+
+
+def _portal_uid() -> int | None:
+    """The ynh-portal uid, or None when the user does not exist yet."""
+    try:
+        import pwd
+
+        return pwd.getpwnam("ynh-portal").pw_uid
+    except (KeyError, ImportError):  # pragma: no cover - user is package-owned
+        return None
+
+
+def _portal_gid() -> int | None:
+    """The ynh-portal gid, or None when the user does not exist yet."""
+    try:
+        import pwd
+
+        return pwd.getpwnam("ynh-portal").pw_gid
+    except (KeyError, ImportError):  # pragma: no cover - user is package-owned
+        return None
+
+
+def _peer_uid(conn: Any) -> int | None:
+    """Best-effort SO_PEERCRED uid of the connecting peer (Linux)."""
+    import socket as _socket
+    import struct
+
+    try:
+        # SO_PEERCRED is a 12-byte struct {pid, uid, gid}; passing the length
+        # is required, otherwise getsockopt returns only the first field.
+        creds = conn.getsockopt(_socket.SOL_SOCKET, _socket.SO_PEERCRED, 12)
+        if isinstance(creds, bytes):
+            return struct.unpack("3i", creds)[1]
+        return creds.uid  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - non-Linux or sandboxed socket
+        return None
+
+
+def handle_control_request(
+    request: dict[str, Any],
+    *,
+    store: Any,
+    operator_sk: str,
+    control_relay: str,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Validate + author one identity-management request.
+
+    Returns a JSON-serialisable ``{"ok": bool, ...}`` dict. The operator
+    signing is delegated to ``link_identity``/``revoke_identity``; the
+    projector materialises the resulting kind-31102 events as usual.
+    """
+    from .nostr_identity import (
+        VALID_SIGNER_TYPES,
+        _parse_pubkey,
+        link_identity,
+        revoke_identity,
+    )
+
+    try:
+        action = request.get("action")
+        username = str(request.get("username") or "").strip()
+        if not username:
+            return {"ok": False, "error": "username is required"}
+
+        if action == "link":
+            try:
+                pubkey = _parse_pubkey(request.get("pubkey"))
+            except Exception:
+                return {"ok": False, "error": "pubkey is not a valid npub or hex pubkey"}
+            signer_type = str(request.get("signer_type") or "unknown")
+            if signer_type not in VALID_SIGNER_TYPES:
+                return {"ok": False, "error": f"signer_type must be one of {', '.join(VALID_SIGNER_TYPES)}"}
+            label = request.get("label")
+            existing = store.get_identity_by_pubkey(pubkey)
+            if existing is not None and existing.ynh_username != username:
+                return {"ok": False, "error": "that pubkey is already linked to a different account"}
+            event = link_identity(
+                username,
+                pubkey,
+                operator_sk=operator_sk,
+                control_relay=control_relay,
+                signer_type=signer_type,
+                label=label,
+                transport=transport,
+            )
+            return {"ok": True, "event_id": event["id"], "pubkey": pubkey}
+
+        if action in ("revoke", "rename"):
+            try:
+                pubkey = _parse_pubkey(request.get("pubkey"))
+            except Exception:
+                return {"ok": False, "error": "pubkey is not a valid npub or hex pubkey"}
+            identity = store.get_identity_by_pubkey(pubkey)
+            if identity is None or identity.ynh_username != username:
+                return {"ok": False, "error": "pubkey is not linked to this account"}
+            if action == "revoke":
+                event = revoke_identity(pubkey, operator_sk=operator_sk, control_relay=control_relay, transport=transport)
+                return {"ok": True, "event_id": event["id"], "pubkey": pubkey}
+            label = request.get("label")
+            if not isinstance(label, str) or not label.strip():
+                return {"ok": False, "error": "label is required"}
+            event = link_identity(
+                username,
+                pubkey,
+                operator_sk=operator_sk,
+                control_relay=control_relay,
+                signer_type=identity.signer_type,
+                label=label.strip(),
+                transport=transport,
+            )
+            return {"ok": True, "event_id": event["id"], "pubkey": pubkey}
+
+        if action == "unlink":
+            identities = store.list_by_username(username, include_disabled=False)
+            event_ids = []
+            for identity in identities:
+                event = revoke_identity(identity.pubkey, operator_sk=operator_sk, control_relay=control_relay, transport=transport)
+                event_ids.append(event["id"])
+            return {"ok": True, "event_ids": event_ids}
+
+        return {"ok": False, "error": f"unknown action {action!r}"}
+    except Exception as exc:  # noqa: BLE001 - the socket protocol is JSON-only
+        logger.error("identity control request failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def serve_control(
+    store: Any,
+    *,
+    operator_sk: str,
+    control_relay: str,
+    sock_path: str | Path | None = None,
+    stop: "threading.Event | None" = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> "threading.Thread":
+    """Serve the local identity-management control socket in a thread."""
+    import socket
+    import threading
+
+    sock_path = Path(sock_path or os.environ.get("NOSTRHOST_IDENTITY_SOCKET", CONTROL_SOCKET_DEFAULT))
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(sock_path.parent, 0o770)
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(8)
+    os.chmod(sock_path, 0o660)
+    portal_uid = _portal_uid()
+    portal_gid = _portal_gid()
+    if portal_uid is not None and portal_gid is not None:
+        # The portal-api service connects as ynh-portal: root owns the socket,
+        # the group grants connect access. Mirror nostrhost-bootstrap's
+        # portal.toml ownership (best-effort, the user is package-owned).
+        os.chown(sock_path.parent, 0, portal_gid)
+        os.chown(sock_path, 0, portal_gid)
+
+    def accept_loop() -> None:
+        allowed = [0]
+        if portal_uid is not None:
+            allowed.append(portal_uid)
+        while stop is None or not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:  # pragma: no cover - socket closed at shutdown
+                break
+            try:
+                peer = _peer_uid(conn)
+                if peer is not None and peer not in allowed:
+                    conn.sendall(b'{"ok": false, "error": "forbidden"}\n')
+                    conn.close()
+                    continue
+                conn.settimeout(10)
+                data = conn.recv(65536).decode("utf-8", "replace")
+                request = json.loads(data) if data.strip() else {}
+                if not isinstance(request, dict):
+                    request = {}
+                result = handle_control_request(
+                    request,
+                    store=store,
+                    operator_sk=operator_sk,
+                    control_relay=control_relay,
+                    transport=transport,
+                )
+                conn.sendall((json.dumps(result) + "\n").encode())
+            except Exception as exc:  # noqa: BLE001 - keep the socket alive
+                try:
+                    conn.sendall((json.dumps({"ok": False, "error": str(exc)}) + "\n").encode())
+                except Exception:  # pragma: no cover - peer already gone
+                    pass
+            finally:
+                conn.close()
+
+    thread = threading.Thread(target=accept_loop, daemon=True, name="identity-control")
+    thread.start()
+    return thread
 
 
 async def subscribe_loop(
@@ -218,6 +452,14 @@ def run() -> None:
     cfg = _operator_config()
     store = _store()
     accounts: AccountBackend = YnhAccountBackend()
+    stop = threading.Event()
+    serve_control(
+        store,
+        operator_sk=cfg.operator_sk,
+        control_relay=cfg.control_relay,
+        stop=stop,
+    )
+    logger.info("identity control socket ready at %s", CONTROL_SOCKET_DEFAULT)
     try:
         asyncio.run(
             subscribe_loop(
@@ -229,3 +471,5 @@ def run() -> None:
         )
     except KeyboardInterrupt:
         pass
+    finally:
+        stop.set()

@@ -117,11 +117,25 @@ def portalapi(debug: bool, host: str, port: int) -> NoReturn:
     # default authenticator; only challenge/login are public by design.
     from .nostr_login import auth_request_route, challenge_route, login_route
     from .nostr_oidc import authorize, discovery, jwks, token, userinfo
+    from .nostr_account import (
+        identities_route,
+        link_challenge_route,
+        link_route,
+        rename_route,
+        revoke_route,
+        unlink_route,
+    )
 
     nostr_routes = {
         ("GET", "/nostr/challenge"): challenge_route,
         ("POST", "/nostr/login"): login_route,
         ("GET", "/nostr/auth-request"): auth_request_route,
+        ("GET", "/nostr/identities"): identities_route,
+        ("POST", "/nostr/link/challenge"): link_challenge_route,
+        ("POST", "/nostr/link"): link_route,
+        ("POST", "/nostr/identities/revoke"): revoke_route,
+        ("POST", "/nostr/identities/rename"): rename_route,
+        ("POST", "/nostr/unlink"): unlink_route,
         ("GET", "/.well-known/openid-configuration"): discovery,
         ("GET", "/oidc/authorize"): authorize,
         ("POST", "/oidc/token"): token,

@@ -164,6 +164,15 @@ def resolve_username(username: str, *, db_path: str | Path | None = None) -> lis
     return [_to_identity(r) for r in _store(db_path).list_by_username(username) if r.enabled]
 
 
+def list_identities_for_username(username: str, *, db_path: str | Path | None = None) -> list[Identity]:
+    """List every identity linked to a YunoHost account, including revoked.
+
+    The account page uses this so a user can see (and re-link via replace) an
+    identity that was revoked, rather than it silently disappearing.
+    """
+    return [_to_identity(r) for r in _store(db_path).list_by_username(username)]
+
+
 def list_identities(*, db_path: str | Path | None = None) -> list[Identity]:
     """List all identities (including revoked)."""
     return [_to_identity(r) for r in _store(db_path).list_all()]
