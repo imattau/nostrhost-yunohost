@@ -26,7 +26,8 @@ from difflib import SequenceMatcher
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
 
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from .domain import (
     _assert_domain_exists,
@@ -63,7 +64,7 @@ def domain_dns_suggest(domain: str) -> str:
     """
 
     if is_special_use_tld(domain):
-        return m18n.n("domain_dns_conf_special_use_tld")
+        return tr("domain_dns_conf_special_use_tld")
 
     _assert_domain_exists(domain)
 
@@ -98,7 +99,7 @@ def domain_dns_suggest(domain: str) -> str:
 
     if Moulinette.interface.type == "cli":
         # FIXME Update this to point to our "dns push" doc
-        logger.info(m18n.n("domain_dns_conf_is_just_a_recommendation"))
+        logger.info(tr("domain_dns_conf_is_just_a_recommendation"))
 
     return result
 
@@ -474,7 +475,7 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
 
     registrar_infos = OrderedDict(
         {
-            "name": m18n.n(
+            "name": tr(
                 "registrar_infos"
             ),  # This is meant to name the config panel section, for proper display in the webadmin
             "registrar": OrderedDict(
@@ -505,7 +506,7 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
             parent_domain_link = parent_domain
 
         registrar_infos["registrar"]["default"] = "parent_domain"
-        registrar_infos["infos"]["ask"] = m18n.n(
+        registrar_infos["infos"]["ask"] = tr(
             "domain_dns_registrar_managed_in_parent_domain",
             parent_domain=parent_domain,
             parent_domain_link=parent_domain_link,
@@ -517,11 +518,11 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
     if is_yunohost_dyndns_domain(dns_zone):
         registrar_infos["registrar"]["default"] = "yunohost"
         registrar_infos["infos"]["style"] = "success"
-        registrar_infos["infos"]["ask"] = m18n.n("domain_dns_registrar_yunohost")
+        registrar_infos["infos"]["ask"] = tr("domain_dns_registrar_yunohost")
         registrar_infos["recovery_password"] = OrderedDict(
             {
                 "type": "password",
-                "ask": m18n.n("ask_dyndns_recovery_password"),
+                "ask": tr("ask_dyndns_recovery_password"),
                 "default": "",
             }
         )
@@ -529,7 +530,7 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
         return registrar_infos
 
     elif is_special_use_tld(dns_zone):
-        registrar_infos["infos"]["ask"] = m18n.n("domain_dns_conf_special_use_tld")
+        registrar_infos["infos"]["ask"] = tr("domain_dns_conf_special_use_tld")
 
         return registrar_infos
 
@@ -537,11 +538,11 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
         registrar = _relevant_provider_for_domain(dns_zone)[0]
     except ValueError:
         registrar_infos["registrar"]["default"] = None
-        registrar_infos["infos"]["ask"] = m18n.n("domain_dns_registrar_not_supported")
+        registrar_infos["infos"]["ask"] = tr("domain_dns_registrar_not_supported")
         registrar_infos["infos"]["style"] = "warning"
     else:
         registrar_infos["registrar"]["default"] = registrar
-        registrar_infos["infos"]["ask"] = m18n.n(
+        registrar_infos["infos"]["ask"] = tr(
             "domain_dns_registrar_supported", registrar=registrar
         )
 
@@ -551,7 +552,7 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
                 {
                     "type": "alert",
                     "style": "danger",
-                    "ask": m18n.n(
+                    "ask": tr(
                         "domain_dns_registrar_experimental", registrar=registrar
                     ),
                 }
@@ -568,7 +569,7 @@ def _get_registrar_config_section(domain: str) -> OrderedDict[str, Any]:
         else:
             registrar_infos["use_auto_dns"] = {
                 "type": "boolean",
-                "ask": m18n.n("domain_dns_registrar_use_auto"),
+                "ask": tr("domain_dns_registrar_use_auto"),
                 "default": True,
             }
         for credential, infos in registrar_credentials.items():
@@ -919,7 +920,7 @@ def domain_dns_push(
     progress.total = len(changes["delete"] + changes["create"] + changes["update"])  # type: ignore[attr-defined]
 
     if progress.total == 0:  # type: ignore[attr-defined]
-        logger.success(m18n.n("domain_dns_push_already_up_to_date"))
+        logger.success(tr("domain_dns_push_already_up_to_date"))
         return {}
 
     #
@@ -927,7 +928,7 @@ def domain_dns_push(
     #
 
     operation_logger.start()
-    logger.info(m18n.n("domain_dns_pushing"))
+    logger.info(tr("domain_dns_pushing"))
 
     new_managed_dns_records_hashes = [_hash_dns_record(r) for r in changes["unchanged"]]
     results: dict[Literal["warnings", "errors"], list[str]] = {
@@ -975,7 +976,7 @@ def domain_dns_push(
             try:
                 result = LexiconClient(query).execute()
             except Exception as e:
-                msg = m18n.n(
+                msg = tr(
                     "domain_dns_push_record_failed",
                     action=action,
                     type=record["type"],
@@ -988,7 +989,7 @@ def domain_dns_push(
                 if result:
                     new_managed_dns_records_hashes.append(_hash_dns_record(record))
                 else:
-                    msg = m18n.n(
+                    msg = tr(
                         "domain_dns_push_record_failed",
                         action=action,
                         type=record["type"],
@@ -1004,13 +1005,13 @@ def domain_dns_push(
 
     # Everything succeeded
     if len(results["errors"]) + len(results["warnings"]) == 0:
-        logger.success(m18n.n("domain_dns_push_success"))
+        logger.success(tr("domain_dns_push_success"))
         return {}
     # Everything failed
     elif len(results["errors"]) + len(results["warnings"]) == progress_total:
-        logger.error(m18n.n("domain_dns_push_failed"))
+        logger.error(tr("domain_dns_push_failed"))
     else:
-        logger.warning(m18n.n("domain_dns_push_partial_failure"))
+        logger.warning(tr("domain_dns_push_partial_failure"))
 
     return results
 

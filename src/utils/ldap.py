@@ -29,8 +29,8 @@ import ldap
 import ldap.modlist as modlist
 import ldap.sasl
 from ldap.ldapobject import LDAPObject, ReconnectLDAPObject
-from moulinette import m18n
-from moulinette.core import MoulinetteError
+from nostrhost.i18n import tr
+from nostrhost.core import NostrHostError
 
 from ..utils.error import YunohostError
 
@@ -156,7 +156,7 @@ class LDAPInterface:
             con = _reconnect()
         except ldap.SERVER_DOWN:
             # ldap is down, attempt to restart it before really failing
-            logger.warning(m18n.n("ldap_server_is_down_restart_it"))
+            logger.warning(tr("ldap_server_is_down_restart_it"))
             os.system("systemctl restart slapd")
             time.sleep(10)  # waits 10 secondes so we are sure that slapd has restarted
             try:
@@ -177,7 +177,7 @@ class LDAPInterface:
             raise
         else:
             if who != self.userdn:
-                raise MoulinetteError("Not logged in with the expected userdn ?!")
+                raise NostrHostError("Not logged in with the expected userdn ?!")
             else:
                 self.con = con
 
@@ -216,7 +216,7 @@ class LDAPInterface:
         except ldap.SERVER_DOWN as e:
             raise e
         except Exception as e:
-            raise MoulinetteError(
+            raise NostrHostError(
                 "error during LDAP search operation with: base='%s', "
                 "filter='%s', attrs=%s and exception %s" % (base, filter, attrs, e),
                 raw_msg=True,
@@ -255,7 +255,7 @@ class LDAPInterface:
             attr_dict   -- Dictionnary of attributes/values to add
 
         Returns:
-            Boolean | MoulinetteError
+            Boolean | NostrHostError
 
         """
         dn = f"{rdn},{self.BASEDN}"
@@ -270,7 +270,7 @@ class LDAPInterface:
         try:
             self.con.add_s(dn, ldif)
         except Exception as e:
-            raise MoulinetteError(
+            raise NostrHostError(
                 "error during LDAP add operation with: rdn='%s', "
                 "attr_dict=%s and exception %s" % (rdn, attr_dict, e),
                 raw_msg=True,
@@ -286,14 +286,14 @@ class LDAPInterface:
             rdn         -- DN without domain
 
         Returns:
-            Boolean | MoulinetteError
+            Boolean | NostrHostError
 
         """
         dn = f"{rdn},{self.BASEDN}"
         try:
             self.con.delete_s(dn)
         except Exception as e:
-            raise MoulinetteError(
+            raise NostrHostError(
                 "error during LDAP delete operation with: rdn='%s' and exception %s"
                 % (rdn, e),
                 raw_msg=True,
@@ -316,7 +316,7 @@ class LDAPInterface:
             new_rdn     -- New RDN for modification
 
         Returns:
-            Boolean | MoulinetteError
+            Boolean | NostrHostError
 
         """
         dn = f"{rdn},{self.BASEDN}"
@@ -356,7 +356,7 @@ class LDAPInterface:
 
             self.con.modify_ext_s(dn, encoded_ldif)
         except Exception as e:
-            raise MoulinetteError(
+            raise NostrHostError(
                 "Error during LDAP update operation:\n"
                 f" rdn: {rdn}\n"
                 f" attr_dict: {attr_dict}\n"
@@ -376,7 +376,7 @@ class LDAPInterface:
             value_dict -- Dictionnary of attributes/values to check
 
         Returns:
-            Boolean | MoulinetteError
+            Boolean | NostrHostError
 
         """
         attr_found = self.get_conflict(value_dict)

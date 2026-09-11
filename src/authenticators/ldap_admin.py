@@ -30,8 +30,8 @@ from typing import Any, Literal
 import jwt
 import ldap
 import ldap.sasl
-from moulinette import m18n
-from moulinette.authentication import BaseAuthenticator
+from nostrhost.i18n import tr
+from nostrhost.auth.authenticator import BaseAuthenticator
 
 from ..utils.error import YunohostAuthenticationError, YunohostError
 from ..utils.ldap import _get_ldap_interface
@@ -78,7 +78,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
             )
         except ldap.SERVER_DOWN:
             # ldap is down, attempt to restart it before really failing
-            logger.warning(m18n.n("ldap_server_is_down_restart_it"))
+            logger.warning(tr("ldap_server_is_down_restart_it"))
             os.system("systemctl restart slapd")
             time.sleep(10)  # waits 10 secondes so we are sure that slapd has restarted
 
@@ -124,7 +124,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
             raise YunohostError("invalid_credentials")
         except ldap.SERVER_DOWN:
             # ldap is down, attempt to restart it before really failing
-            logger.warning(m18n.n("ldap_server_is_down_restart_it"))
+            logger.warning(tr("ldap_server_is_down_restart_it"))
             os.system("systemctl restart slapd")
             time.sleep(10)  # waits 10 secondes so we are sure that slapd has restarted
 

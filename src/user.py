@@ -41,7 +41,8 @@ from typing import (
     cast,
 )
 
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from .log import is_flash_unit_operation, is_unit_operation
 from .service import service_status
@@ -207,13 +208,13 @@ def user_create(
             )
         else:
             # On affiche les differents domaines possibles
-            Moulinette.display(m18n.n("domains_available"))
+            Moulinette.display(tr("domains_available"))
             for domain in domain_list()["domains"]:
                 Moulinette.display(f"- {domain}")
 
             maindomain = _get_maindomain()
             domain = Moulinette.prompt(
-                m18n.n("ask_user_domain") + f" (default: {maindomain})"
+                tr("ask_user_domain") + f" (default: {maindomain})"
             )
             if not domain:
                 domain = maindomain
@@ -303,7 +304,7 @@ def user_create(
         home = f"/home/{username}"
         if not os.path.isdir(home):
             logger.warning(
-                m18n.n("user_home_creation_failed", home=home), exc_info=True
+                tr("user_home_creation_failed", home=home), exc_info=True
             )
 
     try:
@@ -331,7 +332,7 @@ def user_create(
 
     # TODO: Send a welcome mail to user
     if not from_import:
-        logger.success(m18n.n("user_created"))
+        logger.success(tr("user_created"))
 
     return {"fullname": fullname, "username": username, "mail": mail}
 
@@ -410,7 +411,7 @@ def user_delete(
     hook_callback("post_user_delete", args=[username, purge])
 
     if not from_import:
-        logger.success(m18n.n("user_deleted"))
+        logger.success(tr("user_deleted"))
 
 
 @is_unit_operation([("username", "user")], exclude=["change_password"])
@@ -493,7 +494,7 @@ def user_update(
             change_password = cast(
                 str,
                 Moulinette.prompt(
-                    m18n.n("ask_password"), is_password=True, confirm=True
+                    tr("ask_password"), is_password=True, confirm=True
                 ),
             )
 
@@ -616,7 +617,7 @@ def user_update(
 
     if not from_import:
         app_ssowatconf()
-        logger.success(m18n.n("user_updated"))
+        logger.success(tr("user_updated"))
         return user_info(username)
 
 
@@ -681,9 +682,9 @@ def user_info(username: str) -> UserInfos:
         storage_use = "?"
 
         if service_status("dovecot")["status"] != "running":
-            logger.warning(m18n.n("mailbox_used_space_dovecot_down"))
+            logger.warning(tr("mailbox_used_space_dovecot_down"))
         elif username not in user_permission_info("mail.main")["corresponding_users"]:
-            logger.debug(m18n.n("mailbox_disabled", user=username))
+            logger.debug(tr("mailbox_disabled", user=username))
         else:
             try:
                 uid_ = user["uid"][0]
@@ -709,7 +710,7 @@ def user_info(username: str) -> UserInfos:
                         storage_use += " (%s%%)" % percentage
 
         result_dict["mailbox-quota"] = {
-            "limit": userquota if is_limited else m18n.n("unlimit"),
+            "limit": userquota if is_limited else tr("unlimit"),
             "use": storage_use,
         }
 
@@ -848,7 +849,7 @@ def user_import(
 
         if format_errors:
             logger.error(
-                m18n.n(
+                tr(
                     "user_import_bad_line",
                     line=reader.line_num,
                     details=", ".join(format_errors),
@@ -888,7 +889,7 @@ def user_import(
     total = len(actions["created"] + actions["updated"] + actions["deleted"])
 
     if total == 0:
-        logger.info(m18n.n("user_import_nothing_to_do"))
+        logger.info(tr("user_import_nothing_to_do"))
         return {}
 
     # Apply creation, update and deletion operation
@@ -914,7 +915,7 @@ def user_import(
             logger.warning(
                 user
                 + ": "
-                + m18n.n("user_import_cannot_edit_or_delete_admins", user=user)
+                + tr("user_import_cannot_edit_or_delete_admins", user=user)
             )
         else:
             result["errors"] += 1
@@ -1022,13 +1023,13 @@ def user_import(
     app_ssowatconf()
 
     if result["errors"]:
-        msg = m18n.n("user_import_partial_failed")
+        msg = tr("user_import_partial_failed")
         if result["created"] + result["updated"] + result["deleted"] == 0:
-            msg = m18n.n("user_import_failed")
+            msg = tr("user_import_failed")
         logger.error(msg)
         operation_logger.error(msg)
     else:
-        logger.success(m18n.n("user_import_success"))
+        logger.success(tr("user_import_success"))
         operation_logger.success()
     return result
 
@@ -1122,7 +1123,7 @@ def user_group_create(
     if groupname in all_existing_groupnames:
         if primary_group:
             logger.warning(
-                m18n.n("group_already_exist_on_system_but_removing_it", group=groupname)
+                tr("group_already_exist_on_system_but_removing_it", group=groupname)
             )
             subprocess.check_call(
                 ["sed", "--in-place", f"/^{groupname}:/d", "/etc/group"]
@@ -1165,9 +1166,9 @@ def user_group_create(
         _sync_permissions_with_ldap()
 
     if not primary_group:
-        logger.success(m18n.n("group_created", group=groupname))
+        logger.success(tr("group_created", group=groupname))
     else:
-        logger.debug(m18n.n("group_created", group=groupname))
+        logger.debug(tr("group_created", group=groupname))
 
     return {"name": groupname}
 
@@ -1213,9 +1214,9 @@ def user_group_delete(
         _sync_permissions_with_ldap()
 
     if groupname not in existing_users:
-        logger.success(m18n.n("group_deleted", group=groupname))
+        logger.success(tr("group_deleted", group=groupname))
     else:
-        logger.debug(m18n.n("group_deleted", group=groupname))
+        logger.debug(tr("group_deleted", group=groupname))
 
 
 @is_unit_operation([("groupname", "group")])
@@ -1295,11 +1296,11 @@ def user_group_update(
 
             if user in current_group_members:
                 logger.warning(
-                    m18n.n("group_user_already_in_group", user=user, group=groupname)
+                    tr("group_user_already_in_group", user=user, group=groupname)
                 )
             else:
                 operation_logger.related_to.append(("user", user))
-                logger.info(m18n.n("group_user_add", group=groupname, user=user))
+                logger.info(tr("group_user_add", group=groupname, user=user))
 
         new_group_members += users_to_add
 
@@ -1309,11 +1310,11 @@ def user_group_update(
         for user in users_to_remove:
             if user not in current_group_members:
                 logger.warning(
-                    m18n.n("group_user_not_in_group", user=user, group=groupname)
+                    tr("group_user_not_in_group", user=user, group=groupname)
                 )
             else:
                 operation_logger.related_to.append(("user", user))
-                logger.info(m18n.n("group_user_remove", group=groupname, user=user))
+                logger.info(tr("group_user_remove", group=groupname, user=user))
 
         # Remove users_to_remove from new_group_members
         # Kinda like a new_group_members -= users_to_remove
@@ -1349,7 +1350,7 @@ def user_group_update(
                     "mail_domain_unknown", domain=mail[mail.find("@") + 1 :]
                 )
             new_group_mail.append(mail)
-            logger.info(m18n.n("group_mailalias_add", group=groupname, mail=mail))
+            logger.info(tr("group_mailalias_add", group=groupname, mail=mail))
 
     if remove_mailalias:
         from .domain import _get_maindomain
@@ -1370,13 +1371,13 @@ def user_group_update(
             if mail in new_group_mail:
                 new_group_mail.remove(mail)
                 logger.info(
-                    m18n.n("group_mailalias_remove", group=groupname, mail=mail)
+                    tr("group_mailalias_remove", group=groupname, mail=mail)
                 )
             else:
                 raise YunohostValidationError("mail_alias_remove_failed", mail=mail)
 
     if set(new_group_mail) != set(current_group_mail):
-        logger.info(m18n.n("group_update_aliases", group=groupname))
+        logger.info(tr("group_update_aliases", group=groupname))
         new_attr_dict["mail"] = list(set(new_group_mail))
 
         if new_attr_dict["mail"]:
@@ -1428,11 +1429,11 @@ def user_group_update(
     if not from_import:
         if groupname != "all_users":
             if not new_attr_dict:
-                logger.info(m18n.n("group_no_change", group=groupname))
+                logger.info(tr("group_no_change", group=groupname))
             else:
-                logger.success(m18n.n("group_updated", group=groupname))
+                logger.success(tr("group_updated", group=groupname))
         else:
-            logger.debug(m18n.n("group_updated", group=groupname))
+            logger.debug(tr("group_updated", group=groupname))
 
         return user_group_info(groupname)
 
@@ -1579,7 +1580,7 @@ def user_permission_update(
 
     app_ssowatconf()
 
-    logger.success(m18n.n("permission_updated", permission=permission))
+    logger.success(tr("permission_updated", permission=permission))
 
     app_permissions = app_setting(app, "_permissions") or {}
     assert isinstance(app_permissions, dict)

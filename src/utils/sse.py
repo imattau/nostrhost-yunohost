@@ -129,7 +129,7 @@ class SSELogStreamingHandler(logging.Handler):
         self.log_stream_cache: IO[str] | None
 
         import zmq
-        from moulinette import Moulinette
+        from nostrhost.core import Moulinette
 
         from ..log import OPERATIONS_PATH
 

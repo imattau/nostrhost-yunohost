@@ -23,7 +23,7 @@ import subprocess
 import time
 from logging import getLogger
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from ..tools import Migration
 from ..utils.error import YunohostError, YunohostValidationError
@@ -50,7 +50,7 @@ class PostgreSQLMigration(Migration):
             return
 
         if not self.package_is_installed(f"postgresql-{self.previous_version}"):
-            logger.warning(m18n.n("migration_postgresql_previous_not_installed"))
+            logger.warning(tr("migration_postgresql_previous_not_installed"))
             return
 
         if not self.package_is_installed(f"postgresql-{self.target_version}"):

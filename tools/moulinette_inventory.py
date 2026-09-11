@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -82,6 +81,16 @@ def scan(src: Path) -> dict:
 
         rel = str(path.relative_to(src))
         imports = [line.strip() for line in text.splitlines() if IMPORT_RE.match(line)]
+
+        # After Stage 2 the only remaining coupling is the quarantined import
+        # lines themselves (the framework entry in src/__init__.py and the
+        # error bridge).  Files with no moulinette import but only a docstring
+        # mention (or a native ``nostrhost.core.Moulinette`` reference) are not
+        # coupling anymore, so skip them and only count symbols inside files
+        # that still import moulinette.
+        if not imports:
+            continue
+
         hits = CALL_RE.findall(text)
         norm_hits = [h.rstrip("(") for h in hits]
         entry = {

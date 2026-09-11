@@ -27,7 +27,8 @@ from datetime import date
 from time import sleep
 
 import _ldap  # noqa: F401
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from ..app import app_list
 from ..regenconf import manually_modified_files, regen_conf
@@ -46,7 +47,7 @@ from ..utils.system import (
 # we use this try/except to make it agnostic wether or not we're on 11.x or 12.x
 # otherwise this may trigger stupid issues
 try:
-    from moulinette.utils.log import getActionLogger
+    from nostrhost.logging import getActionLogger
 
     logger = getActionLogger("yunohost.migration")
 except ImportError:
@@ -130,7 +131,7 @@ class MyMigration(Migration):
     def run(self):
         self.check_assertions()
 
-        logger.info(m18n.n("migration_0027_start"))
+        logger.info(tr("migration_0027_start"))
 
         #
         # Add new apt .deb signing key
@@ -152,7 +153,7 @@ class MyMigration(Migration):
         # Patch sources.list
         #
 
-        logger.info(m18n.n("migration_0027_patching_sources_list"))
+        logger.info(tr("migration_0027_patching_sources_list"))
         self.patch_apt_sources_list()
 
         #
@@ -194,7 +195,7 @@ class MyMigration(Migration):
         #
         # Patch yunohost conflicts
         #
-        logger.info(m18n.n("migration_0027_patch_yunohost_conflicts"))
+        logger.info(tr("migration_0027_patch_yunohost_conflicts"))
 
         self.patch_yunohost_conflicts()
 
@@ -215,7 +216,7 @@ class MyMigration(Migration):
         #
         # Main upgrade
         #
-        logger.info(m18n.n("migration_0027_main_upgrade"))
+        logger.info(tr("migration_0027_main_upgrade"))
 
         # Mark php, mariadb, metronome and rspamd as "auto" so that they may be uninstalled if they ain't explicitly wanted by app or admins
         php_packages = self.get_php_packages()
@@ -261,7 +262,7 @@ class MyMigration(Migration):
             raise YunohostError("migration_0027_still_on_bullseye_after_main_upgrade")
 
         # Clean the mess
-        logger.info(m18n.n("migration_0027_cleaning_up"))
+        logger.info(tr("migration_0027_cleaning_up"))
         os.system(
             "LC_ALL=C DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none apt autoremove --assume-yes"
         )
@@ -280,7 +281,7 @@ class MyMigration(Migration):
         #
         # Yunohost upgrade
         #
-        logger.info(m18n.n("migration_0027_yunohost_upgrade"))
+        logger.info(tr("migration_0027_yunohost_upgrade"))
         aptitude_with_progress_bar("unhold yunohost moulinette ssowat yunohost-admin")
 
         full_upgrade_cmd = (
@@ -316,7 +317,7 @@ class MyMigration(Migration):
 
         # If running from the webadmin, restart the API after a delay
         if Moulinette.interface.type == "api":
-            logger.warning(m18n.n("migration_0027_delayed_api_restart"))
+            logger.warning(tr("migration_0027_delayed_api_restart"))
             sleep(5)
             # Restart the API after 10 sec (at now doesn't support sub-minute times...)
             # We do this so that the API / webadmin still gets the proper HTTP response
@@ -429,7 +430,7 @@ class MyMigration(Migration):
         modified_files = manually_modified_files()
         modified_files = "".join(["\n    - " + f for f in modified_files])
 
-        message = m18n.n("migration_0027_general_warning")
+        message = tr("migration_0027_general_warning")
 
         message = (
             (
@@ -446,13 +447,13 @@ class MyMigration(Migration):
         )
 
         if problematic_apps:
-            message += "\n\n" + m18n.n(
+            message += "\n\n" + tr(
                 "migration_0027_problematic_apps_warning",
                 problematic_apps=problematic_apps,
             )
 
         if modified_files:
-            message += "\n\n" + m18n.n(
+            message += "\n\n" + tr(
                 "migration_0027_modified_files", manually_modified_files=modified_files
             )
 

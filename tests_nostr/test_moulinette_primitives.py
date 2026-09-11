@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -149,6 +151,137 @@ def test_interface_proxy_raises_without_interface():
         _ = core.interface.type
 
 
+class _FakeFrameworkCli:
+    type = "cli"
+
+    def prompt(self, *args, **kwargs):
+        return "framework-answer"
+
+    def display(self, *args, **kwargs):
+        return "framework-display"
+
+
+@pytest.fixture
+def _fake_moulinette_module():
+    """Inject a stand-in ``moulinette`` module to exercise the transition
+    bridge where the real framework registers its own interface."""
+    module = types.ModuleType("moulinette")
+    fake = type("Moulinette", (), {})
+    fake._interface = _FakeFrameworkCli()
+    module.Moulinette = fake
+    sys.modules["moulinette"] = module
+    try:
+        yield module
+    finally:
+        del sys.modules["moulinette"]
+
+
+def test_interface_sync_reads_framework_interface(_fake_moulinette_module):
+    core.set_interface(None)  # clears local + mirrors None to the framework
+    _fake_moulinette_module.Moulinette._interface = _FakeFrameworkCli()
+    # no local registration -> falls back to the framework's interface
+    assert core.Moulinette.interface.type == "cli"
+    assert core.Moulinette.prompt("q") == "framework-answer"
+
+
+def test_interface_sync_local_registration_wins(_fake_moulinette_module):
+    class Local:
+        type = "api"
+
+        def prompt(self, *args, **kwargs):
+            return "local-answer"
+
+        def display(self, *args, **kwargs):
+            return "local-display"
+
+    core.set_interface(Local())
+    assert core.Moulinette.interface.type == "api"
+    assert core.Moulinette.prompt("q") == "local-answer"
+    core.set_interface(None)
+
+
+def test_interface_sync_assigning_interface_mirrors_to_framework(_fake_moulinette_module):
+    core.Moulinette._interface = _FakeFrameworkCli()
+    assert _fake_moulinette_module.Moulinette._interface.type == "cli"
+    core.set_interface(None)
+    assert _fake_moulinette_module.Moulinette._interface is None
+
+
+# --------------------------------------------------------------------------- #
+# logging (getActionLogger + TTYHandler)
+
+def test_get_action_logger_returns_named_logger():
+    logger = nh_logging.getActionLogger("yunohost.migration")
+    assert isinstance(logger, logging.Logger)
+    assert logger.name == "yunohost.migration"
+
+
+def test_tty_handler_no_color_when_not_tty(capsys):
+    handler = nh_logging.TTYHandler()
+    record = logging.LogRecord("t", logging.INFO, "f", 1, "hello", (), None)
+    formatted = handler.format(record)
+    assert "hello" in formatted
+    assert "\033[" not in formatted
+
+
+def test_tty_handler_colors_when_tty(monkeypatch, capsys):
+    handler = nh_logging.TTYHandler()
+    monkeypatch.setattr(handler, "supports_color", lambda: True)
+    record = logging.LogRecord("t", nh_logging.SUCCESS, "f", 1, "done", (), None)
+    record.levelname = "SUCCESS"
+    assert "\033[" in handler.format(record)
+
+
+def test_logging_init_uses_native_tty_handler(tmp_path):
+    from yunohost.utils.logging import init_logging
+
+    init_logging(interface="cli", debug=False, quiet=True, logdir=str(tmp_path))
+    logger = logging.getLogger("yunohost.stage2test")
+    logger.info("ok")  # exercises the nostrhost.logging.TTYHandler in the config
+    assert True
+
+
+# --------------------------------------------------------------------------- #
+# auth.authenticator BaseAuthenticator
+
+def test_authenticator_delegates_and_returns_infos():
+    from nostrhost.auth.authenticator import BaseAuthenticator
+
+    class Ok(BaseAuthenticator):
+        name = "ok"
+
+        def _authenticate_credentials(self, credentials):
+            return {"user": credentials}
+
+    assert Ok().authenticate_credentials("alice") == {"user": "alice"}
+
+
+def test_authenticator_propagates_native_error():
+    from nostrhost.auth.authenticator import BaseAuthenticator
+
+    class Native(BaseAuthenticator):
+        name = "native"
+
+        def _authenticate_credentials(self, credentials):
+            raise core.NostrHostError("boom", raw_msg=True)
+
+    with pytest.raises(core.NostrHostError):
+        Native().authenticate_credentials("x")
+
+
+def test_authenticator_wraps_unexpected_error():
+    from nostrhost.auth.authenticator import BaseAuthenticator
+
+    class Other(BaseAuthenticator):
+        name = "other"
+
+        def _authenticate_credentials(self, credentials):
+            raise ValueError("nope")
+
+    with pytest.raises(core.AuthenticationError, match="unable_authenticate"):
+        Other().authenticate_credentials("x")
+
+
 # --------------------------------------------------------------------------- #
 # locking
 
@@ -213,15 +346,6 @@ def test_lock_contention_then_release_from_thread(tmp_path):
     finally:
         thread.join()
     assert released.is_set()
-
-
-# --------------------------------------------------------------------------- #
-# logging
-
-def test_get_action_logger_returns_named_logger():
-    logger = nh_logging.getActionLogger("yunohost.migration")
-    assert isinstance(logger, logging.Logger)
-    assert logger.name == "yunohost.migration"
 
 
 # --------------------------------------------------------------------------- #

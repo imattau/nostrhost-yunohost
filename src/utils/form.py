@@ -43,8 +43,8 @@ from typing import (
     overload,
 )
 
-from moulinette import Moulinette, m18n
-from moulinette.interfaces.cli import colorize
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr, key_exists, colorize
 from pydantic import (
     BaseModel,
     Extra,
@@ -406,7 +406,7 @@ class BaseOption(BaseModel):
     @validator("id", pre=True)
     def check_id_is_not_forbidden(cls, value: str) -> str:
         if value in FORBIDDEN_KEYWORDS:
-            raise ValueError(m18n.n("config_forbidden_keyword", keyword=value))
+            raise ValueError(tr("config_forbidden_keyword", keyword=value))
         return value
 
     # FIXME Legacy, is `name` still needed?
@@ -420,7 +420,7 @@ class BaseOption(BaseModel):
     def can_be_readonly(cls, value: bool, values: Values) -> bool:
         if value is True and values["type"] in FORBIDDEN_READONLY_TYPES:
             raise ValueError(
-                m18n.n(
+                tr(
                     "config_forbidden_readonly_type",
                     type=values["type"],
                     id=values["id"],
@@ -523,7 +523,7 @@ class AlertOption(BaseReadonlyOption):
             State.warning: "yellow",
             State.danger: "red",
         }
-        message = m18n.g(self.style) if self.style != State.danger else m18n.n("danger")
+        message = tr(self.style) if self.style != State.danger else tr("danger")
         return f"{colorize(message, colors[self.style])} {self.ask}"
 
 
@@ -980,7 +980,7 @@ class NumberOption(BaseInputOption):
         raise YunohostValidationError(
             "app_argument_invalid",
             name=option.get("id"),
-            error=m18n.n("invalid_number"),
+            error=tr("invalid_number"),
         )
 
     def _get_field_attrs(self) -> dict[str, Any]:
@@ -1508,7 +1508,7 @@ class BaseChoicesOption(BaseInputOption):
 
             if remaining_choices > 0:
                 splitted_choices += [
-                    m18n.n("other_available_options", n=remaining_choices)
+                    tr("other_available_options", n=remaining_choices)
                 ]
 
             choices_to_display = " | ".join(str(choice) for choice in splitted_choices)
@@ -1864,7 +1864,7 @@ class GroupOption(BaseChoicesOption):
             # i18n: all_users
             # i18n: admins
             return (
-                m18n.n(groupname)
+                tr(groupname)
                 if groupname in ["visitors", "all_users", "admins"]
                 else groupname
             )
@@ -1986,10 +1986,10 @@ class OptionsModel(BaseModel):
                 value = getattr(option, key)
                 if value:
                     setattr(option, key, _value_for_locale(value))
-                elif key == "ask" and m18n.key_exists(f"{i18n_key}_{option.id}"):
-                    setattr(option, key, m18n.n(f"{i18n_key}_{option.id}"))
-                elif key == "help" and m18n.key_exists(f"{i18n_key}_{option.id}_help"):
-                    setattr(option, key, m18n.n(f"{i18n_key}_{option.id}_help"))
+                elif key == "ask" and key_exists(f"{i18n_key}_{option.id}"):
+                    setattr(option, key, tr(f"{i18n_key}_{option.id}"))
+                elif key == "help" and key_exists(f"{i18n_key}_{option.id}_help"):
+                    setattr(option, key, tr(f"{i18n_key}_{option.id}_help"))
                 elif key == "ask":
                     # FIXME warn?
                     option.ask = option.id
@@ -2221,7 +2221,7 @@ def prompt_or_validate_form(
                             else _value_for_locale(_error)
                         )
                     else:
-                        err_text = m18n.n(
+                        err_text = tr(
                             f"pydantic.{err['type']}".replace(".", "_"), **ctx
                         )
                 else:
@@ -2235,7 +2235,7 @@ def prompt_or_validate_form(
 
                 if isinstance(e, ValidationError):
                     if not interactive:
-                        err_text = m18n.n(
+                        err_text = tr(
                             "app_argument_invalid", name=option.id, error=err_text
                         )
 

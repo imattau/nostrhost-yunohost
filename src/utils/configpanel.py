@@ -26,8 +26,8 @@ from collections.abc import Generator
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, Type, Union, cast
 
-from moulinette import Moulinette, m18n
-from moulinette.interfaces.cli import colorize
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr, key_exists, colorize
 from pydantic import BaseModel, Extra, ValidationError, validator
 
 from .error import YunohostError, YunohostValidationError
@@ -88,8 +88,8 @@ class ContainerModel(BaseModel):
             value = getattr(self, key)
             if value:
                 setattr(self, key, _value_for_locale(value))
-            elif m18n.key_exists(f"{i18n_key}_{self.id}_{key}"):
-                setattr(self, key, m18n.n(f"{i18n_key}_{self.id}_{key}"))
+            elif key_exists(f"{i18n_key}_{self.id}_{key}"):
+                setattr(self, key, tr(f"{i18n_key}_{self.id}_{key}"))
 
 
 class SectionModel(ContainerModel, OptionsModel):
@@ -610,15 +610,15 @@ class ConfigPanel:
         # Script got manually interrupted ...
         # N.B. : KeyboardInterrupt does not inherit from Exception
         except (KeyboardInterrupt, EOFError):
-            error = m18n.n("operation_interrupted")
-            logger.error(m18n.n("config_apply_failed", error=error))
+            error = tr("operation_interrupted")
+            logger.error(tr("config_apply_failed", error=error))
             raise
         # Something wrong happened in Yunohost's code (most probably hook_exec)
         except Exception:
             import traceback
 
-            error = m18n.n("unexpected_error", error="\n" + traceback.format_exc())
-            logger.error(m18n.n("config_apply_failed", error=error))
+            error = tr("unexpected_error", error="\n" + traceback.format_exc())
+            logger.error(tr("config_apply_failed", error=error))
             raise
         finally:
             # Delete files uploaded from API
@@ -699,15 +699,15 @@ class ConfigPanel:
         # Script got manually interrupted ...
         # N.B. : KeyboardInterrupt does not inherit from Exception
         except (KeyboardInterrupt, EOFError):
-            error = m18n.n("operation_interrupted")
-            logger.error(m18n.n("config_action_failed", action=key, error=error))
+            error = tr("operation_interrupted")
+            logger.error(tr("config_action_failed", action=key, error=error))
             raise
         # Something wrong happened in Yunohost's code (most probably hook_exec)
         except Exception:
             import traceback
 
-            error = m18n.n("unexpected_error", error="\n" + traceback.format_exc())
-            logger.error(m18n.n("config_action_failed", action=key, error=error))
+            error = tr("unexpected_error", error="\n" + traceback.format_exc())
+            logger.error(tr("config_action_failed", action=key, error=error))
             raise
         finally:
             # Delete files uploaded from API

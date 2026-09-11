@@ -35,7 +35,8 @@ from typing import (
     cast,
 )
 
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr, key_exists
 
 from .app_catalog import (  # noqa
     APPS_CATALOG_LOGOS,
@@ -343,7 +344,7 @@ def _app_upgrade_infos(app: str, current_version: str | None = None) -> AppUpgra
     if not app_in_catalog or "git" not in app_in_catalog:
         return {
             "status": "url_required",
-            "message": m18n.n("app_upgrade_url_required"),
+            "message": tr("app_upgrade_url_required"),
             "url": None,
             "current_version": current_version,
             "new_version": None,
@@ -369,7 +370,7 @@ def _app_upgrade_infos(app: str, current_version: str | None = None) -> AppUpgra
             new_revision = channel["revision"]
             new_version = channel["version"]
             specific_channel_pr_url = channel["pr_url"]
-            specific_channel_message = m18n.n(
+            specific_channel_message = tr(
                 "app_upgrade_specific_channel_msg",
                 channel=specific_channel,
                 pr_url=specific_channel_pr_url,
@@ -397,7 +398,7 @@ def _app_upgrade_infos(app: str, current_version: str | None = None) -> AppUpgra
     ):
         return {
             "status": "bad_quality",
-            "message": m18n.n("app_upgrade_bad_quality"),
+            "message": tr("app_upgrade_bad_quality"),
             "url": url,
             "current_version": current_version,
             "new_version": None,
@@ -412,7 +413,7 @@ def _app_upgrade_infos(app: str, current_version: str | None = None) -> AppUpgra
     ):
         return {
             "status": "up_to_date",
-            "message": m18n.n(
+            "message": tr(
                 "app_upgrade_up_to_date", current_version=current_version
             ),
             "url": None,
@@ -456,7 +457,7 @@ def _app_upgrade_infos(app: str, current_version: str | None = None) -> AppUpgra
         "status": status,
         # i18n: app_upgrade_upgradable
         # i18n: app_upgrade_fail_requirements
-        "message": m18n.n(
+        "message": tr(
             f"app_upgrade_{status}",
             current_version=current_version,
             new_version=new_version,
@@ -688,8 +689,8 @@ def app_change_url(
             change_url_script,
             env=env_dict,
             operation_logger=operation_logger,
-            error_message_if_script_failed=m18n.n("app_change_url_script_failed"),
-            error_message_if_failed=lambda e: m18n.n(
+            error_message_if_script_failed=tr("app_change_url_script_failed"),
+            error_message_if_failed=lambda e: tr(
                 "app_change_url_failed", app=app, error=e
             ),
         )
@@ -721,7 +722,7 @@ def app_change_url(
             service_reload_or_restart("nginx")
 
             logger.success(
-                m18n.n("app_change_url_success", app=app, domain=domain, path=path)
+                tr("app_change_url_success", app=app, domain=domain, path=path)
             )
 
             hook_callback("post_app_change_url", env=env_dict)
@@ -818,7 +819,7 @@ def app_upgrade(
             elif url:
                 new_app_src = url
             elif status == "url_required":
-                logger.warning(m18n.n("app_upgrade_cli_url_required", app=app_))
+                logger.warning(tr("app_upgrade_cli_url_required", app=app_))
                 continue
             elif upgrade_infos.get("specific_channel"):
                 assert upgrade_infos["url"]
@@ -837,7 +838,7 @@ def app_upgrade(
                 # so doesnt feel worth it to optimize (and there's also cache mechanism for _git_clone under the hood)
                 new_manifest, extracted_app_folder = _extract_app(new_app_src)
                 new_version = new_manifest.get("version", "?")
-                msg = m18n.n(
+                msg = tr(
                     "app_upgrade_cli_will_upgrade",
                     app=app_,
                     current_version=current_version,
@@ -847,7 +848,7 @@ def app_upgrade(
             elif status in ["upgradable", "fail_requirements"]:
                 # We allow "fail_requirements" here because the requirements are re-checked later with a possibility to bypass them
                 # (so effectivly they're checked twice but meh)
-                msg = m18n.n(
+                msg = tr(
                     "app_upgrade_cli_will_upgrade",
                     app=app_,
                     current_version=current_version,
@@ -856,7 +857,7 @@ def app_upgrade(
                 yield (app_, msg, new_app_src)
             elif status == "up_to_date":
                 if force:
-                    msg = m18n.n(
+                    msg = tr(
                         "app_upgrade_cli_will_force_upgrade",
                         app=app_,
                         current_version=current_version,
@@ -864,14 +865,14 @@ def app_upgrade(
                     yield (app_, msg, new_app_src)
                 else:
                     logger.info(
-                        m18n.n(
+                        tr(
                             "app_upgrade_cli_up_to_date",
                             app=app_,
                             current_version=current_version,
                         )
                     )
             elif status == "bad_quality":
-                logger.warning(m18n.n("app_upgrade_cli_bad_quality", app=app_))
+                logger.warning(tr("app_upgrade_cli_bad_quality", app=app_))
             else:
                 logger.error(f"Unknown upgrade status '{status}' for {app_} !?")
 
@@ -898,7 +899,7 @@ def app_upgrade(
     def _upgrade_single_app(
         app_, current_manifest, new_manifest, workdir, no_safety_backup
     ) -> dict:
-        logger.info(m18n.n("app_upgrade_app_name", app=app_))
+        logger.info(tr("app_upgrade_app_name", app=app_))
 
         # Get current_version and new version
         app_new_version_raw = new_manifest.get("version", "?")
@@ -966,7 +967,7 @@ def app_upgrade(
                     if other_safety_backup_name in backup_list()["archives"]:
                         backup_delete(other_safety_backup_name, display_success=False)
                         logger.info(
-                            m18n.n(
+                            tr(
                                 "backup_before_upgrade_deleted_because_replaced_by_newer_backup",
                                 name=other_safety_backup_name,
                                 newname=safety_backup_name,
@@ -1045,8 +1046,8 @@ def app_upgrade(
                 workdir + "/scripts/upgrade",
                 env=env_dict,
                 operation_logger=operation_logger,
-                error_message_if_script_failed=m18n.n("app_upgrade_script_failed"),
-                error_message_if_failed=lambda e: m18n.n(
+                error_message_if_script_failed=tr("app_upgrade_script_failed"),
+                error_message_if_failed=lambda e: tr(
                     "app_upgrade_failed", app=app_, error=e
                 ),
             )
@@ -1075,7 +1076,7 @@ def app_upgrade(
                 _assert_system_is_sane_for_app(new_manifest, "post")
             except Exception as e:
                 broke_the_system = True
-                logger.error(m18n.n("app_upgrade_failed", app=app_, error=str(e)))
+                logger.error(tr("app_upgrade_failed", app=app_, error=str(e)))
                 failure_message_with_debug_instructions = operation_logger.error(str(e))
 
             # We'll check that the app didn't brutally edit some system configuration
@@ -1137,7 +1138,7 @@ def app_upgrade(
                 )
 
             # So much win
-            logger.success(m18n.n("app_upgraded", app=app_))
+            logger.success(tr("app_upgraded", app=app_))
 
             # Format post-upgrade notifications
             if new_manifest["notifications"]["POST_UPGRADE"]:
@@ -1186,7 +1187,7 @@ def app_upgrade(
     if not raw_requested_targets:
         # Everything is already ok? Success !
         if not actual_targets:
-            logger.success(m18n.n("apps_already_up_to_date"))
+            logger.success(tr("apps_already_up_to_date"))
             if Moulinette.interface.type == "api":
                 return {"notifications": {"POST_UPGRADE": {}}}  # type: ignore
             else:
@@ -1204,7 +1205,7 @@ def app_upgrade(
             msg for _, msg, _, _, _ in actual_targets_with_manifests_and_workdir
         ]
         logger.info(
-            m18n.n(
+            tr(
                 "app_upgrade_several_apps", apps="\n  - " + ("\n  - ".join(todolist))
             )
         )
@@ -1269,13 +1270,13 @@ def app_upgrade(
                 continue_on_failure = False
             if continue_on_failure and pending_apps:
                 logger.warning(
-                    m18n.n("app_upgrade_continuing_with_other_apps", app=app_)
+                    tr("app_upgrade_continuing_with_other_apps", app=app_)
                 )
                 continue
             else:
                 if pending_apps:
                     logger.warning(
-                        m18n.n("apps_upgrade_cancelled", apps=", ".join(pending_apps))
+                        tr("apps_upgrade_cancelled", apps=", ".join(pending_apps))
                     )
                 break
         else:
@@ -1458,7 +1459,7 @@ def app_install(
     operation_logger.related_to.append(("app", app_id))
     operation_logger.start()
 
-    logger.info(m18n.n("app_start_install", app=app_id))
+    logger.info(tr("app_start_install", app=app_id))
 
     # Create app directory
     if os.path.exists(app_setting_path):
@@ -1566,8 +1567,8 @@ def app_install(
             os.path.join(extracted_app_folder, "scripts/install"),
             env=env_dict,
             operation_logger=operation_logger,
-            error_message_if_script_failed=m18n.n("app_install_script_failed"),
-            error_message_if_failed=lambda e: m18n.n(
+            error_message_if_script_failed=tr("app_install_script_failed"),
+            error_message_if_failed=lambda e: tr(
                 "app_install_failed", app=app_id, error=e
             ),
         )
@@ -1579,7 +1580,7 @@ def app_install(
                 _assert_system_is_sane_for_app(manifest, "post")
             except Exception as e:
                 broke_the_system = True
-                logger.error(m18n.n("app_install_failed", app=app_id, error=str(e)))
+                logger.error(tr("app_install_failed", app=app_id, error=str(e)))
                 failure_message_with_debug_instructions = operation_logger.error(str(e))
 
         # We'll check that the app didn't brutally edit some system configuration
@@ -1605,7 +1606,7 @@ def app_install(
                     raw_msg=True,
                 )
             else:
-                logger.warning(m18n.n("app_remove_after_failed_install"))
+                logger.warning(tr("app_remove_after_failed_install"))
 
             # Setup environment for remove script
             env_dict_remove = _make_environment_for_app_script(
@@ -1637,7 +1638,7 @@ def app_install(
                 import traceback
 
                 logger.error(
-                    m18n.n("unexpected_error", error="\n" + traceback.format_exc())
+                    tr("unexpected_error", error="\n" + traceback.format_exc())
                 )
 
             if packaging_format >= 2:
@@ -1653,7 +1654,7 @@ def app_install(
                         permission_delete(permission_name, force=True, sync_perm=False)
 
             if remove_retcode != 0:
-                msg = m18n.n("app_not_properly_removed", app=app_instance_name)
+                msg = tr("app_not_properly_removed", app=app_instance_name)
                 logger.warning(msg)
                 operation_logger_remove.error(msg)
             else:
@@ -1685,7 +1686,7 @@ def app_install(
     chmod(f"{app_setting_path}/settings.yml", 0o400)
     chown(app_setting_path, "root", recursive=True)
 
-    logger.success(m18n.n("installation_complete"))
+    logger.success(tr("installation_complete"))
 
     # Get the generated settings to hydrate notifications
     settings = _get_app_settings(app_instance_name)
@@ -1736,7 +1737,7 @@ def app_remove(
 
     operation_logger.start()
 
-    logger.info(m18n.n("app_start_remove", app=app))
+    logger.info(tr("app_start_remove", app=app))
     app_setting_path = os.path.join(APPS_SETTING_PATH, app)
 
     # Attempt to patch legacy helpers ...
@@ -1777,7 +1778,7 @@ def app_remove(
         ret = -1
         import traceback
 
-        logger.error(m18n.n("unexpected_error", error="\n" + traceback.format_exc()))
+        logger.error(tr("unexpected_error", error="\n" + traceback.format_exc()))
     finally:
         rmtree(tmp_workdir_for_app)
 
@@ -1808,10 +1809,10 @@ def app_remove(
             domain_config_set(domain, "feature.app.default_app", "_none")
 
     if ret == 0:
-        logger.success(m18n.n("app_removed", app=app))
+        logger.success(tr("app_removed", app=app))
         hook_callback("post_app_remove", env=env_dict)
     else:
-        logger.warning(m18n.n("app_not_properly_removed", app=app))
+        logger.warning(tr("app_not_properly_removed", app=app))
 
     _sync_permissions_with_ldap()
     _assert_system_is_sane_for_app(manifest, "post")
@@ -2235,7 +2236,7 @@ def app_ssowatconf() -> None:
             if domain not in portal_domains_apps:
                 setting_file.unlink()
 
-    logger.debug(m18n.n("ssowat_conf_generated"))
+    logger.debug(tr("ssowat_conf_generated"))
 
 
 @is_flash_unit_operation()
@@ -2519,7 +2520,7 @@ ynh_app_config_run $1
             i18n_prefix = raw_config["i18n"]
 
             perm_config_template = raw_config["_core"].pop("permissions")
-            special_groups = {g: m18n.n(g) for g in ["visitors", "all_users", "admins"]}
+            special_groups = {g: tr(g) for g in ["visitors", "all_users", "admins"]}
             regular_groups = {
                 g: g.title()
                 for g in list(
@@ -2538,9 +2539,9 @@ ynh_app_config_run $1
 
             # i18n tweaks
             for k, v in perm_config_template.items():
-                v["ask"] = m18n.n(f"{i18n_prefix}_permission_{k}")
-                if m18n.key_exists(f"{i18n_prefix}_permission_{k}_help"):
-                    v["help"] = m18n.n(f"{i18n_prefix}_permission_{k}_help")
+                v["ask"] = tr(f"{i18n_prefix}_permission_{k}")
+                if key_exists(f"{i18n_prefix}_permission_{k}_help"):
+                    v["help"] = tr(f"{i18n_prefix}_permission_{k}_help")
 
             settings = _get_app_settings(self.entity)
             perms_that_are_not_main = list(settings.get("_permissions", {}).keys())
@@ -2554,7 +2555,7 @@ ynh_app_config_run $1
                 raw_config["_core"][f"permission_{perm}"] = this_perm_config
                 if perm != "main":
                     # i18n: app_config_permission_extraperm_section_name
-                    section_name = m18n.n(
+                    section_name = tr(
                         f"{i18n_prefix}_permission_extraperm_section_name", perm=perm
                     )
                     raw_config["_core"][f"permission_{perm}"]["collapsed"] = True
@@ -2595,7 +2596,7 @@ ynh_app_config_run $1
                         f"https://{domain}{path.rstrip('/')}{infos.get('url')}"
                     )
                     raw_settings[f"permission_{perm}_location"] = {
-                        "ask": m18n.n(
+                        "ask": tr(
                             "app_config_permission_location", absolute_url=absolute_url
                         )
                     }
@@ -2616,7 +2617,7 @@ ynh_app_config_run $1
                 if infos.get("protected"):
                     raw_settings[f"permission_{perm}_allowed"] = {
                         "value": raw_settings[f"permission_{perm}_allowed"],
-                        "help": m18n.n("app_config_permission_allowed_warn_protected"),
+                        "help": tr("app_config_permission_allowed_warn_protected"),
                     }
 
             return raw_settings

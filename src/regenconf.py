@@ -28,7 +28,7 @@ from logging import getLogger
 from typing import TYPE_CHECKING, Any, cast
 
 import yaml
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from .hook import hook_callback, hook_list
 from .log import is_unit_operation
@@ -210,9 +210,9 @@ def regen_conf(
             operation_logger.related_to.append(("configuration", category))
 
         if dry_run:
-            logger.debug(m18n.n("regenconf_pending_applying", category=category))
+            logger.debug(tr("regenconf_pending_applying", category=category))
         else:
-            logger.debug(m18n.n("regenconf_dry_pending_applying", category=category))
+            logger.debug(tr("regenconf_dry_pending_applying", category=category))
 
         conf_hashes = _get_conf_hashes(category)
         succeed_regen = {}
@@ -317,7 +317,7 @@ def regen_conf(
                 # Otherwise, flag the file as manually modified
                 else:
                     logger.warning(
-                        m18n.n("regenconf_file_manually_modified", conf=system_path)
+                        tr("regenconf_file_manually_modified", conf=system_path)
                     )
                     conf_status = "modified"
 
@@ -340,7 +340,7 @@ def regen_conf(
                     regenerated = _regen(system_path, pending_path, save=False)
                 else:
                     logger.info(
-                        m18n.n("regenconf_file_manually_removed", conf=system_path)
+                        tr("regenconf_file_manually_removed", conf=system_path)
                     )
                     conf_status = "removed"
 
@@ -357,7 +357,7 @@ def regen_conf(
                     # anyway (by default in _regen), as long as we warn the user
                     # appropriately.
                     logger.info(
-                        m18n.n(
+                        tr(
                             "regenconf_now_managed_by_yunohost",
                             conf=system_path,
                             category=category,
@@ -370,7 +370,7 @@ def regen_conf(
                     conf_status = "force-removed"
                 else:
                     logger.info(
-                        m18n.n(
+                        tr(
                             "regenconf_file_kept_back",
                             conf=system_path,
                             category=category,
@@ -402,14 +402,14 @@ def regen_conf(
                     and system_path == sshd_config
                     and not ssh_explicitly_specified
                 ):
-                    logger.warning(m18n.n("regenconf_need_to_explicitly_specify_ssh"))
+                    logger.warning(tr("regenconf_need_to_explicitly_specify_ssh"))
                     conf_status = "modified"
                 elif force:
                     regenerated = _regen(system_path, pending_path)
                     conf_status = "force-updated"
                 else:
                     logger.warning(
-                        m18n.n("regenconf_file_manually_modified", conf=system_path)
+                        tr("regenconf_file_manually_modified", conf=system_path)
                     )
                     conf_status = "modified"
 
@@ -427,13 +427,13 @@ def regen_conf(
 
         # Check for category conf changes
         if not succeed_regen and not failed_regen:
-            logger.debug(m18n.n("regenconf_up_to_date", category=category))
+            logger.debug(tr("regenconf_up_to_date", category=category))
             continue
         elif not failed_regen:
             if not dry_run:
-                logger.success(m18n.n("regenconf_updated", category=category))
+                logger.success(tr("regenconf_updated", category=category))
             else:
-                logger.success(m18n.n("regenconf_would_be_updated", category=category))
+                logger.success(tr("regenconf_would_be_updated", category=category))
 
         if (succeed_regen or force_update_hashes_for_this_category) and not dry_run:
             _update_conf_hashes(category, conf_hashes)
@@ -674,13 +674,13 @@ def _process_regen_conf(
 
         shutil.copy2(system_conf, backup_path)
         logger.debug(
-            m18n.n("regenconf_file_backed_up", conf=system_conf, backup=backup_path)
+            tr("regenconf_file_backed_up", conf=system_conf, backup=backup_path)
         )
 
     try:
         if not new_conf:
             os.remove(system_conf)
-            logger.debug(m18n.n("regenconf_file_removed", conf=system_conf))
+            logger.debug(tr("regenconf_file_removed", conf=system_conf))
         else:
             system_dir = os.path.dirname(system_conf)
 
@@ -688,7 +688,7 @@ def _process_regen_conf(
                 mkdir(system_dir, 0o755, True)
 
             shutil.copyfile(new_conf, system_conf)
-            logger.debug(m18n.n("regenconf_file_updated", conf=system_conf))
+            logger.debug(tr("regenconf_file_updated", conf=system_conf))
     except Exception as e:
         logger.warning(
             f"Exception while trying to regenerate conf '{system_conf}': {e}",
@@ -696,7 +696,7 @@ def _process_regen_conf(
         )
         if not new_conf and os.path.exists(system_conf):
             logger.warning(
-                m18n.n("regenconf_file_remove_failed", conf=system_conf), exc_info=True
+                tr("regenconf_file_remove_failed", conf=system_conf), exc_info=True
             )
             return False
 
@@ -711,7 +711,7 @@ def _process_regen_conf(
             finally:
                 if not copy_succeed:
                     logger.warning(
-                        m18n.n(
+                        tr(
                             "regenconf_file_copy_failed", conf=system_conf, new=new_conf
                         ),
                         exc_info=True,

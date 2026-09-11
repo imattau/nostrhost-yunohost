@@ -97,11 +97,12 @@ def _init_headless_yunohost() -> None:
     ``user_create`` from ``nostr-identityd`` fails with
     ``AttributeError: 'NoneType' object has no attribute 'type'``.
     """
-    from moulinette import Moulinette, m18n
+    from nostrhost.core import Moulinette
+    from nostrhost.i18n import set_locale, set_locales_dir
 
     if Moulinette.interface is None:
-        m18n.set_locales_dir("/usr/share/yunohost/locales/")
-        m18n.set_locale("en")
+        set_locales_dir("/usr/share/yunohost/locales/")
+        set_locale("en")
 
         class _HeadlessCli:
             type = "cli"

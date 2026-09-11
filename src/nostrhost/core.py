@@ -52,7 +52,12 @@ class NostrHostError(Exception):
         self.log_ref = log_ref
         self.error_details = error_details
         msg = key if raw_msg else tr(key, *args, **kwargs)
-        super().__init__(msg)
+        # Call Exception.__init__ directly (not super()): during the
+        # transition the fork's YunohostError bridges NostrHostError with
+        # moulinette's MoulinetteError via multiple inheritance, and routing
+        # through the MRO would hit MoulinetteError.__init__, which would
+        # re-translate the already-translated message.
+        Exception.__init__(self, msg)
         self.strerror = msg
 
     def content(self) -> dict[str, str] | str:
@@ -108,6 +113,42 @@ class LockAcquireTimeout(NostrHostError):
 # ``Moulinette._interface`` is the single source of truth: the fork assigns it
 # directly (the headless-daemon pattern), and ``set_interface``/``interface``
 # read and write the same attribute so both access styles stay in sync.
+#
+# Until the CLI/API are natively replaced (Stages 4-5) the fork still runs
+# actions through the moulinette framework, which registers its own
+# ``moulinette.Moulinette._interface``.  The metaclass bridges the two so
+# ``nostrhost.core.Moulinette.interface.type`` / ``prompt`` / ``display`` keep
+# working under the framework: a locally-registered interface wins, otherwise
+# reads fall back to moulinette's (lazily, and gracefully when moulinette is
+# not importable -- e.g. headless daemons and unit tests).
+
+
+class _MoulinetteMeta(type):
+    """Metaclass bridging ``Moulinette._interface`` to the moulinette
+    framework's own interface registry during the transition."""
+
+    def __getattr__(cls, name: str) -> Any:
+        if name == "_interface":
+            own = type.__getattribute__(cls, "_own_interface")
+            if own is not None:
+                return own
+            try:
+                import moulinette
+            except ImportError:
+                return None
+            return moulinette.Moulinette._interface
+        raise AttributeError(name)
+
+    def __setattr__(cls, name: str, value: Any) -> None:
+        if name == "_interface":
+            type.__setattr__(cls, "_own_interface", value)
+            try:
+                import moulinette
+            except ImportError:
+                return
+            moulinette.Moulinette._interface = value
+            return
+        super().__setattr__(name, value)
 
 
 class _ClassProperty:
@@ -121,7 +162,7 @@ class _ClassProperty:
         return self._f(owner)
 
 
-class Moulinette:
+class Moulinette(metaclass=_MoulinetteMeta):
     """Drop-in for ``moulinette.Moulinette`` used across the fork.
 
     The fork references ``Moulinette.interface.type`` and assigns
@@ -130,7 +171,7 @@ class Moulinette:
     preserved here; the CLI/API drivers keep the same shape.
     """
 
-    _interface: Any = None
+    _own_interface: Any = None
 
     @_ClassProperty
     def interface(cls: Any) -> Any:
