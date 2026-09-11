@@ -24,7 +24,7 @@ Depends: python3-all (>= 3.11),
  , python3-zmq
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
- , openssl, ca-certificates, netcat-openbsd, iproute2
+ , openssl, ca-certificates, ssl-cert, netcat-openbsd, iproute2
  , slapd, ldap-utils, sudo-ldap, libnss-ldapd, unscd, libpam-ldapd
  , dnsmasq, resolvconf, libnss-myhostname
  , libsasl2-modules
