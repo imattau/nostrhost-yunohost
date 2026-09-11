@@ -80,6 +80,12 @@ module = "moulinette.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# The fork's own package: `src/*` becomes `yunohost.*` only at install time,
+# so a source-tree mypy run cannot see it as a package.
+module = "yunohost.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Those are the public, external modules that don't provide typing
 module = ["jwt", "sortedcollections", "IPython", "ldap.*", "dbus", "sdbus.*",
     "psutil", "bottle", "miniupnpc", "lexicon.*", "publicsuffix2"]

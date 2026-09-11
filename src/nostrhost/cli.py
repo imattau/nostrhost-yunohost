@@ -1,232 +1,409 @@
-"""Native ``nostrhost`` CLI (Moulinette CLI replacement, Stage 4).
+"""Native ``nostrhost`` CLI.
 
-The CLI is a Typer adapter over the ``OperationRegistry``: every operation in
-the catalog becomes a ``typer.Typer`` command whose signature (arguments,
-options, flags, help) is generated from the typed ``OperationSpec`` -- the
-same single source of truth the API and MCP schemas derive from.  Typer (built
-on Click) gives rich help and shell completion (``--install-completion``).
+The NostrHost administration CLI -- Typer commands over the native operation
+surface.  No YunoHost/actionsmap compatibility: users are Nostr identities
+(npubs), writes are the native resource-engine/control-plane tools, and
+authorisation is capability-based.
 
-The command surface is the *compatibility/migration* layer: it mirrors the
-``actionsmap.yml`` operations so ``nostrhost user create ...`` behaves like
-``yunohost user create ...`` (exit codes, output formats) while the dispatcher
-is native.  This includes the legacy password/LDAP ``user.create``: the
-NostrHost *native* user model is the npub identity (see
-``yunohost.nostr_identity`` / ``nostrhost-auth``), which is exposed through the
-identity/capability operations rather than this compat surface.
+Command groups:
 
-Exit codes match ``yunohost``/``nostr-opctl`` conventions: 0 on success, 1 on
-any error, 2 on usage errors (Click's convention).
+    system      read-only system/package version info
+    service     status / restart / control a service
+    app         list / remove an installed app
+    package     plan / reconcile a native package operation plan
+    rollback    apply an assisted rollback plan
+    state       apply a reconciliation plan
+    identity    npub-based user identities (link / revoke / list / resolve)
+    capability  grant / delegate / revoke capabilities to an npub
+
+The CLI runs as the authorized admin: read tools execute directly, and write
+tools execute through their safe handlers here (the local admin is the
+operator).  Remote agents route writes through the operation chain
+(``nostr-opctl`` request/approve + ``nostr-operationsd``).  Keys and the
+control relay are read from the operator config or overridden with
+``--operator-sk`` / ``--admin-sk`` / ``--control-relay``.
+
+Exit codes: 0 on success, 1 on any error, 2 on usage errors.
 """
 
 from __future__ import annotations
 
-import inspect
+import json
 import sys
-from typing import Any, List
+from pathlib import Path
+from typing import Any, Callable
 
 import typer
 
 from . import ui
-from .core import AuthenticationError, NostrHostError, NostrHostValidationError
-from .models import ArgumentSpec, OperationSpec
-from .operations import (
+from .core import NostrHostError
+from yunohost.nostr_identity import (
+    IdentityError,
+    _parse_pubkey,
+    link_identity,
+    list_identities,
+    list_identities_for_username,
+    resolve_pubkey,
+    resolve_username,
+    revoke_identity,
+)
+from yunohost.nostr_operations import (
     OperationError,
-    OperationRegistry,
-    _field_name,
+    _safe_app_list,
+    _safe_app_remove,
+    _safe_package_plan,
+    _safe_package_reconcile,
+    _safe_reconcile_apply,
+    _safe_rollback_apply,
+    _safe_service_control,
+    _safe_service_restart,
+    _safe_service_status,
+    _safe_system_version,
+    delegate_capability,
+    grant_capability,
+    revoke_delegation,
 )
 
 EXIT_OK = 0
 EXIT_ERR = 1
 
-OUTPUT_CHOICES = ("json", "plain", "none")
-
 DESCRIPTION = (
-    "NostrHost administration CLI. Invoke an operation from the catalog, "
-    "e.g. 'nostrhost user create alice' or 'nostrhost app list --output-as json'. "
-    "Operations mirror the compatibility action map; native identity/capability "
-    "operations are npub-based (see nostr-identity-admin)."
+    "NostrHost administration CLI: native tools, npub identities and "
+    "capabilities. e.g. 'nostrhost system version', "
+    "'nostrhost identity link alice npub1...', 'nostrhost service restart caddy'."
 )
 
+# Tool name -> safe handler (the ToolSpec registry is the source of truth).
+_TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
+    "system.version": _safe_system_version,
+    "service.status": _safe_service_status,
+    "service.restart": _safe_service_restart,
+    "service.control": _safe_service_control,
+    "app.list": _safe_app_list,
+    "app.remove": _safe_app_remove,
+    "package.plan": _safe_package_plan,
+    "package.reconcile": _safe_package_reconcile,
+    "rollback.apply": _safe_rollback_apply,
+    "state.reconcile": _safe_reconcile_apply,
+}
 
-def _option_strings(arg: ArgumentSpec) -> list[str]:
-    """Typer/Click option strings for an option/flag argument."""
-    strings: list[str] = []
-    if arg.flag.startswith("-") and not arg.flag.startswith("--"):
-        strings.append(arg.flag)
-    if arg.full:
-        strings.append(arg.full)
-    elif arg.flag.startswith("--"):
-        strings.append(arg.flag)
-    if not strings:
-        strings = [arg.flag]
-    return strings
-
-
-def _typer_default(arg: ArgumentSpec) -> Any:
-    """Build the Typer default (Argument/Option) for an argument."""
-    help_text = arg.help or arg.flag
-    if arg.kind == "positional":
-        return typer.Argument(None, help=help_text)
-    strings = _option_strings(arg)
-    if arg.kind == "flag":
-        # Typer infers the boolean flag from the `bool` annotation.
-        return typer.Option(False, *strings, help=help_text)
-    return typer.Option(None, *strings, help=help_text)
-
-
-def _annotation(arg: ArgumentSpec) -> Any:
-    if arg.nargs in ("+", "*"):
-        return List[str]
-    if arg.kind == "flag":
-        return bool
-    return str
+VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
 
 
 class _State:
-    """Per-invocation holder for global options shared with commands."""
+    """Per-invocation global options shared with commands."""
 
     def __init__(self) -> None:
         self.output_as: str | None = None
+        self.control_relay: str | None = None
+        self.operator_sk: str | None = None
+        self.admin_sk: str | None = None
         self.debug = False
-
-
-def build_app(
-    registry: OperationRegistry,
-    *,
-    prog: str = "nostrhost",
-    state: _State | None = None,
-) -> typer.Typer:
-    """Build a Typer app: one command per operation, nested by category and
-    subcategory (``nostrhost user create``, ``nostrhost user group add``)."""
-    state = state or _State()
-    app = typer.Typer(name=prog, help=DESCRIPTION, no_args_is_help=True)
-
-    @app.callback()
-    def _root(
-        output_as: str = typer.Option(None, "--output-as", help="Output result in another format (json/plain/none)"),
-        debug: bool = typer.Option(False, "--debug", help="Enable debug output"),
-    ) -> None:
-        state.output_as = output_as
-        state.debug = debug
-
-    def add_command(parent: typer.Typer, op: OperationSpec) -> None:
-        params: list[inspect.Parameter] = []
-        for arg in op.args:
-            name = _field_name(arg)
-            kind = (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD
-                if arg.kind == "positional"
-                else inspect.Parameter.KEYWORD_ONLY
-            )
-            params.append(
-                inspect.Parameter(name, kind, default=_typer_default(arg), annotation=_annotation(arg))
-            )
-        # --output-as/--debug may also be given after the command name.
-        params.append(
-            inspect.Parameter(
-                "output_as",
-                inspect.Parameter.KEYWORD_ONLY,
-                default=typer.Option(None, "--output-as", help="Output result in another format"),
-                annotation=str,
-            )
-        )
-        params.append(
-            inspect.Parameter(
-                "debug",
-                inspect.Parameter.KEYWORD_ONLY,
-                default=typer.Option(False, "--debug", help="Enable debug output"),
-                annotation=bool,
-            )
-        )
-        params.sort(key=lambda p: p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD)
-
-        def _cmd(**kwargs: Any) -> None:
-            output_as = kwargs.pop("output_as", None) or state.output_as
-            kwargs.pop("debug", None)
-            request = {k: v for k, v in kwargs.items() if v is not None}
-            try:
-                op_spec = registry.by_name(op.name)
-                assert op_spec is not None
-                _fill_required_and_prompts(op_spec, request)
-                result = registry.execute(op.name, request)
-            except (NostrHostError, AuthenticationError, OperationError) as exc:
-                _print_error(exc)
-                raise typer.Exit(EXIT_ERR)
-            except Exception as exc:  # noqa: BLE001 - CLI is the last error boundary
-                _print_error(exc)
-                raise typer.Exit(EXIT_ERR)
-            ui.format_result(result, output_as)
-
-        _cmd.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
-        _cmd.__name__ = op.cli_path[-1]
-        parent.command(name=op.cli_path[-1], help=op.help)(_cmd)
-
-    def add_group(parent: typer.Typer, tree: dict[str, Any]) -> None:
-        for key in sorted(tree):
-            entry = tree[key]
-            if isinstance(entry, OperationSpec):
-                add_command(parent, entry)
-            else:
-                subgroup = typer.Typer(name=key, no_args_is_help=True)
-                parent.add_typer(subgroup, name=key)
-                add_group(subgroup, entry)
-
-    tree: dict[str, Any] = {}
-    for op in registry.operations():
-        node = tree
-        for seg in op.cli_path[:-1]:
-            node = node.setdefault(seg, {})
-        node[op.cli_path[-1]] = op
-
-    add_group(app, tree)
-    return app
-
-
-def _fill_required_and_prompts(op: OperationSpec, request: dict[str, Any]) -> None:
-    """Prompt for missing ``ask`` arguments; enforce required-ness.
-
-    Matches moulinette's post-parse check (``argument_required``) and its
-    ``extra.ask`` interactive prompting for the few arguments that declare it.
-    """
-    for arg in op.args:
-        dest = _field_name(arg)
-        value = request.get(dest)
-        if arg.required and arg.default is None and value in (None, ""):
-            if arg.ask:
-                request[dest] = ui.prompt(
-                    arg.help or arg.flag,
-                    is_password=arg.password,
-                )
-            else:
-                raise NostrHostValidationError(
-                    "argument_required", argument=arg.flag, raw_msg=False
-                )
 
 
 def _print_error(exc: Exception) -> None:
     print(f"error: {exc}", file=sys.stderr)
 
 
-def run(
-    argv: list[str],
-    registry: OperationRegistry | None = None,
-    *,
-    app: typer.Typer | None = None,
-) -> int:
+def _run_tool(name: str, args: dict[str, Any]) -> Any:
+    handler = _TOOL_HANDLERS[name]
+    return handler(**args)
+
+
+def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.Typer:
+    app = typer.Typer(name=prog, help=DESCRIPTION, no_args_is_help=True)
+    state = state or _State()
+
+    @app.callback()
+    def _root(
+        output_as: str = typer.Option(None, "--output-as", help="Output result in another format (json/plain/none)"),
+        debug: bool = typer.Option(False, "--debug", help="Enable debug output"),
+        control_relay: str = typer.Option(None, "--control-relay", help="Nostr control relay URL"),
+        operator_sk: str = typer.Option(None, "--operator-sk", help="operator secret key (hex)"),
+        admin_sk: str = typer.Option(None, "--admin-sk", help="admin secret key (hex)"),
+    ) -> None:
+        state.output_as = output_as
+        state.debug = debug
+        state.control_relay = control_relay
+        state.operator_sk = operator_sk
+        state.admin_sk = admin_sk
+
+    def _emit(result: Any, output_as: str | None = None) -> None:
+        ui.format_result(result, output_as or state.output_as)
+
+    def _guard(fn: Callable[[], Any], output_as: str | None = None) -> None:
+        try:
+            _emit(fn(), output_as)
+        except (NostrHostError, OperationError, IdentityError) as exc:
+            _print_error(exc)
+            raise typer.Exit(EXIT_ERR)
+        except Exception as exc:  # noqa: BLE001 - CLI is the last error boundary
+            _print_error(exc)
+            raise typer.Exit(EXIT_ERR)
+
+    # -- system -------------------------------------------------------------
+
+    system = typer.Typer(name="system", help="system information", no_args_is_help=True)
+
+    @system.command("version")
+    def system_version(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Read-only OS/package version information."""
+        _guard(lambda: _run_tool("system.version", {}), output_as)
+
+    # -- service ------------------------------------------------------------
+
+    service = typer.Typer(name="service", help="service management", no_args_is_help=True)
+
+    @service.command("status")
+    def service_status(
+        names: list[str] = typer.Argument(None, help="service names (default: all)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Status of running services."""
+        _guard(lambda: _run_tool("service.status", {"names": names} if names else {}), output_as)
+
+    @service.command("restart")
+    def service_restart(
+        name: str = typer.Argument(..., help="service name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Restart one named service (write operation)."""
+        _guard(lambda: _run_tool("service.restart", {"name": name}), output_as)
+
+    @service.command("control")
+    def service_control(
+        name: str = typer.Argument(..., help="service name"),
+        action: str = typer.Argument(..., help="start | stop | restart"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Start/stop/restart one named service (write operation)."""
+        _guard(lambda: _run_tool("service.control", {"name": name, "action": action}), output_as)
+
+    # -- app ----------------------------------------------------------------
+
+    app_group = typer.Typer(name="app", help="application management", no_args_is_help=True)
+
+    @app_group.command("list")
+    def app_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List installed applications."""
+        _guard(lambda: _run_tool("app.list", {}), output_as)
+
+    @app_group.command("remove")
+    def app_remove(
+        app: str = typer.Argument(..., help="app id"),
+        purge: bool = typer.Option(False, "--purge", help="purge app data"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove one installed app (write operation, rollback reverse-action)."""
+        _guard(lambda: _run_tool("app.remove", {"app": app, "purge": purge}), output_as)
+
+    # -- package ------------------------------------------------------------
+
+    package = typer.Typer(name="package", help="native package planning", no_args_is_help=True)
+
+    @package.command("plan")
+    def package_plan(
+        package_file: Path = typer.Argument(..., help="package manifest JSON"),
+        catalogue_file: Path = typer.Option(None, "--catalogue-file", help="catalogue provenance JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Validate and plan a native package."""
+        def run() -> Any:
+            package = json.loads(package_file.read_text(encoding="utf-8"))
+            catalogue = json.loads(catalogue_file.read_text(encoding="utf-8")) if catalogue_file else None
+            return _run_tool("package.plan", {"package": package, "catalogue": catalogue})
+        _guard(run, output_as)
+
+    @package.command("reconcile")
+    def package_reconcile(
+        plan_file: Path = typer.Argument(..., help="plan envelope JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Apply an approved native package operation plan (write operation)."""
+        def run() -> Any:
+            plan = json.loads(plan_file.read_text(encoding="utf-8"))
+            return _run_tool("package.reconcile", {"plan": plan})
+        _guard(run, output_as)
+
+    # -- rollback / state ---------------------------------------------------
+
+    rollback = typer.Typer(name="rollback", help="assisted rollback", no_args_is_help=True)
+
+    @rollback.command("apply")
+    def rollback_apply(
+        plan_file: Path = typer.Argument(..., help="rollback plan JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Execute an assisted rollback plan (write operation)."""
+        def run() -> Any:
+            plan = json.loads(plan_file.read_text(encoding="utf-8"))
+            return _run_tool("rollback.apply", {"plan": plan})
+        _guard(run, output_as)
+
+    state_group = typer.Typer(name="state", help="state reconciliation", no_args_is_help=True)
+
+    @state_group.command("reconcile")
+    def state_reconcile(
+        plan_file: Path = typer.Argument(..., help="reconciliation plan JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Apply an approved, bounded reconciliation plan (write operation)."""
+        def run() -> Any:
+            plan = json.loads(plan_file.read_text(encoding="utf-8"))
+            return _run_tool("state.reconcile", {"plan": plan})
+        _guard(run, output_as)
+
+    # -- identity (npub user model) ------------------------------------------
+
+    identity = typer.Typer(name="identity", help="npub identities (the NostrHost user model)", no_args_is_help=True)
+
+    @identity.command("link")
+    def identity_link(
+        username: str = typer.Argument(..., help="account username to bind"),
+        pubkey_or_npub: str = typer.Argument(..., help="pubkey (64-hex) or npub"),
+        signer_type: str = typer.Option("unknown", "--signer-type", help=f"one of {', '.join(VALID_SIGNER_TYPES)}"),
+        label: str = typer.Option(None, "--label", help="human label for the identity"),
+        disabled: bool = typer.Option(False, "--disabled", help="link as disabled"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Link an npub to an account (publishes kind 31102 as the operator)."""
+        def run() -> Any:
+            return link_identity(
+                username,
+                pubkey_or_npub,
+                operator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+                signer_type=signer_type,
+                label=label,
+                enabled=not disabled,
+            )
+        _guard(run, output_as)
+
+    @identity.command("revoke")
+    def identity_revoke(
+        pubkey_or_npub: str = typer.Argument(..., help="pubkey (64-hex) or npub"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Revoke an identity (publishes enabled:false)."""
+        def run() -> Any:
+            return revoke_identity(
+                pubkey_or_npub,
+                operator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
+    @identity.command("list")
+    def identity_list(
+        username: str = typer.Option(None, "--username", help="list identities for one account"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """List identities (optionally for one username)."""
+        def run() -> Any:
+            if username:
+                return [_identity_dict(i) for i in list_identities_for_username(username)]
+            return [_identity_dict(i) for i in list_identities()]
+        _guard(run, output_as)
+
+    @identity.command("resolve")
+    def identity_resolve(
+        pubkey_or_npub_or_username: str = typer.Argument(..., help="pubkey, npub, or username"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Resolve a pubkey/npub to its account, or list identities of a username."""
+        def run() -> Any:
+            value = pubkey_or_npub_or_username
+            if _parse_pubkey is not None and (value.startswith("npub1") or (len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value))):
+                identity = resolve_pubkey(_parse_pubkey(value))
+                return _identity_dict(identity) if identity else None
+            return [_identity_dict(i) for i in resolve_username(value)]
+        _guard(run, output_as)
+
+    # -- capability ----------------------------------------------------------
+
+    capability = typer.Typer(name="capability", help="npub capabilities", no_args_is_help=True)
+
+    @capability.command("grant")
+    def capability_grant(
+        pubkey: str = typer.Argument(..., help="subject pubkey (64-hex)"),
+        scopes: list[str] = typer.Argument(..., help="scopes, e.g. apps.read services.write"),
+        type_: str = typer.Option("agent", "--type", help="agent | admin"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Grant capabilities to an npub (publishes kind 31100 as admin)."""
+        def run() -> Any:
+            return grant_capability(
+                pubkey,
+                scopes,
+                type_=type_,
+                admin_sk=state.admin_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
+    @capability.command("delegate")
+    def capability_delegate(
+        pubkey: str = typer.Argument(..., help="delegate pubkey (64-hex)"),
+        scopes: list[str] = typer.Argument(..., help="scopes, e.g. apps.read"),
+        expires_at: int = typer.Option(..., "--expires-at", help="expiry as Unix timestamp"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Publish a signed, expiring delegation to an npub."""
+        def run() -> Any:
+            return delegate_capability(
+                pubkey,
+                scopes,
+                expires_at,
+                delegator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
+    @capability.command("revoke")
+    def capability_revoke(
+        delegation_id: str = typer.Argument(..., help="delegation event id"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Revoke a delegation event."""
+        def run() -> Any:
+            return revoke_delegation(
+                delegation_id,
+                delegator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability):
+        app.add_typer(group, name=group.info.name)
+
+    return app
+
+
+def _identity_dict(identity: Any) -> dict[str, Any]:
+    return {
+        "pubkey": identity.pubkey,
+        "username": identity.ynh_username,
+        "signer_type": identity.signer_type,
+        "label": identity.label,
+        "enabled": identity.enabled,
+        "created_at": identity.created_at,
+        "last_used": identity.last_used,
+    }
+
+
+def run(argv: list[str], *, app: typer.Typer | None = None, state: _State | None = None) -> int:
     """Run the CLI against ``argv`` (injectable for tests)."""
-    if registry is None:
-        registry = OperationRegistry.from_actionsmap()
-    if app is None:
-        app = build_app(registry)
     from typer.testing import CliRunner
 
+    if app is None:
+        app = build_app(state=state)
     result = CliRunner().invoke(app, argv)
     return result.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
     """Programmatic entry point used by ``bin/nostrhost``."""
-    app = build_app(OperationRegistry.from_actionsmap())
+    app = build_app()
     if argv is None:
         argv = sys.argv[1:]
     try:

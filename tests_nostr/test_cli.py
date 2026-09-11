@@ -1,172 +1,245 @@
-"""Stage 4: native ``nostrhost`` Typer CLI tests (the moulinette CLI replacement).
+"""Native ``nostrhost`` Typer CLI tests (TOOLS + identity + capability).
 
-Dispatch is exercised against the real operation catalog with an injected
-module factory (no moulinette, no live yunohost stack), via Typer's
-CliRunner.  Output modes and exit codes follow the yunohost/click conventions
-(0 ok, 1 error, 2 usage).
+The CLI talks to the native functions; here those are monkeypatched so no
+real system service, relay, or key material is touched.  Structure/help and
+argument parsing are tested against the real command tree.
 """
 
 from __future__ import annotations
 
-import types
-from pathlib import Path
+import json
 
 import pytest
 from typer.testing import CliRunner
 
-from nostrhost.cli import build_app
-from nostrhost.operations import OperationRegistry
-
-SHARE = Path(__file__).resolve().parent.parent / "share"
+from nostrhost import cli as cli_module
 
 
-def _fake_user_module() -> types.ModuleType:
-    module = types.ModuleType("user")
-
-    def user_create(username, password, fullname=None, domain=None, mailbox_quota="0", loginShell="/bin/bash"):
-        return {"ok": True, "username": username, "fullname": fullname, "quota": mailbox_quota}
-
-    def user_group_add(groupname, usernames):
-        return {"group": groupname, "members": list(usernames)}
-
-    module.user_create = user_create
-    module.user_group_add = user_group_add
-    return module
+@pytest.fixture()
+def app():
+    return cli_module.build_app()
 
 
-def _fake_firewall_module() -> types.ModuleType:
-    module = types.ModuleType("firewall")
-
-    def firewall_allow(protocol, port, ipv4_only=False, ipv6_only=False, no_upnp=False, no_reload=False):
-        return {"protocol": protocol, "port": port, "ipv4_only": ipv4_only, "ipv6_only": ipv6_only}
-
-    module.firewall_allow = firewall_allow
-    return module
-
-
-@pytest.fixture(scope="module")
-def registry():
-    modules = {"user": _fake_user_module(), "firewall": _fake_firewall_module()}
-    return OperationRegistry.from_actionsmap(
-        [SHARE / "actionsmap.yml", SHARE / "actionsmap-portal.yml"],
-        module_factory=lambda mod: modules[mod],
-    )
-
-
-@pytest.fixture(scope="module")
-def app(registry):
-    return build_app(registry)
-
-
-def _invoke(app, argv, registry):
+def _invoke(app, argv):
     return CliRunner().invoke(app, argv)
 
 
 # --------------------------------------------------------------------------- #
-# help / structure
+# structure / help
 
-def test_help_lists_categories(app):
-    result = _invoke(app, ["--help"], None)
+def test_help_lists_native_groups(app):
+    result = _invoke(app, ["--help"])
     assert result.exit_code == 0
-    for category in ("user", "app", "domain", "backup", "firewall"):
-        assert category in result.stdout
+    for group in ("system", "service", "app", "package", "rollback", "state", "identity", "capability"):
+        assert group in result.stdout
 
 
-def test_category_help_lists_actions_and_subcategories(app):
-    result = _invoke(app, ["user", "--help"], None)
-    assert result.exit_code == 0
-    assert "create" in result.stdout
-    assert "group" in result.stdout
+def test_group_help_lists_commands(app):
+    for group, commands in {
+        "system": ["version"],
+        "service": ["status", "restart", "control"],
+        "app": ["list", "remove"],
+        "package": ["plan", "reconcile"],
+        "identity": ["link", "revoke", "list", "resolve"],
+        "capability": ["grant", "delegate", "revoke"],
+    }.items():
+        result = _invoke(app, [group, "--help"])
+        assert result.exit_code == 0
+        for command in commands:
+            assert command in result.stdout
 
 
-def test_action_help_lists_options(app):
-    result = _invoke(app, ["user", "create", "--help"], None)
-    assert result.exit_code == 0
-    for option in ("--password", "--fullname", "--domain", "--mailbox-quota"):
-        assert option in result.stdout
-
-
-def test_app_provides_completion(app):
-    result = _invoke(app, ["--help"], None)
-    assert "--install-completion" in result.stdout
+def test_identity_is_npub_model_not_password():
+    # no password/LDAP "user" group on the native surface; identity is npub-based
+    app = cli_module.build_app()
+    group_names = [g.name for g in app.registered_groups]
+    assert "user" not in group_names
+    assert "identity" in group_names
 
 
 # --------------------------------------------------------------------------- #
-# dispatch + output modes + exit codes
+# TOOLS dispatch (monkeypatched handlers)
 
-def test_run_json_output_after_command(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-p", "s3cret", "-F", "Alice", "--output-as", "json"], registry)
+def test_system_version_dispatch(app, monkeypatch):
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "system.version", lambda **k: {"os": "debian", "version": "12"})
+    result = _invoke(app, ["system", "version", "--output-as", "json"])
     assert result.exit_code == 0
-    assert '"username": "alice"' in result.stdout
+    assert '"version": "12"' in result.stdout
 
 
-def test_run_json_output_before_command(registry, app):
-    result = _invoke(app, ["--output-as", "json", "user", "create", "alice", "-p", "s3cret", "-F", "Alice"], registry)
+def test_service_restart_passes_name(app, monkeypatch):
+    captured = {}
+
+    def fake_restart(**kwargs):
+        captured.update(kwargs)
+        return {"service": kwargs["name"], "changed": True}
+
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "service.restart", fake_restart)
+    result = _invoke(app, ["service", "restart", "caddy", "--output-as", "json"])
     assert result.exit_code == 0
-    assert '"username": "alice"' in result.stdout
+    assert captured.get("name") == "caddy"
+    assert '"service": "caddy"' in result.stdout
 
 
-def test_run_plain_output(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-p", "s3cret", "-F", "A", "--output-as", "plain"], registry)
+def test_service_control_action(app, monkeypatch):
+    captured = {}
+
+    def fake_control(**kwargs):
+        captured.update(kwargs)
+        return {"service": kwargs["name"], "action": kwargs["action"]}
+
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "service.control", fake_control)
+    result = _invoke(app, ["service", "control", "synapse", "restart"])
     assert result.exit_code == 0
-    assert "#username" in result.stdout and "alice" in result.stdout
+    assert captured == {"name": "synapse", "action": "restart"}
 
 
-def test_run_none_output(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-p", "s3cret", "-F", "A", "--output-as", "none"], registry)
+def test_app_remove_purge_flag(app, monkeypatch):
+    captured = {}
+
+    def fake_remove(**kwargs):
+        captured.update(kwargs)
+        return {"app": kwargs["app"]}
+
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "app.remove", fake_remove)
+    result = _invoke(app, ["app", "remove", "immich", "--purge"])
     assert result.exit_code == 0
-    assert result.stdout == ""
+    assert captured == {"app": "immich", "purge": True}
 
 
-def test_run_pretty_output_default(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-p", "s3cret", "-F", "Alice"], registry)
-    assert result.exit_code == 0
-    assert "username: alice" in result.stdout
+def test_tool_error_exit_1(app, monkeypatch):
+    def boom(**kwargs):
+        raise cli_module.OperationError("boom")
 
-
-def test_run_subcategory_nargs(registry, app):
-    result = _invoke(app, ["user", "group", "add", "staff", "alice", "bob", "--output-as", "json"], registry)
-    assert result.exit_code == 0
-    assert '"members": ["alice", "bob"]' in result.stdout
-
-
-def test_run_flag_argument(registry, app):
-    result = _invoke(app, ["firewall", "allow", "TCP", "443", "--ipv4-only", "--output-as", "json"], registry)
-    assert result.exit_code == 0
-    assert '"ipv4_only": true' in result.stdout
-
-
-def test_run_missing_required_option(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-F", "Alice"], registry)
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "service.restart", boom)
+    result = _invoke(app, ["service", "restart", "caddy"])
     assert result.exit_code == 1
-    assert "argument_required" in result.stderr
+    assert "boom" in result.stderr
 
 
-def test_run_pattern_violation(registry, app):
-    result = _invoke(app, ["user", "create", "alice", "-p", "x", "-F", "A"], registry)
-    assert result.exit_code == 1
-    assert "error:" in result.stderr
+def test_package_plan_reads_file(app, monkeypatch, tmp_path):
+    captured = {}
+    manifest = {"app": {"id": "example", "version": "1.0.0"}}
+    path = tmp_path / "pkg.json"
+    path.write_text(json.dumps(manifest))
+
+    def fake_plan(package, catalogue=None):
+        captured["package"] = package
+        captured["catalogue"] = catalogue
+        return {"operations": []}
+
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "package.plan", fake_plan)
+    result = _invoke(app, ["package", "plan", str(path)])
+    assert result.exit_code == 0
+    assert captured["package"] == manifest
+    assert captured["catalogue"] is None
 
 
-def test_run_unknown_command_usage_error(app):
-    result = _invoke(app, ["nope"], None)
+# --------------------------------------------------------------------------- #
+# identity (npub user model)
+
+def test_identity_link_passes_npub(app, monkeypatch):
+    captured = {}
+
+    def fake_link(username, pubkey_or_npub, **kwargs):
+        captured.update({"username": username, "pubkey_or_npub": pubkey_or_npub, **kwargs})
+        return {"kind": 31102, "pubkey": "abcd"}
+
+    monkeypatch.setattr(cli_module, "link_identity", fake_link)
+    result = _invoke(app, ["identity", "link", "alice", "npub1test", "--signer-type", "nip07", "--output-as", "json"])
+    assert result.exit_code == 0
+    assert captured["username"] == "alice"
+    assert captured["pubkey_or_npub"] == "npub1test"
+    assert captured["signer_type"] == "nip07"
+    assert captured["enabled"] is True
+    assert '"kind": 31102' in result.stdout
+
+
+def test_identity_link_disabled(app, monkeypatch):
+    captured = {}
+
+    def fake_link(username, pubkey_or_npub, **kwargs):
+        captured.update(kwargs)
+        return {"kind": 31102}
+
+    monkeypatch.setattr(cli_module, "link_identity", fake_link)
+    _invoke(app, ["identity", "link", "alice", "npub1test", "--disabled"])
+    assert captured["enabled"] is False
+
+
+def test_identity_list_username(app, monkeypatch):
+    captured = {}
+
+    def fake_list_for_username(username):
+        captured["username"] = username
+        return []
+
+    monkeypatch.setattr(cli_module, "list_identities_for_username", fake_list_for_username)
+    result = _invoke(app, ["identity", "list", "--username", "alice"])
+    assert result.exit_code == 0
+    assert captured["username"] == "alice"
+
+
+def test_identity_revoke(app, monkeypatch):
+    captured = {}
+
+    def fake_revoke(pubkey_or_npub, **kwargs):
+        captured["pubkey_or_npub"] = pubkey_or_npub
+        return {"kind": 31102}
+
+    monkeypatch.setattr(cli_module, "revoke_identity", fake_revoke)
+    _invoke(app, ["identity", "revoke", "npub1test"])
+    assert captured["pubkey_or_npub"] == "npub1test"
+
+
+# --------------------------------------------------------------------------- #
+# capability
+
+def test_capability_grant_scopes(app, monkeypatch):
+    captured = {}
+
+    def fake_grant(pubkey, scopes, **kwargs):
+        captured.update({"pubkey": pubkey, "scopes": scopes, **kwargs})
+        return {"kind": 31100}
+
+    monkeypatch.setattr(cli_module, "grant_capability", fake_grant)
+    result = _invoke(app, ["capability", "grant", "abcd", "apps.read", "services.write", "--type", "admin"])
+    assert result.exit_code == 0
+    assert captured["pubkey"] == "abcd"
+    assert captured["scopes"] == ["apps.read", "services.write"]
+    assert captured["type_"] == "admin"
+
+
+def test_capability_delegate_expires_at(app, monkeypatch):
+    captured = {}
+
+    def fake_delegate(pubkey, scopes, expires_at, **kwargs):
+        captured.update({"pubkey": pubkey, "scopes": scopes, "expires_at": expires_at})
+        return {"kind": 27236}
+
+    monkeypatch.setattr(cli_module, "delegate_capability", fake_delegate)
+    _invoke(app, ["capability", "delegate", "abcd", "apps.read", "--expires-at", "1750000000"])
+    assert captured["pubkey"] == "abcd"
+    assert captured["scopes"] == ["apps.read"]
+    assert captured["expires_at"] == 1750000000
+
+
+# --------------------------------------------------------------------------- #
+# globals / exit codes
+
+def test_global_output_as_before_command(app, monkeypatch):
+    monkeypatch.setitem(cli_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    result = _invoke(app, ["--output-as", "json", "system", "version"])
+    assert result.exit_code == 0
+    assert '"version": "1"' in result.stdout
+
+
+def test_unknown_command_usage_error(app):
+    result = _invoke(app, ["nope"])
     assert result.exit_code == 2
 
 
-def test_run_unimplemented_operation_rejected():
-    reg = OperationRegistry.from_actionsmap([SHARE / "actionsmap.yml", SHARE / "actionsmap-portal.yml"])
-    app = build_app(reg)
-    result = CliRunner().invoke(app, ["portal", "register"])
-    assert result.exit_code == 1
-    assert "not implemented" in result.stderr
-
-
-# --------------------------------------------------------------------------- #
-# programmatic entry
-
-def test_main_entry_exits_0_on_help(capsys):
-    from nostrhost.cli import main
-
-    code = main(["--help"])
+def test_main_entry_prints_help(capsys):
+    code = cli_module.main(["--help"])
     assert code == 0
     assert "Usage:" in capsys.readouterr().out
