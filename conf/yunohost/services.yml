@@ -5,10 +5,14 @@ dovecot:
   needs_exposed_ports: [993]
   category: email
   ignore_if_package_is_not_installed: dovecot-core
-fail2ban:
-  log: /var/log/fail2ban.log
+crowdsec:
+  log: /var/log/crowdsec/crowdsec.log
   category: security
-  test_conf: fail2ban-server --test
+  test_conf: cscli config show >/dev/null 2>&1
+crowdsec-firewall-bouncer:
+  log: /var/log/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.log
+  category: security
+  test_conf: test -f /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
 mysql:
   log: [/var/log/mysql.log,/var/log/mysql.err,/var/log/mysql/error.log]
   actual_systemd_service: mariadb

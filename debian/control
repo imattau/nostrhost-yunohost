@@ -22,7 +22,7 @@ Depends: python3-all (>= 3.11),
  , smartmontools
  , python3-zmq
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
- , openssh-server, nftables, fail2ban, bind9-dnsutils
+ , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
  , openssl, ca-certificates, netcat-openbsd, iproute2
  , slapd, ldap-utils, sudo-ldap, libnss-ldapd, unscd, libpam-ldapd
  , dnsmasq, resolvconf, libnss-myhostname
@@ -44,7 +44,6 @@ Conflicts: iptables-persistent
  , openssl (>= 3.1)
  , slapd (>= 2.6)
  , dovecot-core (>= 1:2.4)
- , fail2ban (>= 1.1)
  , nftables (>= 1.1)
 Description: manageable and configured self-hosting server
  YunoHost aims to make self-hosting accessible to everyone. It configures

@@ -1356,7 +1356,7 @@ def _assert_system_is_sane_for_app(manifest: AppManifest, when: Literal["pre", "
     # context of packaging v2, which implies deriving what services are
     # relevant to check from the manifst
 
-    services = ["nginx", "fail2ban"]
+    services = ["caddy", "crowdsec"]
 
     # Wait if a service is reloading
     test_nb = 0

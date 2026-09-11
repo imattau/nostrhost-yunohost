@@ -20,11 +20,70 @@
 
 set -e
 
+# CrowdSec provisioning for the fail2ban->CrowdSec migration (P4).
+# Idempotent: runs on fresh install and on every upgrade. See
+# docs/CROWDSEC-MIGRATION.md §4/§8.1. Best-effort where noted so a hub/API
+# hiccup can never fail the yunohost package configure.
+provision_crowdsec() {
+
+    command -v cscli >/dev/null 2>&1 || return 0
+
+    BOUNCER_CONF="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    BOUNCER_NAME="yunohost-crowdsec-bouncer"
+
+    # 1) CAPI opt-out. Ship the "# no thanks" file so the daemon stays
+    #    network-quiet by default (§1, §8.1). Never overwrite an existing
+    #    file: an admin who has opted IN keeps their CAPI credentials.
+    if [ ! -f /etc/crowdsec/online_api_credentials.yaml ]; then
+        printf '# no thanks\n' > /etc/crowdsec/online_api_credentials.yaml
+        chown root:root /etc/crowdsec/online_api_credentials.yaml
+        chmod 0600 /etc/crowdsec/online_api_credentials.yaml
+    fi
+
+    # 2) Base hub collections (parsers/scenarios). The Debian crowdsec
+    #    package vendors an offline hub at /usr/share/crowdsec/hub, so this
+    #    needs no first-boot network. Best-effort.
+    cscli hub update >/dev/null 2>&1 || true
+    for collection in crowdsecurity/caddy crowdsecurity/sshd crowdsecurity/postfix crowdsecurity/linux; do
+        cscli hub install "${collection}" >/dev/null 2>&1 || true
+    done
+
+    # 3) Firewall bouncer registration against the local LAPI (idempotent).
+    if [ ! -f "${BOUNCER_CONF}" ]; then
+        systemctl start crowdsec >/dev/null 2>&1 || true
+        cscli bouncers delete "${BOUNCER_NAME}" >/dev/null 2>&1 || true
+        API_KEY="$(cscli bouncers add "${BOUNCER_NAME}" -o raw 2>/dev/null | tail -n1)"
+        if [ -z "${API_KEY}" ]; then
+            # 1.4.x fallback: `API key for '<name>': <key>` on stdout.
+            API_KEY="$(cscli bouncers add "${BOUNCER_NAME}" 2>/dev/null | grep -oE '[0-9a-f-]{36,}' | tail -n1)"
+        fi
+        if [ -n "${API_KEY}" ]; then
+            sed "s|__API_KEY__|${API_KEY}|" \
+                /usr/share/yunohost/conf/crowdsec-firewall-bouncer/crowdsec-firewall-bouncer.yaml \
+                > "${BOUNCER_CONF}"
+            chown root:root "${BOUNCER_CONF}"
+            chmod 0600 "${BOUNCER_CONF}"
+        fi
+    fi
+
+    # 4) Enable the bouncer service; (re)start it once its config exists.
+    if [ -f "${BOUNCER_CONF}" ]; then
+        systemctl enable crowdsec-firewall-bouncer >/dev/null 2>&1 || true
+        systemctl restart crowdsec-firewall-bouncer >/dev/null 2>&1 || true
+    fi
+}
+
 do_configure() {
 
     mkdir -p /etc/yunohost
     mkdir -p /etc/yunohost/apps
     mkdir -p /etc/yunohost/portal
+
+    # CrowdSec provisioning (P4 of the fail2ban->CrowdSec migration).
+    # Runs on both fresh install and upgrade; every step is idempotent.
+    # crowdsec + crowdsec-firewall-bouncer are hard Depends, so the daemon
+    # (and its LAPI on 127.0.0.1:8080) is already up by the time we run.
+    provision_crowdsec
 
     if [ ! -f /etc/yunohost/installed ]; then
         # If apps/ is not empty, we're probably already installed in the past and
@@ -39,7 +98,7 @@ do_configure() {
             bash /usr/share/yunohost/hooks/conf_regen/46-nsswitch init
             bash /usr/share/yunohost/hooks/conf_regen/43-dnsmasq init
             bash /usr/share/yunohost/hooks/conf_regen/06-slapd init
-            bash /usr/share/yunohost/hooks/conf_regen/15-nginx init
+            bash /usr/share/yunohost/hooks/conf_regen/15-caddy init
             bash /usr/share/yunohost/hooks/conf_regen/37-mdns init
         fi
     else

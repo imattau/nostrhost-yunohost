@@ -1,0 +1,33 @@
+# CrowdSec firewall bouncer configuration (nftables mode).
+#
+# Rendered by debian/postinst at package install/upgrade time from this
+# template: the local LAPI url is fixed (loopback), and __API_KEY__ is
+# substituted with a per-host bouncer token registered via
+# `cscli bouncers add` against the local CrowdSec daemon. The rendered file
+# lives at /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml (0600).
+#
+# The bouncer owns a dedicated nftables table + `crowdsec-blacklists` sets and
+# hooks them into the `input` chain of `table inet filter` — additive to
+# YunoHost's port-based rules, which are managed separately by the `nftables`
+# regenconf category (conf/nftables/). It never edits YunoHost's own table
+# definition. See docs/CROWDSEC-MIGRATION.md §4 (P4).
+
+# Local CrowdSec LAPI (loopback only — CAPI/console stay off, §1).
+api_url: http://127.0.0.1:8080/
+# Per-host API key, generated at package install by debian/postinst.
+api_key: __API_KEY__
+# nftables enforcement backend (roadmap §18.4 retains nftables).
+mode: nftables
+# Poll LAPI for new decisions on this interval.
+update_frequency: 10s
+
+log_mode: file
+log_dir: /var/log/crowdsec-firewall-bouncer/
+log_level: info
+
+nftables:
+  nftables: nft
+  ipv6: true
+  chain: input
+  table: filter
+  deny-action: drop
