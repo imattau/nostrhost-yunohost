@@ -346,7 +346,7 @@ class BackupResource(BaseModel):
 
 
 class PolicyResource(BaseModel):
-    type: Literal["fail2ban", "logrotate"]
+    type: Literal["fail2ban", "logrotate", "crowdsec"]
     name: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
 

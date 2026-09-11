@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import toml
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -929,17 +930,27 @@ class PolicyProvider:
     """Render host policy snippets without invoking policy-manager shells."""
 
     resource_type = "policy"
-    directories = {"fail2ban": Path("/etc/fail2ban/jail.d"), "logrotate": Path("/etc/logrotate.d")}
+    directories = {
+        "fail2ban": Path("/etc/fail2ban/jail.d"),
+        "logrotate": Path("/etc/logrotate.d"),
+        "crowdsec": Path("/etc/crowdsec/scenarios"),
+    }
 
-    def __init__(self, *, root: Path = Path("/")) -> None:
+    def __init__(self, *, root: Path = Path("/"), command: Callable[..., Any] | None = None, state_dir: Path | None = None) -> None:
         self.root = root
+        self.command = command or subprocess.run
+        self.state_dir = state_dir
+
+    @staticmethod
+    def _suffix(type_: str) -> str:
+        return ".local" if type_ == "fail2ban" else (".yaml" if type_ == "crowdsec" else "")
 
     def _target(self, args: dict[str, Any]) -> Path:
         try:
             directory = self.directories[args["type"]]
         except KeyError as exc:
             raise ProviderError(f"unsupported policy type: {args.get('type')}") from exc
-        return _target(self.root, directory) / f"nostrhost-{_safe_name(args['name'])}{'.local' if args['type'] == 'fail2ban' else ''}"
+        return _target(self.root, directory) / f"nostrhost-{_safe_name(args['name'])}{self._suffix(args['type'])}"
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         target = self._target(desired)
@@ -948,16 +959,55 @@ class PolicyProvider:
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
         return [Operation("policy.ensure", desired["name"], desired, risk="medium", reverse="policy.remove", summary=f"install {desired['type']} policy")]
 
+    def _state_target(self) -> Path | None:
+        if self.state_dir is None:
+            return None
+        directory = self.state_dir / "security"
+        return directory / "intrusion-protection.toml"
+
+    def _snapshot_state(self) -> None:
+        """Record the enabled policy state without disturbing the file render.
+
+        This is the P3 slice of the P5 `state/security/intrusion-protection.toml`
+        snapshot: it tracks which scenarios the engine has applied. P5 extends
+        this with live CrowdSec facts (collections, CAPI, bantime) via
+        `Backend.security()` + `export_state` on the semantic state tree.
+        """
+        target = self._state_target()
+        if target is None:
+            return
+        enabled = []
+        directory = _target(self.root, self.directories["crowdsec"])
+        if directory.is_dir():
+            enabled = sorted(
+                f.stem for f in directory.glob("nostrhost-*.yaml") if f.is_file()
+            )
+        data = {"scenarios": enabled}
+        temporary = target.with_suffix(".tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(toml.dumps(data), encoding="utf-8")
+        os.chmod(temporary, 0o640)
+        temporary.replace(target)
+
+    def _reload(self, type_: str) -> None:
+        if type_ != "crowdsec":
+            return
+        self.command(["systemctl", "reload", "crowdsec"], check=False)
+
     def apply(self, operation: Operation) -> dict[str, Any]:
         target = self._target(operation.args)
         if operation.name == "policy.remove":
             target.unlink(missing_ok=True)
+            self._reload(operation.args["type"])
+            self._snapshot_state()
             return {"path": str(target), "changed": True}
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(operation.args["content"], encoding="utf-8")
         os.chmod(temporary, 0o640)
         temporary.replace(target)
+        self._reload(operation.args["type"])
+        self._snapshot_state()
         return {"path": str(target), "changed": True}
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
@@ -1530,7 +1580,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "port": PortProvider(),
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
-        "policy": PolicyProvider(root=root),
+        "policy": PolicyProvider(root=root, command=command, state_dir=(root / "var/lib/nostrhost/state") if root != Path("/") else Path("/var/lib/nostrhost/state")),
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
