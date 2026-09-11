@@ -1,3 +1,10 @@
+yunohost (12.1.41.3) stable; urgency=low
+
+  * nostrhost: native framework split (python3-nostrhost), ssl-cert dep,
+    /etc/ssowat provisioning fix
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 10:00:00 +0200
+
 yunohost (12.1.41.2) stable; urgency=low
 
   - migration: fix disclaimer for 0037 (8134c376f)
