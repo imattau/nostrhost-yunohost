@@ -373,10 +373,85 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             )
         _guard(run, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability):
+    # -- operation chain ---------------------------------------------------------
+
+    op_group = typer.Typer(name="op", help="operation chain (follow/status)", no_args_is_help=True)
+
+    @op_group.command("follow")
+    def op_follow(
+        request_id: str = typer.Argument(..., help="operation request id"),
+        timeout: float = typer.Option(60.0, "--timeout", help="seconds to keep waiting"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Stream an operation's progress/result events until it finishes."""
+        def run() -> None:
+            for event in _stream_events(request_id, state.control_relay, timeout):
+                _render_operation_event(event, output_as or state.output_as)
+        _guard(run, output_as)
+
+    @op_group.command("status")
+    def op_status(
+        request_id: str = typer.Argument(..., help="operation request id"),
+        timeout: float = typer.Option(5.0, "--timeout", help="seconds to wait for the result"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Print the latest chain event for an operation."""
+        def run() -> None:
+            last = None
+            for event in _stream_events(request_id, state.control_relay, timeout):
+                _render_operation_event(event, output_as or state.output_as)
+                last = event
+            if last is None:
+                print(f"{request_id[:16]} … no chain events (pending or unknown)")
+        _guard(run, output_as)
+
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group):
         app.add_typer(group, name=group.info.name)
 
     return app
+
+
+# --------------------------------------------------------------------------- #
+# operation chain subscription
+
+def _stream_events(request_id: str, relay: str | None, timeout: float):
+    from . import events as events_module
+
+    return events_module.stream_operation_events(
+        request_id,
+        relay_url=relay or "ws://127.0.0.1:4848",
+        timeout=timeout,
+    )
+
+
+def _render_operation_event(event: dict[str, Any], output_as: str | None) -> None:
+    """Print one chain event: JSON when requested, else a short human line."""
+    kind = int(event.get("kind", 0))
+    if output_as == "json":
+        print(json.dumps(event, default=str))
+        return
+    request_id = next(
+        (tag[1] for tag in event.get("tags") or [] if len(tag) >= 2 and tag[0] == "e"),
+        event.get("id", ""),
+    )[:16]
+    if kind == 2203:
+        print(f"{request_id} … started")
+    elif kind == 2205:
+        try:
+            body = json.loads(event.get("content") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            body = {}
+        pct = f" {body['progress'] * 100:.0f}%" if "progress" in body else ""
+        print(f"{request_id} … [{body.get('stage', '?')}]{pct}{' ' + body['message'] if body.get('message') else ''}")
+    elif kind == 2204:
+        try:
+            body = json.loads(event.get("content") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            body = {}
+        print(f"{request_id} … {'done: ok' if body.get('ok') else 'failed'}"
+              + (f" ({body.get('error')})" if body.get("error") else ""))
+    else:
+        print(f"{request_id} … kind {kind}")
 
 
 def _identity_dict(identity: Any) -> dict[str, Any]:

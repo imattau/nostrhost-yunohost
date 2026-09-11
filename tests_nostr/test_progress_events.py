@@ -11,10 +11,13 @@ import json
 import os
 
 from coincurve import PublicKeyXOnly
+from typer.testing import CliRunner
 
 from nostrhost import api as api_module
+from nostrhost import cli as cli_module
 from nostrhost import events as events_module
 from nostrhost.api import build_app
+from yunohost.nostr_mcp_adapter import NostrMCPAdapter
 from yunohost.nostr_operations import (
     KIND_EXECUTION_PROGRESS,
     build_capability,
@@ -208,3 +211,87 @@ def test_api_events_requires_auth():
     app = build_app(authorizer=deny)
     status, _, _ = wsgi_request(app, "GET", "/events/" + "x" * 64)
     assert status == "401"
+
+
+# --------------------------------------------------------------------------- #
+# CLI op follow / op status (subscriber)
+
+def _sample_events():
+    return [
+        {"kind": 2203, "id": "r", "tags": [["e", "c" * 64]]},
+        build_execution_progress("a" * 64, "b" * 64, "c" * 64, stage="database", progress=0.55, message="seeding"),
+        {"kind": 2204, "id": "r", "tags": [["e", "c" * 64]], "content": json.dumps({"ok": True, "result": {}})},
+    ]
+
+
+def test_cli_op_follow_streams_events(monkeypatch):
+    monkeypatch.setattr(cli_module, "_stream_events", lambda rid, relay, timeout: iter(_sample_events()))
+    app = cli_module.build_app()
+    result = CliRunner().invoke(app, ["op", "follow", "c" * 64])
+    assert result.exit_code == 0
+    assert "started" in result.stdout
+    assert "database" in result.stdout and "55%" in result.stdout
+    assert "done: ok" in result.stdout
+
+
+def test_cli_op_follow_json(monkeypatch):
+    monkeypatch.setattr(cli_module, "_stream_events", lambda rid, relay, timeout: iter(_sample_events()))
+    app = cli_module.build_app()
+    result = CliRunner().invoke(app, ["op", "follow", "c" * 64, "--output-as", "json"])
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.stdout.strip().splitlines()]
+    assert [e["kind"] for e in lines] == [2203, KIND_EXECUTION_PROGRESS, 2204]
+
+
+def test_cli_op_status_no_events(monkeypatch):
+    monkeypatch.setattr(cli_module, "_stream_events", lambda rid, relay, timeout: iter(()))
+    app = cli_module.build_app()
+    result = CliRunner().invoke(app, ["op", "status", "c" * 64])
+    assert result.exit_code == 0
+    assert "no chain events" in result.stdout
+
+
+def test_cli_op_group_in_help():
+    app = cli_module.build_app()
+    result = CliRunner().invoke(app, ["--help"])
+    assert "op" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# MCP adapter progress + streaming
+
+def test_mcp_adapter_ingests_progress_and_result():
+    adapter = NostrMCPAdapter(
+        requester_sk="a" * 64,
+        requester_pubkey="b" * 64,
+        control_relay="ws://relay",
+        transport=lambda _relay, _event: None,
+    )
+    progress = build_execution_progress("a" * 64, "b" * 64, "c" * 64, stage="database", progress=0.5)
+    assert adapter.ingest_event(progress) is True
+    assert adapter.latest_progress("c" * 64)["stage"] == "database"
+    result = {"kind": 2204, "tags": [["e", "c" * 64]], "content": json.dumps({"ok": True, "result": {}})}
+    assert adapter.ingest_event(result) is True
+    assert adapter.result("c" * 64)["ok"] is True
+    assert adapter.latest_progress("c" * 64)["stage"] == "database"
+
+
+def test_mcp_adapter_events_delegates_to_stream(monkeypatch):
+    sentinel = iter([{"kind": 2204}])
+    captured = {}
+
+    def fake_stream(request_id, **kwargs):
+        captured.update({"request_id": request_id, **kwargs})
+        return sentinel
+
+    monkeypatch.setattr(events_module, "stream_operation_events", fake_stream)
+    adapter = NostrMCPAdapter(
+        requester_sk="a" * 64,
+        requester_pubkey="b" * 64,
+        control_relay="ws://relay",
+        transport=lambda _relay, _event: None,
+    )
+    assert adapter.events("c" * 64, timeout=12) is sentinel
+    assert captured["request_id"] == "c" * 64
+    assert captured["relay_url"] == "ws://relay"
+    assert captured["timeout"] == 12
