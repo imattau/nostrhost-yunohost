@@ -356,9 +356,9 @@ class YunohostBackend(Backend):
     @staticmethod
     def _bantime() -> str:
         try:
-            import tomllib
+            import yaml
 
-            profiles = tomllib.loads(Path("/etc/crowdsec/profiles.yaml").read_text(encoding="utf-8"))
+            profiles = yaml.safe_load(Path("/etc/crowdsec/profiles.yaml").read_text(encoding="utf-8"))
             for decision in profiles.get("decisions", []):
                 if decision.get("type") == "ban":
                     return str(decision.get("duration", ""))
