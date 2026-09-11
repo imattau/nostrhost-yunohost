@@ -6,10 +6,12 @@ Build-Depends: debhelper (>=9), debhelper-compat (= 13), dh-python, python3-all 
 Standards-Version: 3.9.6
 Homepage: https://yunohost.org/
 
-Package: yunohost
+Package: nostrhost-core
 Essential: yes
 Architecture: all
-Provides: nostrhost-core
+Provides: yunohost
+Conflicts: yunohost (<< 12.1.41.5)
+Replaces: yunohost (<< 12.1.41.5)
 Depends: python3-all (>= 3.11),
  , python3-nostrhost
  , python3-psutil, python3-requests, python3-dnspython, python3-openssl
@@ -52,14 +54,17 @@ Description: manageable and configured self-hosting server
  the default install). It also provides facilities to manage users,
  domains, apps and so.
  .
- This package contains YunoHost scripts and binaries. The CLI and API
- entry points live in the python3-nostrhost package (the native
+ This package contains the NostrHost server-management engine, renamed from
+ the historical `yunohost` binary package (Stage 2 of the core rename). It
+ Provides/Replaces/Conflicts the old name so existing installs upgrade
+ cleanly; a transitional empty `yunohost` package depends on it. The CLI
+ and API entry points live in the python3-nostrhost package (the native
  replacement for the retired moulinette framework).
 
 Package: python3-nostrhost
 Architecture: all
 Section: python
-Depends: python3-all (>= 3.11), yunohost
+Depends: python3-all (>= 3.11), nostrhost-core
  , python3-typer, python3-bottle, python3-requests
  , python3-nostrhost-auth
 Description: native nostrhost framework — moulinette replacement
@@ -68,6 +73,16 @@ Description: native nostrhost framework — moulinette replacement
  logging, locking, auth) plus the native Typer command-line tool
  (/usr/bin/nostrhost) and the Bottle+NIP-98 HTTP API (/usr/bin/nostr-api).
  .
- It depends on yunohost (its CLI/API import yunohost.nostr_operations and
- friends), while yunohost depends back on it for the framework primitives
- — a legal circular dependency resolved by apt.
+ It depends on nostrhost-core (its CLI/API import yunohost.nostr_operations
+ and friends), while nostrhost-core depends back on it for the framework
+ primitives — a legal circular dependency resolved by apt.
+
+Package: yunohost
+Architecture: all
+Section: utils
+Depends: nostrhost-core (>= 12.1.41.5)
+Description: transitional package (core renamed to nostrhost-core)
+ Empty dependency package so existing installs and scripts that reference
+ `yunohost` keep resolving after the engine moved to nostrhost-core. This
+ package installs nothing itself. It can be removed once nothing depends on
+ the `yunohost` name.

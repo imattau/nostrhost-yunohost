@@ -1,3 +1,11 @@
+yunohost (12.1.41.5) stable; urgency=low
+
+  * nostrhost: core rename Stage 2 — binary package is now nostrhost-core
+    (Provides/Replaces/Conflicts yunohost) plus a transitional yunohost
+    package that Depends on it
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 12:00:00 +0200
+
 yunohost (12.1.41.4) stable; urgency=low
 
   * nostrhost: make the legacy gevent import optional (native Bottle API)
