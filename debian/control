@@ -9,6 +9,7 @@ Homepage: https://yunohost.org/
 Package: yunohost
 Essential: yes
 Architecture: all
+Provides: nostrhost-core
 Depends: python3-all (>= 3.11),
  , python3-nostrhost
  , python3-psutil, python3-requests, python3-dnspython, python3-openssl
