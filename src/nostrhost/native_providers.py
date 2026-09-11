@@ -931,7 +931,6 @@ class PolicyProvider:
 
     resource_type = "policy"
     directories = {
-        "fail2ban": Path("/etc/fail2ban/jail.d"),
         "logrotate": Path("/etc/logrotate.d"),
         "crowdsec": Path("/etc/crowdsec/scenarios"),
     }
@@ -943,7 +942,7 @@ class PolicyProvider:
 
     @staticmethod
     def _suffix(type_: str) -> str:
-        return ".local" if type_ == "fail2ban" else (".yaml" if type_ == "crowdsec" else "")
+        return ".yaml" if type_ == "crowdsec" else ""
 
     def _target(self, args: dict[str, Any]) -> Path:
         try:

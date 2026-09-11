@@ -52,7 +52,7 @@ def test_crowdsec_policy_remove_reloads_and_unlinks(tmp_path: Path):
 def test_non_crowdsec_policy_does_not_reload(tmp_path: Path):
     calls: list = []
     provider = PolicyProvider(root=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
-    desired = {"type": "fail2ban", "name": "example", "content": "[example]\nenabled=true\n"}
+    desired = {"type": "logrotate", "name": "example", "content": "/example.log {\nrotate 7\n}\n"}
     provider.apply(provider.plan(desired)[0])
     assert calls == []
 

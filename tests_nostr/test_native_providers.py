@@ -564,9 +564,9 @@ def test_health_provider_retries_transport_failure_then_succeeds():
 
 def test_policy_provider_writes_and_removes_managed_policy(tmp_path: Path):
     provider = PolicyProvider(root=tmp_path)
-    desired = {"type": "fail2ban", "name": "example", "content": "[example]\nenabled=true\n"}
+    desired = {"type": "logrotate", "name": "example", "content": "/example.log {\nrotate 7\n}\n"}
     provider.apply(provider.plan(desired)[0])
-    target = tmp_path / "etc/fail2ban/jail.d/nostrhost-example.local"
+    target = tmp_path / "etc/logrotate.d/nostrhost-example"
     assert target.read_text() == desired["content"]
     provider.apply(provider.remove(desired)[0])
     assert not target.exists()
