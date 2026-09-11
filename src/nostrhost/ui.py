@@ -170,3 +170,92 @@ def confirm(question: str, default: bool = False) -> bool:
     if value.strip().lower() in ("n", "no"):
         return False
     return default
+
+
+# --------------------------------------------------------------------------- #
+# result presentation (moulinette CLI output parity)
+
+from collections import OrderedDict
+from datetime import date, datetime
+from json import JSONEncoder
+
+
+def pretty_date(value: Any) -> str:
+    """Render a date/datetime in the system-local time zone."""
+    if isinstance(value, datetime):
+        return value.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return value
+
+
+def plain_print_dict(d: Any, depth: int = 0) -> None:
+    """Print a value/dict/list recursively in a script-friendly way.
+
+    Mirrors moulinette's CLI ``plain`` output:
+        #key / ##nested / value / one value per line.
+    """
+    if depth == 0 and isinstance(d, dict) and len(d) == 1:
+        _, d = d.popitem()
+    if isinstance(d, (tuple, set)):
+        d = list(d)
+    if isinstance(d, list):
+        for v in d:
+            plain_print_dict(v, depth + 1)
+    elif isinstance(d, dict):
+        for k, v in d.items():
+            print("{}#{}".format("#" * depth, k))
+            plain_print_dict(v, depth + 1)
+    else:
+        print(d)
+
+
+def pretty_print_dict(d: Any, depth: int = 0) -> None:
+    """Pretty-print a result dict with colored keys (moulinette parity)."""
+    keys = list(d.keys())
+    if not isinstance(d, OrderedDict):
+        keys = sorted(keys)
+    for k in keys:
+        v = d[k]
+        k = colorize(str(k), "purple")
+        if isinstance(v, (tuple, set)):
+            v = list(v)
+        if isinstance(v, list) and len(v) == 1:
+            v = v[0]
+        if isinstance(v, dict):
+            print("{:s}{}: ".format("  " * depth, k))
+            pretty_print_dict(v, depth + 1)
+        elif isinstance(v, list):
+            print("{:s}{}: ".format("  " * depth, k))
+            for value in v:
+                if isinstance(value, (dict, list)):
+                    pretty_print_dict({str(k): value}, depth + 1)
+                else:
+                    print("{:s}- {}".format("  " * (depth + 1), pretty_date(value)))
+        else:
+            print("{:s}{}: {}".format("  " * depth, k, pretty_date(v)))
+
+
+class JSONExtendedEncoder(JSONEncoder):
+    """Extended JSON encoder that never raises (moulinette parity)."""
+
+    def default(self, o: Any) -> Any:
+        if isinstance(o, set) or (hasattr(o, "__iter__") and hasattr(o, "next")):
+            return list(o)
+        if isinstance(o, date):
+            return pretty_date(o)
+        return repr(o)
+
+
+def format_result(result: Any, output_as: str | None) -> None:
+    """Print an operation result according to ``--output-as``."""
+    if output_as == "none" or result is None:
+        return
+    if output_as == "json":
+        print(JSONExtendedEncoder().encode(result))
+    elif output_as == "plain":
+        plain_print_dict(result)
+    elif isinstance(result, dict):
+        pretty_print_dict(result)
+    else:
+        print(pretty_date(result))

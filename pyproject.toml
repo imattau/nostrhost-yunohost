@@ -47,6 +47,7 @@ dependencies = [
     "sdbus",
     "sortedcollections",
     "toml",
+    "typer>=0.7",
     "zeroconf",
     "zmq",
 ]

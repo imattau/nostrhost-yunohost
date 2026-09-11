@@ -28,10 +28,12 @@ from typing import Any, Callable, TypeVar
 try:  # Keep the package stable on both the declared v1 and transitional v2 hosts.
     from pydantic.v1 import Field as PydField
     from pydantic.v1 import ValidationError as PydanticValidationError
+    from pydantic.v1 import constr
     from pydantic.v1 import create_model
 except ImportError:  # pragma: no cover - exercised on Pydantic v1 installations
     from pydantic import Field as PydField
     from pydantic import ValidationError as PydanticValidationError
+    from pydantic import constr
     from pydantic import create_model
 
 from .core import NostrHostValidationError
@@ -245,7 +247,16 @@ class OperationRegistry:
             field_type, default = _field_type(arg)
             kwargs: dict[str, Any] = {}
             if arg.pattern:
-                kwargs["regex"] = arg.pattern
+                if arg.nargs in ("+", "*"):
+                    # Pydantic v1 cannot enforce regex on a list field itself;
+                    # apply it to the element type instead.
+                    element = constr(regex=arg.pattern)  # type: ignore[call-arg,valid-type]
+                    if arg.nargs == "+" and (arg.required or arg.kind == "positional"):
+                        field_type = list[element]  # type: ignore[valid-type]
+                    else:
+                        field_type = list[element] | None  # type: ignore[valid-type]
+                else:
+                    kwargs["regex"] = arg.pattern
             if arg.password:
                 kwargs["secret"] = True
             if arg.choices:

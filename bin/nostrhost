@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""nostrhost — native administration CLI (Moulinette CLI replacement).
+
+Generates its command tree from the OperationRegistry (the compiled action
+maps) and dispatches through it; see nostrhost.cli.  Supports the same output
+modes as `yunohost` (default pretty, --output-as json/plain/none).
+"""
+
+from __future__ import annotations
+
+import sys
+
+from nostrhost.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())
