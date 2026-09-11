@@ -86,6 +86,11 @@ module = "yunohost.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# nostrhost-auth ships without type hints
+module = ["nostrhost_auth.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Those are the public, external modules that don't provide typing
 module = ["jwt", "sortedcollections", "IPython", "ldap.*", "dbus", "sdbus.*",
     "psutil", "bottle", "miniupnpc", "lexicon.*", "publicsuffix2"]

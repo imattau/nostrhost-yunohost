@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
-"""nostrhost — native administration CLI (Moulinette CLI replacement).
+"""nostrhost — native administration CLI.
 
-Generates its command tree from the OperationRegistry (the compiled action
-maps) and dispatches through it; see nostrhost.cli.  Supports the same output
-modes as `yunohost` (default pretty, --output-as json/plain/none).
+Typer commands over the native NostrHost operation surface (system/service/
+app/package/rollback/state tools, npub identity, capability); see
+nostrhost.cli.  Supports --output-as json/plain/none.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+try:  # installed layout: yunohost is a real package
+    import yunohost  # noqa: F401
+except ImportError:  # source-tree layout: alias src/ as the yunohost package
+    _src = Path(__file__).resolve().parent.parent / "src"
+    if _src.is_dir():
+        import types
+
+        _pkg = types.ModuleType("yunohost")
+        _pkg.__path__ = [str(_src)]  # type: ignore[attr-defined]
+        sys.modules["yunohost"] = _pkg
 
 from nostrhost.cli import main
 
