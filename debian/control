@@ -10,7 +10,6 @@ Package: nostrhost-core
 Essential: yes
 Architecture: all
 Provides: yunohost
-Conflicts: yunohost (<< 12.1.41.5)
 Replaces: yunohost (<< 12.1.41.5)
 Depends: python3-all (>= 3.11),
  , python3-nostrhost
@@ -48,6 +47,7 @@ Conflicts: iptables-persistent
  , slapd (>= 2.6)
  , dovecot-core (>= 1:2.4)
  , nftables (>= 1.1)
+ , yunohost (<< 12.1.41.5)
 Description: manageable and configured self-hosting server
  YunoHost aims to make self-hosting accessible to everyone. It configures
  a Web server alongside a LDAP base (email is an optional app, not part of
