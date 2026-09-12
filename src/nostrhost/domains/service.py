@@ -307,9 +307,11 @@ class DomainService:
         for path in packages_dir.glob("*-manifest.json"):
             app_id = path.name[: -len("-manifest.json")]
             try:
-                manifest = json.loads(path.read_text(encoding="utf-8"))
-                web = manifest.get("web") or {}
-                domain = web.get("domain")
+                from ..native_providers import installed_package_manifest
+
+                manifest = installed_package_manifest(app_id, state_dir=packages_dir)
+                web = manifest.get("web") if isinstance(manifest, dict) else None
+                domain = (web or {}).get("domain")
             except (json.JSONDecodeError, OSError):
                 continue
             if not isinstance(domain, str) or not domain:

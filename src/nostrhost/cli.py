@@ -964,7 +964,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 state=state,
             )
             if not body.get("ok"):
-                raise NostrHostError(f"domain.add rejected: {body.get('reason') or body.get('state')}")
+                raise NostrHostError(f"domain.add rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 
@@ -982,7 +982,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         def run() -> Any:
             body = _run_lifecycle("domain.remove", {"domain": name, "force": force}, state=state)
             if not body.get("ok"):
-                raise NostrHostError(f"domain.remove rejected: {body.get('reason') or body.get('state')}")
+                raise NostrHostError(f"domain.remove rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 
@@ -1007,7 +1007,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         def run() -> Any:
             body = _run_lifecycle("dns.apply", {"domain": name}, state=state)
             if not body.get("ok"):
-                raise NostrHostError(f"dns.apply rejected: {body.get('reason') or body.get('state')}")
+                raise NostrHostError(f"dns.apply rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 

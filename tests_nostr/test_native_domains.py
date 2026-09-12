@@ -181,10 +181,13 @@ def test_domain_verify(tmp_path):
 def test_domain_remove_bounded_and_blocks_dependents(tmp_path):
     svc = _service(tmp_path)
     svc.add(DomainResource(name="w4.test"), verify=False)
-    # simulate a native app attached to the domain
+    # simulate a native app attached to the domain (real stored-manifest shape:
+    # {id, version, manifest: <nested dict with [web]>})
     packages = tmp_path / "packages"
     packages.mkdir()
-    (packages / "photos-manifest.json").write_text(json.dumps({"web": {"domain": "w4.test", "path": "/photos/"}}))
+    (packages / "photos-manifest.json").write_text(
+        json.dumps({"id": "photos", "version": "0.1", "manifest": {"app": {"id": "photos"}, "web": {"domain": "w4.test", "path": "/photos/"}}})
+    )
     with pytest.raises(DomainError):
         svc.remove("w4.test")
     # force removal succeeds and removes owned records + unregisters
