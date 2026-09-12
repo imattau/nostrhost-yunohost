@@ -1,6 +1,6 @@
 """Unit tests for the fork's Nostr-native identity (Phase 3).
 
-Run with: pytest tests_nostr/  (needs nostrhost-auth, coincurve, nostr-sdk)
+Run with: pytest tests_nostr/  (needs nostrhost-auth and nostr-sdk)
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_identity import (
     IdentityError,
@@ -29,7 +29,7 @@ from yunohost.nostr_identityd import handle_identity_event
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

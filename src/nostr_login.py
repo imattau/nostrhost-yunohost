@@ -132,7 +132,7 @@ def _notice_config() -> dict | None:
 
 def _notice_signer() -> tuple[str, str] | None:
     """Return the portal's dedicated (sk, pubkey) notice key, or None."""
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     conf = _notice_config()
     if not conf:
@@ -140,7 +140,7 @@ def _notice_signer() -> tuple[str, str] | None:
     sk = conf.get("notice_sk")
     if not isinstance(sk, str) or not _is_hex64(sk):
         return None
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

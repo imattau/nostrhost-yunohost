@@ -15,7 +15,7 @@ import hashlib
 import json
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from nostrhost.credentials import CredentialError, read_secret, set_secret
 from nostrhost.dns.freehost import (
@@ -31,7 +31,7 @@ from nostrhost.dns.freehost import (
 from nostrhost.dns.providers.dynette import DynetteProvider
 
 SK = "01" * 32
-PUBKEY = PublicKeyXOnly.from_secret(bytes.fromhex(SK)).format().hex()
+PUBKEY = Keys.parse(SK).public_key().to_hex()
 
 
 def _signer(sk, pubkey, kind, content, tags):
@@ -41,15 +41,9 @@ def _signer(sk, pubkey, kind, content, tags):
 
 
 def _verify_claim(claim):
-    serialized = json.dumps(
-        [0, claim["pubkey"], claim["created_at"], claim["kind"], claim["tags"], claim["content"]],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    event_id = hashlib.sha256(serialized).hexdigest()
-    return PublicKeyXOnly(bytes.fromhex(claim["pubkey"])).verify(
-        bytes.fromhex(claim["sig"]), bytes.fromhex(event_id)
-    )
+    from nostr_sdk import Event
+
+    return Event.from_json(json.dumps(claim)).verify()
 
 
 def _sub(tmp_path, hostname="foo.nohost.me", **kw):

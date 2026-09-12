@@ -10,14 +10,13 @@ Authorship is admin-only in Phase 3 (self-service linking arrives with the
 portal in Phase 4). Relay I/O uses the raw NIP-01 WebSocket protocol against
 the local control relay — no nostr-sdk signer required.
 
-Heavy dependencies (nostrhost_auth, coincurve, websockets) are imported
+Heavy dependencies (nostrhost_auth, nostr-sdk, websockets) are imported
 lazily so the module is importable and unit-testable without them; the
 transport and store are injectable for tests.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import secrets
@@ -170,9 +169,9 @@ def _gen_sk() -> str:
 
 
 def _pubkey(sk: str) -> str:
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
-    return PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    return Keys.parse(sk).public_key().to_hex()
 
 
 def _npub(pk: str) -> str:
@@ -368,26 +367,28 @@ def list_identities(*, db_path: str | Path | None = None) -> list[Identity]:
 # authoring
 
 def _sign_event(operator_sk: str, operator_pubkey: str, kind: int, content: str, tags: list[list[str]]) -> dict[str, Any]:
-    """Build and sign a NIP-01 event with coincurve (pure python, no
-    nostr-sdk signer needed)."""
-    from coincurve import PrivateKey
+    """Build and sign a NIP-01 event through the rust-nostr SDK.
+
+    The event id is byte-identical to the previous manual canonical
+    serialization, so callers (and the Go control plane) see no change.
+    """
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag, Timestamp
 
     created_at = int(time.time())
-    serialized = json.dumps(
-        [0, operator_pubkey, created_at, kind, tags, content],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    event_id = hashlib.sha256(serialized).hexdigest()
-    sig = PrivateKey(bytes.fromhex(operator_sk)).sign_schnorr(bytes.fromhex(event_id)).hex()
+    event = (
+        EventBuilder(Kind(kind), content)
+        .tags([Tag.parse(tag) for tag in tags])
+        .custom_created_at(Timestamp.from_secs(created_at))
+        .finalize(Keys.parse(operator_sk))
+    )
     return {
-        "id": event_id,
+        "id": event.id().to_hex(),
         "pubkey": operator_pubkey,
         "created_at": created_at,
         "kind": kind,
         "tags": tags,
         "content": content,
-        "sig": sig,
+        "sig": event.signature(),
     }
 
 
@@ -402,15 +403,15 @@ def _operator_config(
     relay = control_relay or os.environ.get("NOSTRHOST_CONTROL_RELAY") or DEFAULT_CONTROL_RELAY
     if not sk or not _is_hex64(sk):
         raise IdentityError("operator_sk is not configured (set NOSTRHOST_OPERATOR_SK or " + OPERATOR_CONFIG + ")")
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
-    operator_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    operator_pubkey = Keys.parse(sk).public_key().to_hex()
     srv = server_sk or os.environ.get("NOSTRHOST_SERVER_SK") or conf.get("server_sk") or sk
-    server_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(srv)).format().hex()
+    server_pubkey = Keys.parse(srv).public_key().to_hex()
     pub = os.environ.get("NOSTRHOST_PUBLISHER_SK") or conf.get("publisher_sk") or sk
-    publisher_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(pub)).format().hex()
+    publisher_pubkey = Keys.parse(pub).public_key().to_hex()
     ntf = os.environ.get("NOSTRHOST_NOTIFIER_SK") or conf.get("notifier_sk") or sk
-    notifier_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(ntf)).format().hex()
+    notifier_pubkey = Keys.parse(ntf).public_key().to_hex()
     if admins is None:
         file_admins = conf.get("admins")
         admins = file_admins if isinstance(file_admins, list) else []

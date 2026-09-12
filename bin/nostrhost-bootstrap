@@ -20,7 +20,7 @@ flows through the configured admins via signed events).
 
 The canonical native path is `nostrhost postinstall new` (see
 nostrhost.cli); this script is the standalone equivalent and must run on an
-interpreter with the venv deps when the pip-only packages (coincurve,
+interpreter with the venv deps when the pip-only packages (nostr-sdk,
 nostrhost_auth) are not available system-wide, e.g.
 `/opt/nostrhost/venv/bin/python3 /usr/bin/nostrhost-bootstrap`.
 
@@ -37,7 +37,7 @@ import os as _os
 import sys as _sys
 from pathlib import Path as _Path
 
-# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# Prefer the bundled runtime venv: the runtime's wheels (nostr-sdk, ...) are
 # only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
 # for nodes where the runtime has not been installed yet. The venv's python
 # binary is a symlink to the system interpreter, so detect it via sys.prefix
@@ -51,7 +51,7 @@ import os as _os
 import sys as _sys
 from pathlib import Path as _Path
 
-# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# Prefer the bundled runtime venv: the runtime's wheels (nostr-sdk, ...) are
 # only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
 # for nodes where the runtime has not been installed yet.
 _VENV_PY = _Path("/opt/nostrhost/venv/bin/python3")

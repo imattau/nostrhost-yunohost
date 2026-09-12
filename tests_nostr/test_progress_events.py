@@ -10,7 +10,7 @@ import io
 import json
 import os
 
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 from typer.testing import CliRunner
 
 from nostrhost import api as api_module
@@ -34,7 +34,7 @@ from yunohost.nostr_operationsd import OperationEngine
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

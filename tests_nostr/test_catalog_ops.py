@@ -134,10 +134,9 @@ def test_catalog_publish_signs_with_publisher_key(boot, cli_fake):
     serialized = json.dumps([0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]], separators=(",", ":"), ensure_ascii=False).encode()
     assert hashlib.sha256(serialized).hexdigest() == event["id"]
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Event
 
-    pubkey = PublicKeyXOnly(bytes.fromhex(event["pubkey"]))
-    assert pubkey.verify(bytes.fromhex(event["sig"]), hashlib.sha256(serialized).digest())
+    assert Event.from_json(json.dumps(event)).verify()
 
     assert [c[0][0] for c in cli_fake] == ["publish", "ingest"]
 

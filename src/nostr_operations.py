@@ -838,9 +838,9 @@ def operation_catalog() -> list[dict[str, Any]]:
 # event authoring (each chain step is signed by the actor's own key)
 
 def _derive_pubkey(sk: str) -> str:
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
-    return PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    return Keys.parse(sk).public_key().to_hex()
 
 
 def _e_tag(request_id: str) -> list[list[str]]:
@@ -927,10 +927,10 @@ def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str
     if hashlib.sha256(serialized).hexdigest() != event["id"]:
         raise OperationError("NIP-46 approval id does not match its contents")
     try:
-        from coincurve import PublicKeyXOnly
-        if not PublicKeyXOnly(bytes.fromhex(str(event["pubkey"]))).verify(bytes.fromhex(str(event["sig"])), bytes.fromhex(event["id"])):
+        from nostr_sdk import Event
+        if not Event.from_json(json.dumps(event)).verify():
             raise OperationError("NIP-46 approval signature is invalid")
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
         raise OperationError("NIP-46 approval contains invalid key or signature encoding") from exc
     return event
 

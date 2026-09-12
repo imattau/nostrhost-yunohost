@@ -207,11 +207,11 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     a post commit, the post one linked to the request and known-good."""
     import os
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     def key():
         s = os.urandom(32).hex()
-        return s, PublicKeyXOnly.from_secret(bytes.fromhex(s)).format().hex()
+        return s, Keys.parse(s).public_key().to_hex()
 
     server_sk, server_pk = key()
     admin_sk, admin_pk = key()
@@ -253,11 +253,11 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
 def test_executor_failure_marks_post_not_known_good(tmp_path: Path):
     import os
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     def key():
         s = os.urandom(32).hex()
-        return s, PublicKeyXOnly.from_secret(bytes.fromhex(s)).format().hex()
+        return s, Keys.parse(s).public_key().to_hex()
 
     server_sk, server_pk = key()
     admin_sk, admin_pk = key()

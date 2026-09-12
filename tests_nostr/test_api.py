@@ -2,7 +2,7 @@
 
 Endpoints are exercised over the WSGI interface with monkeypatched handlers
 (no real services/relay/keys).  The NIP-98 authorizer is tested both with a
-real coincurve-signed event (via the fork's ``_sign_event``) and with an
+real SDK-signed event (via the fork's ``_sign_event``) and with an
 injected fake for the operation routes.
 """
 

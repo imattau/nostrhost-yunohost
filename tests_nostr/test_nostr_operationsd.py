@@ -15,7 +15,7 @@ import json
 import os
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_operations import (
     build_approval,
@@ -33,7 +33,7 @@ from yunohost.nostr_operationsd import OperationEngine, _sorted_replay
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

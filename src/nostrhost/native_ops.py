@@ -1259,7 +1259,7 @@ def _verify_catalog_event(event: dict[str, Any]) -> dict[str, Any]:
     import hashlib
     import re as _re
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Event
 
     required = ("pubkey", "created_at", "kind", "tags", "content", "id", "sig")
     if not isinstance(event, dict) or not all(k in event for k in required):
@@ -1310,7 +1310,11 @@ def _verify_catalog_event(event: dict[str, Any]) -> dict[str, Any]:
     serialized = json.dumps([0, pubkey, event["created_at"], kind, tags, content], separators=(",", ":"), ensure_ascii=False).encode()
     if hashlib.sha256(serialized).hexdigest() != event["id"]:
         raise OperationError("event id does not match its canonical serialization")
-    if not PublicKeyXOnly(bytes.fromhex(pubkey)).verify(bytes.fromhex(event["sig"]), hashlib.sha256(serialized).digest()):
+    try:
+        parsed = Event.from_json(json.dumps(event))
+    except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
+        raise OperationError("event signature is invalid") from exc
+    if not parsed.verify_signature():
         raise OperationError("event signature is invalid")
 
     trusted = [p.strip() for p in _trusted_publishers().split(",") if p.strip()]

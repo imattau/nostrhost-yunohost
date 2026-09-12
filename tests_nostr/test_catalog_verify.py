@@ -52,13 +52,13 @@ def test_catalog_verify_accepts_valid_publisher_event(boot):
 def test_catalog_verify_rejects_untrusted_publisher(boot):
     import secrets
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     # A random key is not in this node's trusted publisher set (the env is
     # still pointed at the bootstrapped node, whose operator config holds the
     # only trusted publisher key).
     rogue_sk = secrets.token_hex(32)
-    rogue_pubkey = PublicKeyXOnly.from_secret(bytes.fromhex(rogue_sk)).format().hex()
+    rogue_pubkey = Keys.parse(rogue_sk).public_key().to_hex()
     event = _declaration_event(rogue_sk, rogue_pubkey)
     with pytest.raises(OperationError, match="not a trusted catalogue publisher"):
         native_ops._safe_catalog_verify(json.dumps(event))

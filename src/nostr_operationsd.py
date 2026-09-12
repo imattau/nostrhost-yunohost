@@ -26,7 +26,6 @@ Phase 3 posture: read-only tools only, admin-gated, loopback relay.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import secrets
@@ -489,20 +488,16 @@ def _is_hex64(s: str) -> bool:
 
 
 def _verify_delegation_event(event: dict[str, Any], *, revocation: bool = False) -> None:
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Event
 
     if not _is_hex64(str(event.get("id", ""))) or not _is_hex64(str(event.get("pubkey", ""))):
         raise ValueError("invalid delegation event key")
-    serialized = json.dumps(
-        [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]],
-        separators=(",", ":"), ensure_ascii=False,
-    ).encode()
-    if hashlib.sha256(serialized).hexdigest() != event["id"]:
-        raise ValueError("delegation event id mismatch")
-    if not PublicKeyXOnly(bytes.fromhex(event["pubkey"])).verify(
-        bytes.fromhex(event["sig"]), bytes.fromhex(event["id"])
-    ):
-        raise ValueError("delegation event signature invalid")
+    try:
+        parsed = Event.from_json(json.dumps(event))
+        if not parsed.verify():
+            raise ValueError("delegation event signature or id invalid")
+    except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
+        raise ValueError("delegation event signature or id invalid") from exc
     if revocation and event.get("kind") != KIND_DELEGATION_REVOCATION:
         raise ValueError("invalid delegation revocation kind")
     if not revocation and event.get("kind") != KIND_DELEGATION:

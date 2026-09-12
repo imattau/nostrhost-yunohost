@@ -12,7 +12,7 @@ import os as _os
 import sys as _sys
 from pathlib import Path as _Path
 
-# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# Prefer the bundled runtime venv: the runtime's wheels (nostr-sdk, ...) are
 # only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
 # for nodes where the runtime has not been installed yet. The venv's python
 # binary is a symlink to the system interpreter, so detect it via sys.prefix

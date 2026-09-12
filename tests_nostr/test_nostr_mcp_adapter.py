@@ -5,7 +5,7 @@ import json
 import os
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_identity import _sign_event
 from yunohost.nostr_mcp_adapter import MCPAdapterError, NostrMCPAdapter
@@ -14,7 +14,7 @@ from yunohost.nostr_operations import build_execution_result
 
 def new_key():
     sk = os.urandom(32).hex()
-    return sk, PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    return sk, Keys.parse(sk).public_key().to_hex()
 
 
 def test_mcp_adapter_lists_native_tools_and_submits_signed_request():
