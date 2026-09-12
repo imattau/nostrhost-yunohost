@@ -877,7 +877,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Create a full host Restic snapshot (satisfies policy backup gates)."""
         def run() -> Any:
             client = _restic_client()
-            snapshot = client.snapshot(list(SYSTEM_BACKUP_PATHS), tag="system")
+            snapshot = client.snapshot(list(SYSTEM_BACKUP_PATHS))
             return {"snapshot": snapshot, "paths": list(SYSTEM_BACKUP_PATHS)}
         _guard(run, output_as)
 

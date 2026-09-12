@@ -1,3 +1,13 @@
+yunohost (12.1.41.16) stable; urgency=low
+
+  * nostr_restic.snapshots() no longer filters by the configured tag by
+    default — the tag is a creation default, not a listing filter, so
+    per-app/system snapshots count as policy backup evidence and show in
+    `nostrhost backup list`. `backup create` uses the configured tag.
+  * nostrhost CLI: lifecycle helpers import through yunohost.* (12.1.41.15).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 22:00:00 +0200
+
 yunohost (12.1.41.15) stable; urgency=low
 
   * nostrhost: fix the lifecycle helpers' import paths — they imported

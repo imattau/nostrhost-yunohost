@@ -182,10 +182,14 @@ class ResticClient:
         return snapshot_id
 
     def snapshots(self, *, tag: str | None = None, host: str | None = None) -> list[dict[str, Any]]:
-        """List snapshots (optionally filtered by tag/host)."""
+        """List snapshots (optionally filtered by tag/host).
+
+        By default every snapshot in the repository is listed: the configured
+        tag is a default for *creating* snapshots, not a visibility filter, so
+        per-app and system backups all count as backup evidence."""
         args = ["snapshots", "--json"]
-        if tag or self.tag:
-            args += ["--tag", tag or self.tag]
+        if tag:
+            args += ["--tag", tag]
         if host or self.host:
             args += ["--host", host or self.host]
         res = self._run(args)

@@ -8,6 +8,7 @@ RESTIC_PASSWORD environment variable, never on argv.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import textwrap
@@ -122,6 +123,37 @@ def test_snapshots_lists_and_filters(tmp_path: Path):
     snaps = client.snapshots(tag="nostrhost")
     assert snaps[0]["id"] == "b" * 64
     assert snaps[0]["paths"] == ["/opt/yunohost"]
+
+
+def test_snapshots_default_lists_all_tags(tmp_path: Path, monkeypatch):
+    # The configured tag is a creation default, not a listing filter: policy
+    # backup evidence and `backup list` must see per-app/system snapshots too.
+    recorder = tmp_path / "recorded-args.json"
+    monkeypatch.setenv("RECORD_ARGS", str(recorder))
+
+    def make_recording_restic() -> Path:
+        body = r'''#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["RECORD_ARGS"], "w").write(json.dumps(sys.argv[1:]))
+print(json.dumps([{"id": "b"*64, "time": "2026-01-01T00:00:00Z", "tags": ["nostrhost"]}]))
+'''
+        script = tmp_path / "restic-record"
+        script.write_text(textwrap.dedent(body))
+        script.chmod(0o755)
+        return script
+
+    client = ResticClient(
+        repo="x", password=PASSWORD, binary=str(make_recording_restic()),
+        host="host1", tag="nostrhost",
+    )
+    client.snapshots()
+    recorded = json.loads(recorder.read_text())
+    assert "--tag" not in recorded
+
+    client.snapshots(tag="data")
+    recorded = json.loads(recorder.read_text())
+    assert "--tag" in recorded
+    assert recorded[recorded.index("--tag") + 1] == "data"
 
 
 def test_restore_parses_summary(tmp_path: Path):
