@@ -1,3 +1,14 @@
+yunohost (12.1.41.7) stable; urgency=low
+
+  * nostrhost: postinstall fixes from the clean-VM acceptance run —
+    api.py auth plugin reads the route rule from bottle 0.12 dict Routes
+    (fixes /healthz 500 on Debian); caddy.service uses StateDirectory/
+    LogsDirectory so the mount namespace never fails on a missing dir;
+    postinstall also creates /var/lib/caddy; nostrhost-certd.service/timer
+    now ship to /lib/systemd/system so postinstall can enable the timer.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 16:00:00 +0200
+
 yunohost (12.1.41.6) stable; urgency=low
 
   * nostrhost: native postinstall (ALPHA-PLAN W2) — `nostrhost postinstall

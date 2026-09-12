@@ -206,6 +206,7 @@ def _enable_postinstall_daemons() -> list[str]:
 def _prepare_node(domain: str, operator_npub: str) -> None:
     """Shared postinstall base configuration (both --new and --restore)."""
     Path("/var/lib/nostrhost").mkdir(parents=True, exist_ok=True)
+    Path("/var/lib/caddy").mkdir(parents=True, exist_ok=True)
     Path("/var/log/caddy").mkdir(parents=True, exist_ok=True)
     _write_policy_toml(operator_npub)
     _render_caddy_base(domain)

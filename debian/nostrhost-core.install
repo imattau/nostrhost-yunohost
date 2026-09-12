@@ -26,6 +26,8 @@ conf/yunohost/nostr-operationsd.service /lib/systemd/system/
 conf/yunohost/nostr-securityd.service /lib/systemd/system/
 conf/yunohost/nostr-api.service /lib/systemd/system/
 conf/yunohost/caddy.service /lib/systemd/system/
+conf/yunohost/nostrhost-certd.service /lib/systemd/system/
+conf/yunohost/nostrhost-certd.timer /lib/systemd/system/
 locales/* /usr/share/yunohost/locales/
 doc/yunohost.8.gz /usr/share/man/man8/
 doc/bash_completion.d/* /etc/bash_completion.d/

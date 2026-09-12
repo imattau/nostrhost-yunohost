@@ -20,7 +20,11 @@ User=root
 UMask=0022
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/caddy /var/log/caddy /etc/caddy
+ProtectHome=true
+# StateDirectory/LogsDirectory make systemd create these before exec, so the
+# mount namespace (ReadWritePaths) never fails on a missing directory.
+StateDirectory=caddy
+LogsDirectory=caddy
 
 [Install]
 WantedBy=multi-user.target

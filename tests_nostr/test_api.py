@@ -69,6 +69,23 @@ def test_healthz_is_public():
     assert json.loads(body)["ok"] is True
 
 
+def test_healthz_public_when_bottle_route_is_dict():
+    """bottle 0.12's Route is a dict subclass: the auth plugin must read the
+    rule from the dict, not via `.rule`, or /healthz 500s on real Debian."""
+
+    def deny_authorizer() -> str:
+        raise ApiError(401, "authentication_required", "nope")
+
+    plugin = api_module._AuthErrorsPlugin(authorizer=deny_authorizer)
+    plugin.app = None
+    wrapped = plugin.apply(lambda: "ok", {"rule": "/healthz", "method": "GET"})
+    assert wrapped() == "ok"
+    # non-healthz dict route runs the authorizer and maps its ApiError to a
+    # JSON 401 response (the wrapper converts errors, it does not re-raise)
+    wrapped_auth = plugin.apply(lambda: "ok", {"rule": "/system/version", "method": "GET"})
+    assert "authentication_required" in str(wrapped_auth())
+
+
 # --------------------------------------------------------------------------- #
 # auth
 

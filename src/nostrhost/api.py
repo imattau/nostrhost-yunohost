@@ -125,7 +125,13 @@ class _AuthErrorsPlugin:
 
     def apply(self, callback: Callable[..., Any], route: Any) -> Callable[..., Any]:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if str(route.rule) != "/healthz":
+            # bottle 0.12's Route is a dict subclass: `.rule` is a key, not
+            # an attribute. Accept both layouts so /healthz stays public.
+            if isinstance(route, dict):
+                rule = route.get("rule", "")
+            else:
+                rule = getattr(route, "rule", "")
+            if str(rule) != "/healthz":
                 try:
                     self.authorizer()
                 except ApiError as exc:
