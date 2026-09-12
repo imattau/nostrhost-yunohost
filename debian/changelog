@@ -1,3 +1,11 @@
+yunohost (12.1.41.10) stable; urgency=low
+
+  * nostrhost-core.postinst: fix the upgrade path — the core rename had
+    replaced `yunohost tools regen-conf` with bare hook invocations, which
+    crash (unbound $1 under set -u) on any apt upgrade of an installed node.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 19:00:00 +0200
+
 yunohost (12.1.41.9) stable; urgency=low
 
   * nostrhost: Workstream 3 native app lifecycle.

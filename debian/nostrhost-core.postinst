@@ -135,9 +135,7 @@ do_configure() {
         fi
     else
         echo "Regenerating configuration, this might take a while..."
-        bash /usr/share/yunohost/hooks/conf_regen/01-yunohost
-        bash /usr/share/yunohost/hooks/conf_regen/15-caddy
-        bash /usr/share/yunohost/hooks/conf_regen/37-mdns
+        yunohost tools regen-conf --output-as none
     fi
 }
 
