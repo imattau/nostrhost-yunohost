@@ -174,6 +174,22 @@ def test_registry_schemas_and_catalog():
     assert json.dumps(catalog)  # fully JSON-serialisable
 
 
+def test_every_write_tool_carries_an_input_model():
+    """Every approval-gated (mutation) op must expose a JSON-Schema input model
+    so generated MCP tools advertise their real arguments (Phase 3)."""
+    from yunohost.nostr_operations import TOOLS, operation_catalog
+
+    for name, spec in TOOLS.items():
+        if spec.require_approval:
+            assert spec.input_model is not None, f"write tool {name} is missing an input_model"
+    catalog = {entry["name"]: entry for entry in operation_catalog()}
+    for name in TOOLS:
+        if TOOLS[name].require_approval:
+            schema = catalog[name]["input_schema"]
+            assert schema and isinstance(schema.get("properties"), dict), f"write tool {name} has no schema properties"
+            assert schema.get("additionalProperties") is False, f"write tool {name} schema must forbid extra args"
+
+
 def test_service_status_accepts_the_planner_name_argument(monkeypatch):
     import sys
     from types import ModuleType

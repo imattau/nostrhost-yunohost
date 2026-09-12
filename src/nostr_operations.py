@@ -36,7 +36,9 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
@@ -181,6 +183,85 @@ class ToolSpec:
             return self.input_model.model_validate(args).model_dump(exclude_none=True)
         except Exception as exc:  # pydantic ValidationError -> OperationError
             raise OperationError(f"invalid arguments for {self.name}: {exc}") from exc
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ServiceRestartArgs(_Strict):
+    name: str = Field(description="one known service name to restart")
+
+
+class ServiceControlArgs(_Strict):
+    name: str = Field(description="one known service name to control")
+    action: Literal["start", "stop", "restart"] = Field(description="the action to run")
+
+
+class AppRemoveArgs(_Strict):
+    app: str = Field(description="one installed app id to remove")
+    purge: bool = False
+
+
+class PackageReconcileArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the signed native package plan envelope (from package.plan)")
+
+
+class RollbackApplyArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the rollback plan produced by the rollback planner")
+
+
+class StateReconcileArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the approved reconciliation plan for the state layer")
+
+
+class DomainAddArgs(_Strict):
+    domain: str = Field(description="the hostname to register (e.g. foo.example.com)")
+    provider_type: str = Field(
+        default="manual", description="DNS provider: manual | cloudflare | duckdns | dynu | dynette | desec"
+    )
+    provider_zone: str | None = Field(default=None, description="DNS zone for the provider (apex name)")
+    credential: str | None = Field(
+        default=None, description="secret:dns/<provider>/<name> reference for the provider token"
+    )
+    primary: bool = False
+    ipv4: bool = True
+    ipv6: bool = True
+    wildcard: bool = True
+    nip05: bool = False
+    tls_caa: list[str] | None = Field(default=None, description="issuer CAA records to publish")
+    apply_dns: bool = True
+    verify: bool = True
+
+
+class DomainRemoveArgs(_Strict):
+    domain: str
+    force: bool = False
+
+
+class DnsApplyArgs(_Strict):
+    domain: str
+
+
+class DnsSubscribeArgs(_Strict):
+    hostname: str = Field(description="a <label> under nohost.me / noho.st / ynh.fr to claim")
+    secret: str | None = Field(default=None, description="TSIG secret; generated if omitted")
+    rotate: bool = False
+
+
+class DnsUnsubscribeArgs(_Strict):
+    hostname: str
+
+
+class CredentialSetArgs(_Strict):
+    provider: str
+    name: str
+    value: str = Field(description="the provider token to store")
+
+
+class CredentialRemoveArgs(_Strict):
+    provider: str
+    name: str
 
 
 # Risk / reversibility tiers used across the registry (MCP transition §6).
@@ -540,6 +621,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "package.reconcile": ToolSpec(
         name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,
+        input_model=PackageReconcileArgs,
         description="apply an approved native package operation plan",
     ),
     "system.version": ToolSpec(
@@ -560,6 +642,7 @@ TOOLS: dict[str, ToolSpec] = {
         name="app.remove",
         handler=_safe_app_remove,
         scope=SCOPE_APPS_REMOVE,
+        input_model=AppRemoveArgs,
         description="remove one installed app (rollback reverse-action, write operation)",
     ),
     "service.status": ToolSpec(
@@ -573,24 +656,28 @@ TOOLS: dict[str, ToolSpec] = {
         name="service.restart",
         handler=_safe_service_restart,
         scope=SCOPE_SERVICES_RESTART,
+        input_model=ServiceRestartArgs,
         description="restart one named service (write operation)",
     ),
     "service.control": ToolSpec(
         name="service.control",
         handler=_safe_service_control,
         scope=SCOPE_SERVICES_WRITE,
+        input_model=ServiceControlArgs,
         description="start/stop/restart one named service (rollback reverse-action)",
     ),
     "rollback.apply": ToolSpec(
         name="rollback.apply",
         handler=_safe_rollback_apply,
         scope=SCOPE_STATE_WRITE,
+        input_model=RollbackApplyArgs,
         description="execute an assisted rollback plan (write operation, admin-approval-gated)",
     ),
     "state.reconcile": ToolSpec(
         name="state.reconcile",
         handler=_safe_reconcile_apply,
         scope=SCOPE_STATE_WRITE,
+        input_model=StateReconcileArgs,
         description="apply an approved, bounded reconciliation plan",
     ),
     "domain.list": ToolSpec(
@@ -611,12 +698,14 @@ TOOLS: dict[str, ToolSpec] = {
         name="domain.add",
         handler=_safe_domain_add,
         scope=SCOPE_DOMAINS_WRITE,
+        input_model=DomainAddArgs,
         description="register a native domain: plan DNS, apply, stand up Caddy routes, record state",
     ),
     "domain.remove": ToolSpec(
         name="domain.remove",
         handler=_safe_domain_remove,
         scope=SCOPE_DOMAINS_WRITE,
+        input_model=DomainRemoveArgs,
         description="remove a native domain (blocks while apps use it; deletes owned DNS only)",
     ),
     "dns.plan": ToolSpec(
@@ -630,6 +719,7 @@ TOOLS: dict[str, ToolSpec] = {
         name="dns.apply",
         handler=_safe_dns_apply,
         scope=SCOPE_DNS_WRITE,
+        input_model=DnsApplyArgs,
         description="apply the DNS plan for a domain through its provider",
     ),
     "dns.verify": ToolSpec(
@@ -650,6 +740,7 @@ TOOLS: dict[str, ToolSpec] = {
         name="dns.subscribe",
         handler=_safe_dns_subscribe,
         scope=SCOPE_DNS_WRITE,
+        input_model=DnsSubscribeArgs,
         description="claim a nostr-native free hostname (identity-backed Dynette): sign the ownership claim with the operator key and provision its TSIG secret in the broker",
     ),
     "dns.subscriptions": ToolSpec(
@@ -663,6 +754,7 @@ TOOLS: dict[str, ToolSpec] = {
         name="dns.unsubscribe",
         handler=_safe_dns_unsubscribe,
         scope=SCOPE_DNS_WRITE,
+        input_model=DnsUnsubscribeArgs,
         description="release a nostr-native free-hostname subscription and drop its broker secret",
     ),
     "network.public_ip": ToolSpec(
@@ -676,12 +768,14 @@ TOOLS: dict[str, ToolSpec] = {
         name="credential.set",
         handler=_safe_credential_set,
         scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        input_model=CredentialSetArgs,
         description="store a DNS provider token in the credential broker (secret:dns/<provider>/<name>)",
     ),
     "credential.remove": ToolSpec(
         name="credential.remove",
         handler=_safe_credential_remove,
         scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        input_model=CredentialRemoveArgs,
         description="remove a DNS provider token from the credential broker",
     ),
     "credential.list": ToolSpec(
