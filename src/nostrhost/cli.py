@@ -694,6 +694,12 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         from yunohost.tools import tools_regen_conf
 
         def run() -> Any:
+            from yunohost.nostr_identity import _init_headless_yunohost
+
+            # tools_regen_conf drives YunoHost's operation logger, which
+            # reads Moulinette.interface.type; the headless init registers
+            # the CLI interface (moulinette itself was retired).
+            _init_headless_yunohost()
             categories = [item.strip() for item in names.split(",") if item.strip()]
             return tools_regen_conf(names=categories, force=force)
 
