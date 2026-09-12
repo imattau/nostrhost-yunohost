@@ -395,6 +395,10 @@ CADDY_TEMPLATE_DIR = "/usr/share/yunohost/conf/caddy"
 POLICY_CONFIG = "/etc/nostrhost/policy.toml"
 RELAY_CONFIG = "/etc/nostrhost/relay.toml"
 INSTALLED_MARKER = "/etc/yunohost/installed"
+NOTIFY_CONFIG = os.environ.get("NOSTRHOST_NOTIFY_CONFIG", "/etc/nostrhost/notify.toml")
+CATALOGUE_ENV = os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env")
+KEYS_RECOVERY = os.environ.get("NOSTRHOST_KEYS_RECOVERY", "/etc/nostrhost/keys.recovery")
+NOTIFY_STATE_DIR = os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", "/var/lib/nostrhost/state/notifications")
 
 
 def _write_policy_toml(operator_npub: str) -> Path:
@@ -444,6 +448,103 @@ def _render_caddy_base(domain: str) -> None:
     Path(CADDY_BASE_DIR, "Caddyfile").write_text(caddyfile.read_text(encoding="utf-8"))
     conf = domain_tpl.read_text(encoding="utf-8").replace("{{ domain }}", domain)
     Path(CADDY_CONF_DIR, f"{domain}.conf").write_text(conf)
+
+
+def _normalize_sk(value: str) -> str:
+    """Accept a 64-hex secret key or an ``nsec1...`` bech32 key; return hex.
+
+    Restore and the recovery-bundle loader accept either form so an operator
+    recovering a node can paste the keys as the safe-keeping format (nsec1)
+    or the on-disk hex form.
+    """
+    if _is_hex64(value):
+        return value
+    if value.startswith("nsec1"):
+        from nostr_sdk import SecretKey
+
+        return SecretKey.parse(value).to_hex()
+    raise NostrHostError("secret key must be 64-hex or an nsec1... key")
+
+
+def _render_notify_config(notifier_sk: str, relay: str) -> Path:
+    """Render the nostrhost-notify service config from the generated key."""
+    state_dir = Path(os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", NOTIFY_STATE_DIR))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = Path(os.environ.get("NOSTRHOST_NOTIFY_CONFIG", NOTIFY_CONFIG))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# nostrhost-notify native notification service (rendered by postinstall).\n"
+        f'relay_url = "{relay}"\n'
+        f'notifier_private_key = "{notifier_sk}"\n'
+        f'recipients_path = "{state_dir}/recipients.toml"\n'
+        f'policy_path = "{state_dir}/policy.toml"\n'
+        f'state_path = "{state_dir}/state.json"\n'
+    )
+    os.chmod(path, 0o600)
+    return path
+
+
+def _render_catalogue_env(publisher_pubkey: str) -> Path:
+    """Render the native catalogue synchroniser env (trusted publishers)."""
+    path = Path(os.environ.get("NOSTRHOST_CATALOGUE_ENV", CATALOGUE_ENV))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# nostrhost-catalog synchroniser (rendered by postinstall).\n"
+        f"NOSTRHOST_CATALOG_PUBLISHERS={publisher_pubkey}\n"
+        "NOSTRHOST_CATALOG_RELAYS=ws://127.0.0.1:4848\n"
+        "NOSTRHOST_CATALOG_STATE=/var/lib/nostrhost/catalogue.json\n"
+    )
+    os.chmod(path, 0o600)
+    return path
+
+
+def _recovery_bundle(boot: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Build the show-once recovery bundle: every node key as nsec1 + npubs."""
+    from nostr_sdk import SecretKey
+
+    keys = {k: SecretKey.parse(boot[k]).to_bech32() for k in ("operator_sk", "server_sk", "notice_sk", "publisher_sk", "notifier_sk")}
+    npubs = {k: _npub(boot[k]) for k in ("operator_pubkey", "server_pubkey", "notice_pubkey", "publisher_pubkey", "notifier_pubkey")}
+    return {"keys": keys, "npubs": npubs}
+
+
+def _render_keys_recovery(boot: dict[str, Any]) -> Path:
+    """Write the root-only keys.recovery bundle (durable safe-keeping copy)."""
+    bundle = _recovery_bundle(boot)
+    path = Path(os.environ.get("NOSTRHOST_KEYS_RECOVERY", KEYS_RECOVERY))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        "# nostrhost keys recovery bundle (root-only). Store offline.\n"
+        "# WARNING: these are the node's full identity keys - losing them\n"
+        "# loses the node, leaking them is takeover. Not in ngit state.\n"
+        "[keys]\n"
+        + "\n".join(f'{k} = "{v}"' for k, v in bundle["keys"].items())
+        + "\n\n[npubs]\n"
+        + "\n".join(f'{k} = "{v}"' for k, v in bundle["npubs"].items())
+        + "\n"
+    )
+    path.write_text(body)
+    os.chmod(path, 0o600)
+    return path
+
+
+def _load_keys_file(keys_file: Path) -> dict[str, str]:
+    """Load the five secret keys from a keys.recovery bundle (hex or nsec1)."""
+    import tomllib
+
+    try:
+        data = tomllib.loads(keys_file.read_text())
+    except FileNotFoundError:
+        raise NostrHostError(f"keys file not found: {keys_file}") from None
+    except tomllib.TOMLDecodeError as exc:
+        raise NostrHostError(f"keys file is not valid TOML: {keys_file} ({exc})") from None
+    keys = data.get("keys")
+    if not isinstance(keys, dict):
+        raise NostrHostError(f"keys file {keys_file} has no [keys] table")
+    required = ("operator_sk", "server_sk", "notice_sk", "publisher_sk", "notifier_sk")
+    missing = [k for k in required if k not in keys]
+    if missing:
+        raise NostrHostError(f"keys file {keys_file} is missing: {', '.join(missing)}")
+    return {k: _normalize_sk(str(keys[k])) for k in required}
 
 
 def _systemctl(*args: str) -> None:
@@ -514,6 +615,10 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
     operator_npub = _npub(boot["operator_pubkey"])
     _prepare_node(domain, operator_npub)
 
+    _render_notify_config(boot["notifier_sk"], boot["control_relay"])
+    _render_catalogue_env(boot["publisher_pubkey"])
+    recovery_path = _render_keys_recovery(boot)
+
     failed = _enable_postinstall_daemons()
     grant = _publish_initial_capability(boot["operator_pubkey"])
 
@@ -535,30 +640,44 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         "operator_npub": operator_npub,
         "operator_pubkey": boot["operator_pubkey"],
         "server_npub": _npub(boot["server_pubkey"]),
+        "publisher_npub": _npub(boot["publisher_pubkey"]),
+        "notifier_npub": _npub(boot["notifier_pubkey"]),
         "control_relay": boot["control_relay"],
         "state_revision": rev[:16],
         "policy_file": POLICY_CONFIG,
         "relay_config": RELAY_CONFIG,
+        "notify_config": NOTIFY_CONFIG,
+        "catalogue_env": CATALOGUE_ENV,
+        "keys_recovery": str(recovery_path),
+        "recovery": _recovery_bundle(boot),
         "state_announcement": announce,
         "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
         "daemons_failed": failed or "none",
-        "note": "operator_npub is the owner identity; log in via the portal and link it.",
+        "note": "operator_npub is the owner identity; log in via the portal and link it. "
+        "The recovery bundle above is shown ONCE - back it up offline (nsec1 keys).",
     }
 
 
 def _postinstall_restore(
     operator_sk: str,
-    server_sk: str | None,
-    notice_sk: str | None,
+    server_sk: str,
+    notice_sk: str,
+    publisher_sk: str,
+    notifier_sk: str,
     domain: str | None,
     bundle: Path | None,
     state_relay: str | None,
     restic: str | None,
     force: bool,
+    keys_file: Path | None = None,
 ) -> dict[str, Any]:
     """Restore a node from its state repository: recover the identity, restore
     the known-good state (bundle or discovered/cloned repo), restore the
-    linked Restic data snapshot, reconcile, and stand the stack back up."""
+    linked Restic data snapshot, reconcile, and stand the stack back up.
+
+    All five node keys are required explicitly (or via ``--keys-file``) —
+    they are never recovered from ngit state (secrets do not live there).
+    """
     from yunohost.nostr_identity import _init_headless_yunohost, bootstrap_node
     from yunohost.nostr_operationsd import YnhExecutorBackend
     from yunohost.nostr_restic import ResticError, restic_client
@@ -574,8 +693,27 @@ def _postinstall_restore(
 
     if os.geteuid() != 0:
         raise NostrHostError("postinstall must be run as root")
-    if not operator_sk or not _is_hex64(operator_sk):
-        raise NostrHostError("restore requires --operator-sk (the recovered admin key)")
+    keys = _load_keys_file(keys_file) if keys_file is not None else {
+        k: v for k, v in {
+            "operator_sk": operator_sk,
+            "server_sk": server_sk,
+            "notice_sk": notice_sk,
+            "publisher_sk": publisher_sk,
+            "notifier_sk": notifier_sk,
+        }.items() if v
+    }
+    missing = [k for k in ("operator_sk", "server_sk", "notice_sk", "publisher_sk", "notifier_sk") if k not in keys]
+    if missing:
+        raise NostrHostError(
+            "restore requires every node key: --operator-sk, --server-sk, --notice-sk, "
+            f"--publisher-sk, --notifier-sk (or --keys-file). Missing: {', '.join(missing)}"
+        )
+    operator_sk, server_sk = _normalize_sk(keys["operator_sk"]), _normalize_sk(keys["server_sk"])
+    notice_sk, publisher_sk, notifier_sk = (
+        _normalize_sk(keys["notice_sk"]),
+        _normalize_sk(keys["publisher_sk"]),
+        _normalize_sk(keys["notifier_sk"]),
+    )
     if bundle is None and not state_relay:
         raise NostrHostError("restore needs a state source: --bundle PATH or --state-relay URL")
     if Path(INSTALLED_MARKER).exists() and not force:
@@ -589,12 +727,16 @@ def _postinstall_restore(
 
     boot = bootstrap_node(
         operator_sk=operator_sk,
-        server_sk=server_sk or operator_sk,
+        server_sk=server_sk,
         notice_sk=notice_sk,
+        publisher_sk=publisher_sk,
+        notifier_sk=notifier_sk,
         force=force,
         write_relay=RELAY_CONFIG,
     )
     _prepare_node(domain, _npub(boot["operator_pubkey"]))
+    _render_notify_config(boot["notifier_sk"], boot["control_relay"])
+    _render_catalogue_env(boot["publisher_pubkey"])
 
     # restore the state repository
     state_dir = state_dir_from_env()
@@ -659,11 +801,15 @@ def _postinstall_restore(
         "operator_npub": _npub(boot["operator_pubkey"]),
         "operator_pubkey": boot["operator_pubkey"],
         "server_npub": _npub(boot["server_pubkey"]),
+        "publisher_npub": _npub(boot["publisher_pubkey"]),
+        "notifier_npub": _npub(boot["notifier_pubkey"]),
         "restored_revision": target[:16],
         "data_restore": data_restore,
         "reconcile": reconcile,
         "state_revision": rev[:16],
         "policy_file": POLICY_CONFIG,
+        "notify_config": NOTIFY_CONFIG,
+        "catalogue_env": CATALOGUE_ENV,
         "state_announcement": announce,
         "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
         "daemons_failed": failed or "none",
@@ -1378,9 +1524,12 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
     @postinstall.command("restore")
     def postinstall_restore(
-        operator_sk: str = typer.Option(..., "--operator-sk", help="recovered admin secret key (64-hex)"),
-        server_sk: str = typer.Option(None, "--server-sk", help="recovered server key (default: operator key)"),
+        operator_sk: str = typer.Option(None, "--operator-sk", help="recovered admin secret key (64-hex or nsec1)"),
+        server_sk: str = typer.Option(None, "--server-sk", help="recovered server key (64-hex or nsec1)"),
         notice_sk: str = typer.Option(None, "--notice-sk", help="recovered portal notice key"),
+        publisher_sk: str = typer.Option(None, "--publisher-sk", help="recovered catalogue publisher key"),
+        notifier_sk: str = typer.Option(None, "--notifier-sk", help="recovered notification service key"),
+        keys_file: Path = typer.Option(None, "--keys-file", help="recovery bundle from postinstall --new (keys.recovery)"),
         domain: str = typer.Option(None, "--domain", help="primary domain (default: hostname)"),
         bundle: Path = typer.Option(None, "--bundle", help="state-replica bundle to restore (nostrhost-state replicate)"),
         state_relay: str = typer.Option(None, "--state-relay", help="relay to discover the kind-30617 state repo on"),
@@ -1389,8 +1538,16 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Restore a node: recover identity + state, restore the linked Restic
-        snapshot, reconcile and stand the stack back up."""
-        _guard(lambda: _postinstall_restore(operator_sk, server_sk, notice_sk, domain, bundle, state_relay, restic, force), output_as)
+        snapshot, reconcile and stand the stack back up. Every node key is
+        required (explicit flags or --keys-file)."""
+        _guard(
+            lambda: _postinstall_restore(
+                operator_sk or "", server_sk or "", notice_sk or "", publisher_sk or "", notifier_sk or "",
+                domain, bundle, state_relay, restic, force,
+                keys_file=keys_file,
+            ),
+            output_as,
+        )
 
     @postinstall.command("status")
     def postinstall_status(output_as: str = typer.Option(None, "--output-as")) -> None:

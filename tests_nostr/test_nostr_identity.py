@@ -337,8 +337,8 @@ def test_publish_to_relay_nip42_handshake(tmp_path, monkeypatch):
 
 
 def test_bootstrap_node_writes_configs(tmp_path: Path, monkeypatch):
-    """bootstrap_node generates the three keys and writes operator/portal/relay
-    configs (the native postinstall --new bootstrap path)."""
+    """bootstrap_node generates the five node keys and writes operator/portal/
+    relay configs (the native postinstall --new bootstrap path)."""
     from yunohost.nostr_identity import bootstrap_node
 
     op_cfg = tmp_path / "operator.toml"
@@ -348,16 +348,20 @@ def test_bootstrap_node_writes_configs(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("NOSTRHOST_NOTICE_CONFIG", str(notice_cfg))
 
     result = bootstrap_node(force=True, write_relay=str(relay_cfg))
-    for key in ("server_sk", "operator_sk", "notice_sk"):
+    for key in ("server_sk", "operator_sk", "notice_sk", "publisher_sk", "notifier_sk"):
         assert len(result[key]) == 64
         assert int(result[key], 16) >= 0
     assert result["server_pubkey"] == _pubkey(result["server_sk"])
     assert result["operator_pubkey"] == _pubkey(result["operator_sk"])
+    assert result["publisher_pubkey"] == _pubkey(result["publisher_sk"])
+    assert result["notifier_pubkey"] == _pubkey(result["notifier_sk"])
     assert result["admins"] == [result["operator_pubkey"]]
 
     data = tomllib.loads(op_cfg.read_text())
     assert data["operator_sk"] == result["operator_sk"]
     assert data["server_sk"] == result["server_sk"]
+    assert data["publisher_sk"] == result["publisher_sk"]
+    assert data["notifier_sk"] == result["notifier_sk"]
     assert data["admins"] == [result["operator_pubkey"]]
 
     notice = tomllib.loads(notice_cfg.read_text())
@@ -367,6 +371,7 @@ def test_bootstrap_node_writes_configs(tmp_path: Path, monkeypatch):
     assert relay["operator_pubkey"] == result["operator_pubkey"]
     assert relay["server_pubkey"] == result["server_pubkey"]
     assert relay["notice_pubkey"] == result["notice_pubkey"]
+    assert relay["publisher_pubkey"] == result["publisher_pubkey"]
     assert relay["allowlist_mode"] is True
 
     # second run without force refuses to overwrite
