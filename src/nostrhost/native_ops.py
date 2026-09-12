@@ -657,8 +657,10 @@ def _safe_updates_check(**args: Any) -> dict[str, Any]:
     """Pending app/system updates, from cache only (no network refresh)."""
     if args:
         raise OperationError(f"updates.check does not accept extra args: {sorted(args)}")
+    from yunohost.nostr_identity import _init_headless_yunohost
     from yunohost.tools import tools_update_norefresh
 
+    _init_headless_yunohost()
     return tools_update_norefresh()
 
 
@@ -668,8 +670,10 @@ def _safe_updates_refresh(target: str = "apps", **extra: Any) -> dict[str, Any]:
         raise OperationError(f"updates.refresh does not accept extra args: {sorted(extra)}")
     if target not in ("apps", "system", "all"):
         raise OperationError("updates.refresh target must be 'apps', 'system' or 'all'")
+    from yunohost.nostr_identity import _init_headless_yunohost
     from yunohost.tools import tools_update
 
+    _init_headless_yunohost()
     result = tools_update(target=target)
     return {"target": target, **result}
 
@@ -1342,11 +1346,17 @@ def _safe_catalog_verify(event_or_naddr: str = "", **extra: Any) -> dict[str, An
 
 AUDIT_CHAIN_KINDS = (2200, 2201, 2202, 2203, 2204, 2205, 31100, 27236, 27237)
 AUDIT_MAX_SCAN = 5000
+# The relay REQ ``limit`` counts events across all requested kinds, so a flat
+# limit is dominated by the per-operation 2203/2204 pairs and hides the 2200
+# requests the audit is meant to surface. Fetch a wider window and trim after
+# the newest-first sort instead.
+AUDIT_LIST_WINDOW = 400
 
 
 def _audit_events(kinds: tuple[int, ...] | None = None, limit: int = 100, since: int | None = None) -> list[dict[str, Any]]:
     """Durable audit: the signed operation chain on the control relay."""
     from yunohost.nostr_identity import _operator_config
+    from yunohost.nostr_operations import KIND_OPERATION_REQUEST
     from yunohost.nostrhost.events import _e_tag, query_chain_events
 
     cfg = _operator_config()
@@ -1363,13 +1373,16 @@ def _audit_events(kinds: tuple[int, ...] | None = None, limit: int = 100, since:
             tool = parsed.get("tool")
         if tool is None and event.get("kind") == KIND_CAPABILITY:
             tool = "capability.grant"
+        # A kind-2200 request carries no ``e`` tag: its own id IS the request
+        # id (approvals/results reference it via ``#e``).
+        request_id = event.get("id") if event.get("kind") == KIND_OPERATION_REQUEST else _e_tag(event)
         entries.append(
             {
                 "id": event.get("id"),
                 "kind": event.get("kind"),
                 "pubkey": event.get("pubkey"),
                 "created_at": event.get("created_at"),
-                "request_id": _e_tag(event),
+                "request_id": request_id,
                 "tool": tool,
             }
         )
@@ -1380,8 +1393,80 @@ def _audit_events(kinds: tuple[int, ...] | None = None, limit: int = 100, since:
 def _safe_audit_list(limit: int | None = None, **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"audit.list does not accept extra args: {sorted(extra)}")
-    entries = _audit_events(limit=limit or 100)
-    return {"entries": entries}
+    limit = limit or 100
+    return {"entries": _audit_operations(limit=limit)}
+
+
+def _audit_operations(limit: int = 100) -> list[dict[str, Any]]:
+    """One audit entry per operation: the kind-2200 request with its terminal
+    state, plus standalone capability/delegation events.
+
+    A flat raw-event view is dominated by each operation's 2203/2204 tail and
+    hides the requests the audit is meant to surface, so the chain is grouped
+    by request id (a 2200 request's own id) and the outcome derived from the
+    latest chained event (2202 -> REJECTED, 2204.ok -> SUCCEEDED/FAILED, 2203
+    -> EXECUTING, 2201 -> APPROVED, else REQUESTED)."""
+    from yunohost.nostr_operations import (
+        KIND_OPERATION_REQUEST,
+        KIND_OPERATION_APPROVAL,
+        KIND_OPERATION_REJECTION,
+        KIND_EXECUTION_STARTED,
+        KIND_EXECUTION_RESULT,
+    )
+
+    events = _audit_events(limit=max(limit, AUDIT_LIST_WINDOW))
+    chain_kinds = {
+        KIND_OPERATION_REQUEST,
+        KIND_OPERATION_APPROVAL,
+        KIND_OPERATION_REJECTION,
+        KIND_EXECUTION_STARTED,
+        KIND_EXECUTION_RESULT,
+    }
+    ops: dict[str, dict[str, Any]] = {}
+    standalone: list[dict[str, Any]] = []
+    for event in events:
+        rid = event.get("request_id")
+        if event.get("kind") in chain_kinds and rid:
+            ops.setdefault(rid, {"events": []})["events"].append(event)
+        else:
+            standalone.append(event)
+
+    entries: list[dict[str, Any]] = []
+    for rid, op in ops.items():
+        tail = sorted(op["events"], key=lambda x: x.get("created_at") or 0)
+        req = next((x for x in tail if x["kind"] == KIND_OPERATION_REQUEST), None)
+        latest = tail[-1]
+        state = "REQUESTED"
+        if any(x["kind"] == KIND_OPERATION_REJECTION for x in tail):
+            state = "REJECTED"
+        elif latest["kind"] == KIND_EXECUTION_RESULT:
+            ok = None
+            content = latest.get("content", "{}")
+            try:
+                parsed = json.loads(content) if isinstance(content, str) else content
+                ok = bool(parsed.get("ok")) if isinstance(parsed, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                ok = None
+            state = "SUCCEEDED" if ok else ("FAILED" if ok is False else "EXECUTING")
+        elif latest["kind"] == KIND_EXECUTION_STARTED:
+            state = "EXECUTING"
+        elif any(x["kind"] == KIND_OPERATION_APPROVAL for x in tail):
+            state = "APPROVED"
+        anchor = req or latest
+        entries.append(
+            {
+                "id": anchor.get("id"),
+                "kind": KIND_OPERATION_REQUEST,
+                "request_id": rid,
+                "tool": req.get("tool") if req else None,
+                "pubkey": anchor.get("pubkey"),
+                "created_at": anchor.get("created_at"),
+                "state": state,
+            }
+        )
+    entries.extend(standalone)
+    entries.sort(key=lambda entry: entry.get("created_at") or 0, reverse=True)  # newest first
+    return entries[:limit]
 
 
 def _safe_audit_get(audit_id: str = "", **extra: Any) -> dict[str, Any]:
@@ -1390,7 +1475,7 @@ def _safe_audit_get(audit_id: str = "", **extra: Any) -> dict[str, Any]:
         raise OperationError(f"audit.get does not accept extra args: {sorted(extra)}")
     if not audit_id:
         raise OperationError("audit.get requires an 'audit_id'")
-    for entry in _audit_events(limit=AUDIT_MAX_SCAN):
+    for entry in _audit_operations(limit=AUDIT_MAX_SCAN):
         if entry["id"] == audit_id or entry["request_id"] == audit_id:
             return entry
     raise OperationError(f"audit entry {audit_id!r} not found")
@@ -1613,11 +1698,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
     "audit.list": ToolSpec(
         name="audit.list", handler=_safe_audit_list, scope=SCOPE_AUDIT_READ,
         input_model=AuditListArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
-        description="list signed operation-chain audit entries, newest first (owner co-signature per call)",
+        description="list signed operation-chain audit entries (one per operation, with terminal state), newest first (owner co-signature per call)",
     ),
     "audit.get": ToolSpec(
         name="audit.get", handler=_safe_audit_get, scope=SCOPE_AUDIT_READ,
         input_model=AuditGetArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
-        description="fetch one audit entry by event id or request id (owner co-signature per call)",
+        description="fetch one audit entry by request id (the kind-2200 id) or event id (owner co-signature per call)",
     ),
 }

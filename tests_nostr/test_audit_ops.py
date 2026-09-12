@@ -1,8 +1,9 @@
 """Tests for the Phase 5 audit operations (audit.list / audit.get).
 
-The audit surface reads the signed operation chain on the control relay via
-``_audit_events``; these tests exercise the handler contract through that
-seam plus the chain-event normalization itself.
+The audit surface reads the signed operation chain on the control relay and
+projects it per-operation: one entry per kind-2200 request with its terminal
+state, plus standalone capability/delegation events. These tests exercise the
+handler contract and the chain -> operation projection.
 """
 
 from __future__ import annotations
@@ -15,25 +16,63 @@ from yunohost.nostr_operations import OperationError
 from yunohost.nostrhost import native_ops
 
 
-def _entry(eid="e" * 64, *, kind=2200, rid="r" * 64, tool="system.status"):
+def _norm(event_id, kind, created_at, *, request_id=None, tool=None, content="", pubkey="p" * 64):
     return {
-        "id": eid,
+        "id": event_id,
         "kind": kind,
-        "pubkey": "p" * 64,
-        "created_at": 1750000000,
-        "request_id": rid,
+        "pubkey": pubkey,
+        "created_at": created_at,
+        "request_id": request_id,
         "tool": tool,
+        "content": content,
     }
 
 
-def test_audit_list_returns_entries(monkeypatch):
-    monkeypatch.setattr(
-        native_ops,
-        "_audit_events",
-        lambda kinds=None, limit=100, since=None: [_entry("e1", rid="r1", tool="app.install"), _entry("e2", rid="r2", tool="backup.create")],
-    )
+def _chain(request_id="r" * 64, *, tool="app.install", ok=True):
+    """A normalized 2200 -> 2201 -> 2203 -> 2204 chain for one operation.
+
+    A 2200 request's own id IS the request id; the approval/execution/result
+    events reference it via ``#e``, so they all share ``request_id``."""
+    return [
+        _norm(request_id, kind=2200, created_at=1000, request_id=request_id, tool=tool, content=json.dumps({"tool": tool, "args": {}})),
+        _norm("b" * 64, kind=2201, created_at=1001, request_id=request_id),
+        _norm("c" * 64, kind=2203, created_at=1002, request_id=request_id),
+        _norm("d" * 64, kind=2204, created_at=1003, request_id=request_id, content=json.dumps({"ok": ok, "result": {}})),
+    ]
+
+
+def test_audit_list_projects_operations(monkeypatch):
+    chain = _chain("rid-1", tool="backup.create")
+    monkeypatch.setattr(native_ops, "_audit_events", lambda kinds=None, limit=100, since=None: chain)
     result = native_ops._safe_audit_list(limit=10)
-    assert [e["id"] for e in result["entries"]] == ["e1", "e2"]
+    assert len(result["entries"]) == 1
+    entry = result["entries"][0]
+    assert entry["request_id"] == "rid-1"
+    assert entry["tool"] == "backup.create"
+    assert entry["state"] == "SUCCEEDED"
+
+
+def test_audit_list_shows_failed_and_rejected(monkeypatch):
+    ok_chain = _chain("rid-ok", tool="backup.create")
+    fail_chain = _chain("rid-fail", tool="app.upgrade", ok=False)
+    reject_chain = _chain("rid-rej", tool="domain.remove")
+    reject_chain = [reject_chain[0], _norm("e1", kind=2202, created_at=1001, request_id="rid-rej")]
+    monkeypatch.setattr(native_ops, "_audit_events", lambda kinds=None, limit=100, since=None: ok_chain + fail_chain + reject_chain)
+    entries = native_ops._safe_audit_list(limit=10)["entries"]
+    states = {e["tool"]: e["state"] for e in entries}
+    assert states["backup.create"] == "SUCCEEDED"
+    assert states["app.upgrade"] == "FAILED"
+    assert states["domain.remove"] == "REJECTED"
+
+
+def test_audit_list_includes_capability_events(monkeypatch):
+    chain = _chain("rid-1", tool="user.group.create")
+    chain.append(_norm("cap1", kind=31100, created_at=2000, tool="capability.grant", content=json.dumps({"scopes": ["server.read"]})))
+    monkeypatch.setattr(native_ops, "_audit_events", lambda kinds=None, limit=100, since=None: chain)
+    entries = native_ops._safe_audit_list(limit=10)["entries"]
+    assert entries[0]["kind"] == 31100  # newest first
+    assert entries[0]["request_id"] is None
+    assert [e["kind"] for e in entries] == [31100, 2200]
 
 
 def test_audit_list_rejects_extra(monkeypatch):
@@ -42,24 +81,10 @@ def test_audit_list_rejects_extra(monkeypatch):
         native_ops._safe_audit_list(bogus=True)
 
 
-def test_audit_get_by_event_id(monkeypatch):
-    monkeypatch.setattr(
-        native_ops,
-        "_audit_events",
-        lambda kinds=None, limit=100, since=None: [_entry("e-target"), _entry("e-other")],
-    )
-    result = native_ops._safe_audit_get("e-target")
-    assert result["id"] == "e-target"
-
-
 def test_audit_get_by_request_id(monkeypatch):
-    monkeypatch.setattr(
-        native_ops,
-        "_audit_events",
-        lambda kinds=None, limit=100, since=None: [_entry("e1", rid="req-9"), _entry("e2", rid="req-8")],
-    )
-    result = native_ops._safe_audit_get("req-8")
-    assert result["id"] == "e2"
+    monkeypatch.setattr(native_ops, "_audit_operations", lambda limit=100: [_chain("rid-target", tool="x")[0]])
+    result = native_ops._safe_audit_get("rid-target")
+    assert result["request_id"] == "rid-target"
 
 
 def test_audit_get_requires_id():
@@ -68,9 +93,22 @@ def test_audit_get_requires_id():
 
 
 def test_audit_get_missing_raises(monkeypatch):
-    monkeypatch.setattr(native_ops, "_audit_events", lambda kinds=None, limit=100, since=None: [_entry("e1")])
+    monkeypatch.setattr(native_ops, "_audit_operations", lambda limit=100: [_chain("rid-1", tool="x")[0]])
     with pytest.raises(OperationError, match="not found"):
-        native_ops._safe_audit_get("e-missing")
+        native_ops._safe_audit_get("rid-missing")
+
+
+def test_audit_list_uses_wide_window(monkeypatch):
+    fetched = {}
+
+    def fake(kinds=None, limit=100, since=None):
+        fetched["limit"] = limit
+        return [_chain(f"rid-{i}", tool="x")[0] for i in range(5)]
+
+    monkeypatch.setattr(native_ops, "_audit_events", fake)
+    result = native_ops._safe_audit_list(limit=3)
+    assert len(result["entries"]) == 3
+    assert fetched["limit"] >= native_ops.AUDIT_LIST_WINDOW
 
 
 def test_audit_events_normalizes_chain(monkeypatch):
@@ -101,7 +139,8 @@ def test_audit_events_normalizes_chain(monkeypatch):
     entries = native_ops._audit_events()
     assert [e["kind"] for e in entries] == [31100, 2200]  # newest first
     request_entry = next(e for e in entries if e["kind"] == 2200)
-    assert request_entry["request_id"] == "r" * 64
+    # A kind-2200 request carries no ``e`` tag: its own id IS the request id.
+    assert request_entry["request_id"] == "a" * 64
     assert request_entry["tool"] == "app.install"
     cap_entry = next(e for e in entries if e["kind"] == 31100)
     assert cap_entry["tool"] == "capability.grant"
