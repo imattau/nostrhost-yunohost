@@ -156,14 +156,32 @@ def test_owner_policy_requires_operator_approval():
 
 def test_e2e_preserves_actor_separately_from_request_signer():
     h = Harness()
-    h.grant(["services.restart"])
     _, actor_pk = new_key()
+    h.grant(["services.restart"], subject_pk=actor_pk)
     ev = build_operation_request(h.agent_sk, h.agent_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
     assert h.engine.handle_event(ev)
     assert h.engine.records[ev["id"]].requester == h.agent_pk
     assert h.engine.records[ev["id"]].actor == actor_pk
     assert h.approve(ev["id"])
     assert ["actor", actor_pk] in h.events_by_kind(2203)[0]["tags"]
+    assert ["actor", actor_pk] in h.events_by_kind(2204)[0]["tags"]
+
+
+def test_actor_scope_gates_request_not_requester():
+    """The MCP adapter signs as a trusted node key; the client npub rides as
+    the actor and its capability grant is what authorizes the request."""
+    h = Harness()
+    _, actor_pk = new_key()
+    # actor without a grant is rejected even though the requester is an admin
+    ev = build_operation_request(h.admin_sk, h.admin_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
+    assert h.engine.handle_event(ev)
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+
+    h.grant(["server.read"], subject_pk=actor_pk)
+    ev2 = build_operation_request(h.admin_sk, h.admin_pk, "system.status", {}, actor_pubkey=actor_pk)
+    assert h.engine.handle_event(ev2)
+    assert h.engine.state(ev2["id"]) == OpState.SUCCEEDED
     assert ["actor", actor_pk] in h.events_by_kind(2204)[0]["tags"]
 
 

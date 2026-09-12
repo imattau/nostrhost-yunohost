@@ -190,7 +190,13 @@ class OperationEngine:
             self._reject(record, f"unknown_tool:{tool}")
             return True
 
-        if not self._authorized(requester, spec.scope):
+        # Authorise the *actor* (defaults to the requester when no actor tag is
+        # present). The requester is only the relay-admitted signing key: the
+        # MCP adapter publishes as a trusted node key with the client's npub in
+        # the actor tag, so the scope must be checked against the actor, not the
+        # signer — otherwise every HTTP client inherits the operator's authority
+        # (MCP transition Phase 2).
+        if not self._authorized(actor.lower(), spec.scope):
             self._reject(record, "unauthorized")
             return True
 
@@ -580,10 +586,15 @@ async def subscribe_loop(
                         if replaying:
                             replay.append(msg[2])
                         else:
-                            engine.handle_event(msg[2])
+                            # handle_event performs blocking work (synchronous
+                            # publish_to_relay round-trips, state snapshots).
+                            # Run it in a worker thread so the subscribe
+                            # websocket keeps reading and the relay does not
+                            # time the connection out during replay bursts.
+                            await asyncio.to_thread(engine.handle_event, msg[2])
                     elif msg[0] == "EOSE":
                         for ev in _sorted_replay(replay):
-                            engine.handle_event(ev)
+                            await asyncio.to_thread(engine.handle_event, ev)
                         replay.clear()
                         replaying = False
                     elif msg[0] == "CLOSED":
