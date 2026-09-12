@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""nostrhost — native administration CLI.
+
+Typer commands over the native NostrHost operation surface (system/service/
+app/package/rollback/state tools, npub identity, capability); see
+nostrhost.cli.  Supports --output-as json/plain/none.
+"""
+
+from __future__ import annotations
 
 import os as _os
 import sys as _sys
@@ -11,14 +19,6 @@ _VENV_PY = _Path("/opt/nostrhost/venv/bin/python3")
 if _VENV_PY.is_file() and _os.path.realpath(_sys.executable) != _os.path.realpath(str(_VENV_PY)):
     _os.execv(str(_VENV_PY), [str(_VENV_PY), _sys.argv[0]] + _sys.argv[1:])
 
-"""nostrhost — native administration CLI.
-
-Typer commands over the native NostrHost operation surface (system/service/
-app/package/rollback/state tools, npub identity, capability); see
-nostrhost.cli.  Supports --output-as json/plain/none.
-"""
-
-from __future__ import annotations
 
 import sys
 from pathlib import Path
