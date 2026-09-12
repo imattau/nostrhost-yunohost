@@ -135,7 +135,7 @@ do_configure() {
         fi
     else
         echo "Regenerating configuration, this might take a while..."
-        yunohost tools regen-conf --output-as none
+        nostrhost system regen-conf --output-as none
     fi
 }
 

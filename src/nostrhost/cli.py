@@ -680,6 +680,25 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Read-only OS/package version information."""
         _guard(lambda: _run_tool("system.version", {}), output_as)
 
+    @system.command("regen-conf")
+    def system_regen_conf(
+        names: str = typer.Option("", "--names", help="comma-separated regenconf categories (default: all)"),
+        force: bool = typer.Option(False, "--force", help="override manual modifications"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Regenerate system configuration files (regenconf categories).
+
+        Used by the package upgrade path and available to operators; renders
+        pending tracked config (base Caddyfile, per-domain snippets, and the
+        YunoHost compatibility categories) from the current templates."""
+        from yunohost.tools import tools_regen_conf
+
+        def run() -> Any:
+            categories = [item.strip() for item in names.split(",") if item.strip()]
+            return tools_regen_conf(names=categories, force=force)
+
+        _guard(run, output_as)
+
     # -- service ------------------------------------------------------------
 
     service = typer.Typer(name="service", help="service management", no_args_is_help=True)

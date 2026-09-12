@@ -1,3 +1,12 @@
+yunohost (12.1.41.11) stable; urgency=low
+
+  * nostrhost: add `system regen-conf` CLI command and use it from the
+    postinst upgrade path — the renamed CLI dropped /usr/bin/yunohost, so the
+    package postinst must drive regenconf through `nostrhost` (exit 127 on
+    upgrade otherwise).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 19:30:00 +0200
+
 yunohost (12.1.41.10) stable; urgency=low
 
   * nostrhost-core.postinst: fix the upgrade path — the core rename had
