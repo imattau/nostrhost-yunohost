@@ -10,8 +10,6 @@ from coincurve import PublicKeyXOnly
 
 from yunohost.nostr_operations import (
     KIND_CAPABILITY,
-    KIND_EXECUTION_RESULT,
-    KIND_EXECUTION_STARTED,
     KIND_OPERATION_APPROVAL,
     KIND_OPERATION_REJECTION,
     KIND_OPERATION_REQUEST,
@@ -62,6 +60,9 @@ def test_registry_has_the_safe_tools():
         "backup.create",
         "backup.list",
         "backup.restore",
+        "catalog.get",
+        "catalog.list",
+        "catalog.publish",
         "credential.list",
         "credential.remove",
         "credential.set",
@@ -143,6 +144,8 @@ def test_registry_has_the_safe_tools():
             "user.list",
             "firewall.list",
             "diagnosis.run",
+            "catalog.list",
+            "catalog.get",
         ):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is not None
@@ -265,7 +268,7 @@ def test_delegation_event_shape_and_revocation():
 def test_request_operation_publishes_via_transport():
     agent_sk, agent_pk = new_key()
     transport = FakeTransport()
-    ev = request_operation("system.version", {}, requester_sk=agent_sk, transport=transport)
+    request_operation("system.version", {}, requester_sk=agent_sk, transport=transport)
     assert len(transport.events) == 1
     assert transport.events[0]["kind"] == KIND_OPERATION_REQUEST
     assert transport.events[0]["pubkey"] == agent_pk

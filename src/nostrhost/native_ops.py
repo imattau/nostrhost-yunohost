@@ -14,6 +14,9 @@ constructs ``TOOLS``.
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +43,8 @@ from yunohost.nostr_operations import (
     SCOPE_USERS_DELETE,
     SCOPE_USERS_READ,
     SCOPE_USERS_WRITE,
+    SCOPE_CATALOG_READ,
+    SCOPE_CATALOG_PUBLISH,
     ToolSpec,
 )
 
@@ -152,6 +157,22 @@ class FirewallReloadArgs(_Strict):
 class DiagnosisRunArgs(_Strict):
     categories: list[str] = Field(default_factory=list)
     force: bool = False
+
+
+class CatalogListArgs(_Strict):
+    pass
+
+
+class CatalogGetArgs(_Strict):
+    app_id: str = Field(..., description="the app id to resolve from the trusted projection")
+
+
+class CatalogPublishArgs(_Strict):
+    app_id: str = Field(..., description="the app id to re-declare and publish under the node's publisher key")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -378,6 +399,118 @@ def _safe_diagnosis_run(categories: list[str] | None = None, force: bool = False
 
 
 # --------------------------------------------------------------------------- #
+# catalogue surface (MCP transition Phase 5) — the native catalog.* tools.
+
+CATALOG_BIN = os.environ.get("NOSTRHOST_CATALOG_BIN", "/usr/bin/nostrhost-catalog")
+CATALOG_STATE = os.environ.get("NOSTRHOST_CATALOG_STATE", "/var/lib/nostrhost/catalogue.json")
+
+
+def _trusted_publishers() -> str:
+    """Comma-separated trusted publisher pubkeys: catalogue.env first, else the
+    node's own publisher key (operator.toml)."""
+    env_path = Path(os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env"))
+    try:
+        for line in env_path.read_text().splitlines():
+            if line.startswith("NOSTRHOST_CATALOG_PUBLISHERS="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    from yunohost.nostr_identity import _operator_config
+
+    return _operator_config().publisher_pubkey
+
+
+def _catalog_cli(subcommand: list[str], stdin_data: bytes | None = None) -> dict[str, Any]:
+    """Run the native catalogue CLI and parse its JSON stdout."""
+    import subprocess
+
+    cmd = [CATALOG_BIN, "--publishers", _trusted_publishers(), "--state", CATALOG_STATE, *subcommand]
+    try:
+        proc = subprocess.run(cmd, input=stdin_data, capture_output=True, timeout=60)
+    except FileNotFoundError:
+        raise OperationError(f"catalogue CLI not found: {CATALOG_BIN} (install the nostrhost-catalog package)") from None
+    except subprocess.TimeoutExpired:
+        raise OperationError("catalogue CLI timed out") from None
+    if proc.returncode != 0:
+        raise OperationError(f"catalogue CLI failed: {proc.stderr.decode(errors='replace').strip() or 'exit ' + str(proc.returncode)}")
+    try:
+        return json.loads(proc.stdout.decode() or "{}")
+    except json.JSONDecodeError:
+        return {"raw": proc.stdout.decode(errors="replace").strip()}
+
+
+def _safe_catalog_list(**args: Any) -> dict[str, Any]:
+    if args:
+        raise OperationError(f"catalog.list does not accept extra args: {sorted(args)}")
+    return _catalog_cli(["list"])
+
+
+def _safe_catalog_get(app_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"catalog.get does not accept extra args: {sorted(extra)}")
+    if not app_id:
+        raise OperationError("catalog.get requires an app_id")
+    return _catalog_cli(["get", app_id])
+
+
+def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
+    """Re-declare a trusted app under the node's own catalogue publisher key.
+
+    The declaration is built from the local trusted projection's package
+    coordinate, signed with the node's publisher key (operator.toml), pushed
+    to the configured relays, and ingested back into the local projection so
+    the change is visible immediately without waiting for a sync round-trip.
+    """
+    if extra:
+        raise OperationError(f"catalog.publish does not accept extra args: {sorted(extra)}")
+    if not app_id:
+        raise OperationError("catalog.publish requires an app_id")
+
+    from yunohost.nostr_catalog_provider import native_catalog_coordinate
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    coordinate = native_catalog_coordinate(app_id)
+    if not coordinate:
+        raise OperationError(f"app {app_id!r} is not in the trusted native catalogue projection")
+    manifest = coordinate.get("manifest_sha256") or ""
+    content = coordinate.get("content_sha256") or ""
+    commit = coordinate.get("revision") or ""
+    for label, value in (("manifest", manifest), ("content", content), ("commit", commit)):
+        if len(value) < 40:
+            raise OperationError(f"catalogue coordinate for {app_id!r} lacks a valid {label} hash")
+
+    tags = [
+        ["d", coordinate["app_id"]],
+        ["platform", "yunohost"],
+        ["repository", coordinate["repository"]],
+        ["version", coordinate.get("version") or "0"],
+        ["commit", commit],
+        ["manifest", f"sha256:{manifest}"],
+        ["content", f"sha256:{content}"],
+    ]
+    package_path = coordinate.get("package_path")
+    if package_path:
+        tags.append(["package", package_path])
+    archs = coordinate.get("architectures") or []
+    if archs:
+        tags.append(["category", "app"])
+    content_json = json.dumps({"name": coordinate.get("version") or app_id, "architectures": archs}, separators=(",", ":"))
+
+    cfg = _operator_config()
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
+
+    result = _catalog_cli(["publish", "--relay", relays or "ws://127.0.0.1:4848"], json.dumps(event).encode())
+    ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
+    return {
+        "app_id": app_id,
+        "publisher_pubkey": cfg.publisher_pubkey,
+        "event_id": event["id"],
+        "published": result,
+        "ingested": ingest,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # registry merge (consumed by yunohost.nostr_operations.TOOLS)
 
 NATIVE_TOOLS: dict[str, ToolSpec] = {
@@ -470,5 +603,20 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="diagnosis.run", handler=_safe_diagnosis_run, scope=SCOPE_DIAGNOSIS_READ,
         require_approval=False, input_model=DiagnosisRunArgs,
         description="run YunoHost diagnosis categories and return the cached report",
+    ),
+    "catalog.list": ToolSpec(
+        name="catalog.list", handler=_safe_catalog_list, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogListArgs,
+        description="list the trusted native catalogue projection (synced from the control relay)",
+    ),
+    "catalog.get": ToolSpec(
+        name="catalog.get", handler=_safe_catalog_get, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogGetArgs,
+        description="resolve one app from the trusted native catalogue projection",
+    ),
+    "catalog.publish": ToolSpec(
+        name="catalog.publish", handler=_safe_catalog_publish, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="re-declare a trusted app under the node's catalogue publisher key and publish it (admin approval)",
     ),
 }

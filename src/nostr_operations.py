@@ -100,6 +100,9 @@ SCOPE_DOMAINS_WRITE = "domains.write"
 SCOPE_DNS_WRITE = "dns.write"
 SCOPE_DNS_CREDENTIALS_WRITE = "dns.credentials.write"
 SCOPE_DNS_CREDENTIALS_READ = "dns.credentials.read"
+SCOPE_CATALOG_READ = "catalog.inspect"
+SCOPE_CATALOG_VERIFY = "catalog.verify"
+SCOPE_CATALOG_PUBLISH = "catalog.publish"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -130,6 +133,9 @@ KNOWN_SCOPES = frozenset(
         SCOPE_DNS_WRITE,
         SCOPE_DNS_CREDENTIALS_WRITE,
         SCOPE_DNS_CREDENTIALS_READ,
+        SCOPE_CATALOG_READ,
+        SCOPE_CATALOG_VERIFY,
+        SCOPE_CATALOG_PUBLISH,
     }
 )
 

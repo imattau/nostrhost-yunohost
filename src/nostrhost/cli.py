@@ -142,6 +142,9 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "firewall.close": native_ops._safe_firewall_close,
     "firewall.reload": native_ops._safe_firewall_reload,
     "diagnosis.run": native_ops._safe_diagnosis_run,
+    "catalog.list": native_ops._safe_catalog_list,
+    "catalog.get": native_ops._safe_catalog_get,
+    "catalog.publish": native_ops._safe_catalog_publish,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
@@ -1250,6 +1253,37 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return {"hostname": result.get("hostname"), "secret_ref": result.get("secret_ref"), "unsubscribed": result.get("unsubscribed")}
         _guard(run, output_as)
 
+    # -- catalogue -----------------------------------------------------------
+
+    catalog = typer.Typer(name="catalog", help="native catalogue (trusted projection + publish)", no_args_is_help=True)
+
+    @catalog.command("list")
+    def catalog_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List the trusted native catalogue projection."""
+        _guard(lambda: _run_tool("catalog.list", {}), output_as)
+
+    @catalog.command("get")
+    def catalog_get(
+        app_id: str = typer.Argument(..., help="app id to resolve"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Resolve one app from the trusted projection."""
+        _guard(lambda: _run_tool("catalog.get", {"app_id": app_id}), output_as)
+
+    @catalog.command("publish")
+    def catalog_publish(
+        app_id: str = typer.Argument(..., help="app id to re-declare under the node's publisher key"),
+        relays: str = typer.Option("ws://127.0.0.1:4848", "--relays", help="comma-separated relay URLs"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Publish a catalogue declaration for a trusted app (signed with the node publisher key)."""
+        def run() -> Any:
+            body = _run_lifecycle("catalog.publish", {"app_id": app_id, "relays": relays}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"catalog.publish rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     # -- network ------------------------------------------------------------
 
     network = typer.Typer(name="network", help="network facts", no_args_is_help=True)
@@ -1554,7 +1588,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, network, credential):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, catalog, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app
