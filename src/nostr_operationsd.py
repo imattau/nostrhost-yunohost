@@ -561,9 +561,14 @@ async def subscribe_loop(
     with backoff; the relay replays stored events so state rebuilds."""
     import websockets
 
+    # ping_interval=None: the relay owns the keepalive (it pings every 30s and
+    # we auto-pong); if the client also pings, its 20s ping_timeout can fire
+    # while the event loop is briefly busy during a replay burst and the client
+    # tears the connection down with close 1011 "keepalive ping timeout",
+    # kicking the daemon into a reconnect loop.
     while not (stop is not None and stop.is_set()):
         try:
-            async with websockets.connect(relay_url) as ws:
+            async with websockets.connect(relay_url, ping_interval=None, ping_timeout=None) as ws:
                 sub_id = "nostrhost-operations-" + secrets.token_hex(4)
                 await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS}]))
                 logger.info("operations executor subscribed to %s", relay_url)

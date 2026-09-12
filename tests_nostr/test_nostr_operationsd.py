@@ -592,7 +592,6 @@ def test_subscribe_authenticates_via_nip42_then_reads(monkeypatch):
     import websockets
 
     from yunohost.nostr_operationsd import subscribe_loop
-    from yunohost.nostr_identity import _sign_auth_event, default_auth as _real_default_auth
 
     h = Harness()
     h.grant(["server.read"])
@@ -604,7 +603,6 @@ def test_subscribe_authenticates_via_nip42_then_reads(monkeypatch):
         "yunohost.nostr_operationsd.default_auth", lambda: (sk, pk)
     )
     sent = []
-    auth_ev_id = {"id": None}
 
     class FakeWS:
         def __init__(self):
@@ -649,7 +647,7 @@ def test_subscribe_authenticates_via_nip42_then_reads(monkeypatch):
 
     fake = FakeWS()
 
-    def fake_connect(url):
+    def fake_connect(url, **kwargs):
         return fake
 
     monkeypatch.setattr(websockets, "connect", fake_connect)

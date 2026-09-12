@@ -159,6 +159,15 @@ def test_sse_format_and_ping():
     assert events_module.sse_ping() == ": ping\n\n"
 
 
+def test_stream_kinds_include_rejection():
+    """A rejected operation is a terminal outcome; the event stream must
+    surface it or op_status could never tell 'rejected' apart from 'still
+    awaiting approval' (MCP transition Phase 4)."""
+    from yunohost.nostr_operations import KIND_OPERATION_REJECTION
+
+    assert KIND_OPERATION_REJECTION in events_module.STREAM_KINDS
+
+
 def wsgi_request(app, method, path):
     environ = {
         "REQUEST_METHOD": method,

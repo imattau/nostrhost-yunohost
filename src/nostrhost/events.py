@@ -24,9 +24,13 @@ from yunohost.nostr_operations import (
     KIND_EXECUTION_RESULT,
     KIND_EXECUTION_STARTED,
     KIND_EXECUTION_PROGRESS,
+    KIND_OPERATION_REJECTION,
 )
 
-STREAM_KINDS = (KIND_EXECUTION_STARTED, KIND_EXECUTION_PROGRESS, KIND_EXECUTION_RESULT)
+# Execution kinds plus 2202 (rejection): a rejected operation is also a
+# terminal outcome, so the stream must surface it or interfaces polling
+# op_status could never tell "rejected" apart from "still awaiting approval".
+STREAM_KINDS = (KIND_EXECUTION_STARTED, KIND_EXECUTION_PROGRESS, KIND_EXECUTION_RESULT, KIND_OPERATION_REJECTION)
 
 
 def _e_tag(event: dict[str, Any]) -> str | None:
@@ -80,7 +84,7 @@ def stream_operation_events(
                 if _e_tag(event) != request_id:
                     continue
                 yield event
-                if int(event.get("kind", 0)) == KIND_EXECUTION_RESULT:
+                if int(event.get("kind", 0)) in (KIND_EXECUTION_RESULT, KIND_OPERATION_REJECTION):
                     return
     except Exception:  # noqa: BLE001 - stream is best-effort
         return
