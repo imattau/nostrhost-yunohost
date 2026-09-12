@@ -1132,7 +1132,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup):
         app.add_typer(group, name=group.info.name)
 
     return app

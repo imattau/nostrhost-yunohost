@@ -1,3 +1,10 @@
+yunohost (12.1.41.14) stable; urgency=low
+
+  * nostrhost: register the `backup` CLI group (create/list) — it was built
+    but never add_typer'd, so `nostrhost backup` did not exist.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 21:00:00 +0200
+
 yunohost (12.1.41.13) stable; urgency=low
 
   * nostrhost-core.postinst: regen-conf is best-effort (|| true) — in a
