@@ -22,7 +22,10 @@ from .models import DomainResource
 
 
 def domain_state_dir(state_dir: Path) -> Path:
-    return state_dir / "domains"
+    # Distinct from the legacy ``state/domains`` section the state recorder
+    # re-renders from LDAP (export_state -> StateRepo._render rmtree's it),
+    # so native domains live in their own directory that nothing clobbers.
+    return state_dir / "domains-native"
 
 
 def domain_state_path(state_dir: Path, name: str) -> Path:

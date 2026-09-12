@@ -146,7 +146,7 @@ def test_domain_add_apply_and_state(tmp_path):
     assert result["ok"] is True
     assert result["dns_plan"]["summary"]["create"] == 2
     assert len(result["applied"]) == 2
-    assert (tmp_path / "domains" / "w4.test.json").is_file()
+    assert (tmp_path / "domains-native" / "w4.test.json").is_file()
     assert svc.list_domains()["domains"] == ["w4.test"]
     # re-add is rejected
     with pytest.raises(DomainError):
@@ -190,7 +190,7 @@ def test_domain_remove_bounded_and_blocks_dependents(tmp_path):
     # force removal succeeds and removes owned records + unregisters
     result = svc.remove("w4.test", force=True)
     assert result["ok"] is True and len(result["deleted"]) == 2
-    assert not (tmp_path / "domains" / "w4.test.json").is_file()
+    assert not (tmp_path / "domains-native" / "w4.test.json").is_file()
     assert svc.list_domains()["domains"] == []
 
 

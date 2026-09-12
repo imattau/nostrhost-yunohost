@@ -26,6 +26,11 @@ yunohost (12.1.41.24) stable; urgency=low
     - Legacy permission URL validation now accepts native domains via the
       parallel registry (no LDAP); _assert_domain_exists falls back to the
       native registry when LDAP is unavailable.
+    - Fixes from the live VM proof: native domain state lives in
+      state/domains-native (the legacy state/domains section is re-rendered
+      from LDAP by the state recorder and would clobber it); build_domain_site
+      ANDs host+path in a single matcher so the root route can't shadow the
+      whole server (same trap build_web_route documents).
 
  -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 06:00:00 +0200
 

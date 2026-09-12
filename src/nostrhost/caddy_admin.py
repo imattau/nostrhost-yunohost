@@ -92,10 +92,14 @@ def build_domain_site(domain: str) -> dict[str, Any]:
     Matches only the domain's root path, so it never shadows app routes on the
     same host. ACME for the domain is handled by Caddy's global ``acme_ca`` /
     automatic HTTPS (the "ACME policy"); ``certd`` exports the resulting cert.
+
+    host + path live in a SINGLE matcher object: separate objects would be
+    OR'd, letting the root route hijack every request with path ``/`` on any
+    host (the same trap ``build_web_route`` documents).
     """
     return {
         "@id": f"nostrhost-domain:{domain}",
-        "match": [{"host": [domain]}, {"path": ["/"]}],
+        "match": [{"host": [domain], "path": ["/"]}],
         "handle": [{"handler": "static_response", "status_code": 200, "body": f"nostrhost domain {domain}"}],
         "terminal": True,
     }
