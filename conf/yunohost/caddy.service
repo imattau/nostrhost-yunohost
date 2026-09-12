@@ -18,6 +18,9 @@ Restart=on-failure
 RestartSec=2s
 User=root
 UMask=0022
+# Keep caddy's app-data/autosave out of /root (ProtectHome makes it read-only)
+# and inside the writable StateDirectory instead.
+Environment=HOME=/var/lib/caddy
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true

@@ -1,3 +1,11 @@
+yunohost (12.1.41.8) stable; urgency=low
+
+  * nostrhost: caddy.service points HOME at /var/lib/caddy so autosave and
+    app-data stay in the writable StateDirectory instead of /root
+    (ProtectHome makes /root read-only).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 17:00:00 +0200
+
 yunohost (12.1.41.7) stable; urgency=low
 
   * nostrhost: postinstall fixes from the clean-VM acceptance run —
