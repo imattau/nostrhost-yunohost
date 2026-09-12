@@ -35,8 +35,26 @@ def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
         return "users.admin_access" if args.get("admin") is True else "users.write"
     if tool == "user.delete":
         return "users.delete"
+    if tool == "user.update":
+        return "users.write"
+    if tool == "user.group.create":
+        return "users.write"
+    if tool == "user.group.update":
+        return "users.admin_access" if args.get("groupname") == "admins" else "users.write"
+    if tool == "user.group.delete":
+        return "users.delete"
+    if tool in ("user.permission.add", "user.permission.remove", "user.permission.update"):
+        return "users.permissions"
     if tool == "system.upgrade":
         return "system.upgrade"
+    if tool == "system.migrate":
+        return "system.migrate"
+    if tool == "backup.delete":
+        return "backups.delete"
+    if tool == "domain.cert.install":
+        return "domains.cert"
+    if tool in ("audit.list", "audit.get"):
+        return "audit.read"
     if tool in ("firewall.open", "firewall.close", "firewall.reload"):
         return "firewall.write"
     if tool == "domain.add":

@@ -145,6 +145,29 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "catalog.list": native_ops._safe_catalog_list,
     "catalog.get": native_ops._safe_catalog_get,
     "catalog.publish": native_ops._safe_catalog_publish,
+    "catalog.verify": native_ops._safe_catalog_verify,
+    "updates.check": native_ops._safe_updates_check,
+    "updates.refresh": native_ops._safe_updates_refresh,
+    "system.migrations": native_ops._safe_system_migrations,
+    "system.migrate": native_ops._safe_system_migrate,
+    "service.history": native_ops._safe_service_history,
+    "logs.read": native_ops._safe_logs_read,
+    "logs.web": native_ops._safe_logs_web,
+    "backup.delete": native_ops._safe_backup_delete,
+    "domain.cert.info": native_ops._safe_domain_cert_info,
+    "domain.cert.install": native_ops._safe_domain_cert_install,
+    "user.update": native_ops._safe_user_update,
+    "user.group.list": native_ops._safe_user_group_list,
+    "user.group.create": native_ops._safe_user_group_create,
+    "user.group.update": native_ops._safe_user_group_update,
+    "user.group.delete": native_ops._safe_user_group_delete,
+    "user.permission.list": native_ops._safe_user_permission_list,
+    "user.permission.info": native_ops._safe_user_permission_info,
+    "user.permission.add": native_ops._safe_user_permission_add,
+    "user.permission.remove": native_ops._safe_user_permission_remove,
+    "user.permission.update": native_ops._safe_user_permission_update,
+    "audit.list": native_ops._safe_audit_list,
+    "audit.get": native_ops._safe_audit_get,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
@@ -908,6 +931,38 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
         _guard(run, output_as)
 
+    @system.command("migrations")
+    def system_migrations(
+        pending: bool = typer.Option(False, "--pending", help="only pending migrations"),
+        done: bool = typer.Option(False, "--done", help="only done migrations"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """List known migrations (pending/done filters) and their recorded state."""
+        _guard(lambda: _run_tool("system.migrations", {"pending": pending, "done": done}), output_as)
+
+    @system.command("migrate")
+    def system_migrate(
+        targets: str = typer.Option("", "--targets", help="comma-separated migration ids (default: all pending)"),
+        skip: bool = typer.Option(False, "--skip", help="skip the named migrations"),
+        auto: bool = typer.Option(False, "--auto", help="run migrations non-interactively"),
+        force_rerun: bool = typer.Option(False, "--force-rerun", help="force re-running already-run migrations"),
+        accept_disclaimer: bool = typer.Option(False, "--accept-disclaimer", help="accept migration disclaimers"),
+        skip_postmigrations: bool = typer.Option(False, "--skip-postmigrations", help="do not run post-migration hooks"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Run/skip/force-rerun YunoHost migrations (write op, owner co-signature)."""
+        def run() -> Any:
+            target_list = [item.strip() for item in targets.split(",") if item.strip()]
+            body = _run_lifecycle(
+                "system.migrate",
+                {"targets": target_list, "skip": skip, "auto": auto, "force_rerun": force_rerun, "accept_disclaimer": accept_disclaimer, "skip_postmigrations": skip_postmigrations},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"system.migrate rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     # -- service ------------------------------------------------------------
 
     service = typer.Typer(name="service", help="service management", no_args_is_help=True)
@@ -936,6 +991,15 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     ) -> None:
         """Start/stop/restart one named service (write operation)."""
         _guard(lambda: _run_tool("service.control", {"name": name, "action": action}), output_as)
+
+    @service.command("history")
+    def service_history(
+        names: list[str] = typer.Argument(..., help="service names"),
+        lines: int = typer.Option(50, "--lines", help="journal lines for recent errors"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """systemd state + restart history for one or more services."""
+        _guard(lambda: _run_tool("service.history", {"names": names, "lines": lines}), output_as)
 
     # -- app ----------------------------------------------------------------
 
@@ -1091,6 +1155,19 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return {"snapshots": _restic_client().snapshots()}
         _guard(run, output_as)
 
+    @backup.command("delete")
+    def backup_delete(
+        name: str = typer.Argument(..., help="local backup archive name to delete"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Delete one local backup archive (write op, owner co-signature)."""
+        def run() -> Any:
+            body = _run_lifecycle("backup.delete", {"name": name}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"backup.delete rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     # -- domain -------------------------------------------------------------
 
     domain = typer.Typer(name="domain", help="native domain management", no_args_is_help=True)
@@ -1168,6 +1245,29 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             body = _run_lifecycle("domain.remove", {"domain": name, "force": force}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"domain.remove rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @domain.command("cert-info")
+    def domain_cert_info(
+        name: str = typer.Argument(..., help="domain name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Read-only certificate status for an already-registered domain."""
+        _guard(lambda: _run_tool("domain.cert.info", {"domain": name}), output_as)
+
+    @domain.command("cert-install")
+    def domain_cert_install(
+        name: str = typer.Argument(..., help="domain name"),
+        letsencrypt: bool = typer.Option(True, "--letsencrypt/--self-signed", help="request a real Let's Encrypt certificate"),
+        staging: bool = typer.Option(False, "--staging", help="rejected: this YunoHost has no ACME staging endpoint"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Issue/renew a certificate for an already-registered domain (write op)."""
+        def run() -> Any:
+            body = _run_lifecycle("domain.cert.install", {"domain": name, "letsencrypt": letsencrypt, "staging": staging}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"domain.cert.install rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 
@@ -1281,6 +1381,284 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             body = _run_lifecycle("catalog.publish", {"app_id": app_id, "relays": relays}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"catalog.publish rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @catalog.command("verify")
+    def catalog_verify(
+        event: str = typer.Argument(..., help="JSON Nostr declaration event to verify"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Verify a catalogue declaration event (id, signature, schema, trusted publisher)."""
+        _guard(lambda: _run_tool("catalog.verify", {"event_or_naddr": event}), output_as)
+
+    # -- updates ------------------------------------------------------------
+
+    updates = typer.Typer(name="updates", help="update metadata (check + refresh)", no_args_is_help=True)
+
+    @updates.command("check")
+    def updates_check(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Pending app/system updates, from cache only (no network refresh)."""
+        _guard(lambda: _run_tool("updates.check", {}), output_as)
+
+    @updates.command("refresh")
+    def updates_refresh(
+        target: str = typer.Option("apps", "--target", help="apps | system | all"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Refresh cached update metadata (apt cache, app catalog sources)."""
+        _guard(lambda: _run_tool("updates.refresh", {"target": target}), output_as)
+
+    # -- logs ---------------------------------------------------------------
+
+    logs = typer.Typer(name="logs", help="host logs (journal + nginx)", no_args_is_help=True)
+
+    @logs.command("read")
+    def logs_read(
+        units: list[str] = typer.Argument(..., help="allowlisted journal units (kernel/ssh/fail2ban/nginx/systemd…)"),
+        since: str = typer.Option(None, "--since", help="ISO-8601 or relative (e.g. -24h)"),
+        until: str = typer.Option(None, "--until", help="ISO-8601 or relative"),
+        priority: str = typer.Option(None, "--priority", help="syslog priority or range (e.g. err..emerg)"),
+        grep: str = typer.Option(None, "--grep", help="text/regex filter"),
+        lines: int = typer.Option(200, "--lines", help="max entries"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Query a deliberately allowlisted set of system journals."""
+        _guard(lambda: _run_tool("logs.read", {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines}), output_as)
+
+    @logs.command("web")
+    def logs_web(
+        host: str = typer.Option(None, "--host", help="filter by client host"),
+        path: str = typer.Option(None, "--path", help="filter by URL path"),
+        status: int = typer.Option(None, "--status", help="filter by HTTP status"),
+        since: str = typer.Option(None, "--since", help="ISO-8601 or relative (e.g. -24h)"),
+        until: str = typer.Option(None, "--until", help="ISO-8601 or relative"),
+        lines: int = typer.Option(200, "--lines", help="max entries"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Read bounded, structured Nginx access/error log records."""
+        _guard(lambda: _run_tool("logs.web", {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines}), output_as)
+
+    # -- user ---------------------------------------------------------------
+
+    user = typer.Typer(name="user", help="user, group and permission management", no_args_is_help=True)
+
+    @user.command("list")
+    def user_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List YunoHost user accounts."""
+        _guard(lambda: _run_tool("user.list", {}), output_as)
+
+    @user.command("create")
+    def user_create(
+        username: str = typer.Argument(..., help="username"),
+        domain: str = typer.Argument(..., help="domain"),
+        password: str = typer.Option(..., "--password", help="account password"),
+        fullname: str = typer.Option(..., "--fullname", help="full display name"),
+        mailbox_quota: str = typer.Option("0", "--mailbox-quota", help="mailbox quota (0 = unlimited)"),
+        admin: bool = typer.Option(False, "--admin", help="also grant webadmin/SSH access (owner co-signature)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Create a YunoHost user account/mailbox (write op)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.create", {"username": username, "domain": domain, "password": password, "fullname": fullname, "mailbox_quota": mailbox_quota, "admin": admin}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.create rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user.command("update")
+    def user_update(
+        username: str = typer.Argument(..., help="username"),
+        mail: str = typer.Option(None, "--mail", help="new primary email"),
+        change_password: str = typer.Option(None, "--password", help="new password"),
+        add_mailforward: str = typer.Option(None, "--add-mailforward", help="comma-separated forward addresses to add"),
+        remove_mailforward: str = typer.Option(None, "--remove-mailforward", help="comma-separated forward addresses to remove"),
+        add_mailalias: str = typer.Option(None, "--add-mailalias", help="comma-separated aliases to add"),
+        remove_mailalias: str = typer.Option(None, "--remove-mailalias", help="comma-separated aliases to remove"),
+        mailbox_quota: str = typer.Option(None, "--mailbox-quota", help="new mailbox quota"),
+        fullname: str = typer.Option(None, "--fullname", help="new full name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Update an existing user (only the fields passed change; write op)."""
+        def run() -> Any:
+            args = {"username": username}
+            for key, value in (
+                ("mail", mail), ("change_password", change_password),
+                ("add_mailforward", [i.strip() for i in add_mailforward.split(",")] if add_mailforward else None),
+                ("remove_mailforward", [i.strip() for i in remove_mailforward.split(",")] if remove_mailforward else None),
+                ("add_mailalias", [i.strip() for i in add_mailalias.split(",")] if add_mailalias else None),
+                ("remove_mailalias", [i.strip() for i in remove_mailalias.split(",")] if remove_mailalias else None),
+                ("mailbox_quota", mailbox_quota), ("fullname", fullname),
+            ):
+                if value is not None:
+                    args[key] = value
+            body = _run_lifecycle("user.update", args, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.update rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user.command("delete")
+    def user_delete(
+        username: str = typer.Argument(..., help="username"),
+        purge: bool = typer.Option(False, "--purge", help="also purge the home directory"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Delete a YunoHost user account (write op, owner co-signature)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.delete", {"username": username, "purge": purge}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.delete rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    user_group = typer.Typer(name="group", help="user group management", no_args_is_help=True)
+
+    @user_group.command("list")
+    def user_group_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List YunoHost user groups and their members."""
+        _guard(lambda: _run_tool("user.group.list", {}), output_as)
+
+    @user_group.command("create")
+    def user_group_create(
+        groupname: str = typer.Argument(..., help="group name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Create a new user group (write op)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.group.create", {"groupname": groupname}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.group.create rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user_group.command("update")
+    def user_group_update(
+        groupname: str = typer.Argument(..., help="group name"),
+        add: str = typer.Option(None, "--add", help="comma-separated usernames to add"),
+        remove: str = typer.Option(None, "--remove", help="comma-separated usernames to remove"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Add/remove usernames from a group (write op; 'admins' needs owner co-signature)."""
+        def run() -> Any:
+            args = {"groupname": groupname}
+            if add is not None:
+                args["add"] = [i.strip() for i in add.split(",") if i.strip()]
+            if remove is not None:
+                args["remove"] = [i.strip() for i in remove.split(",") if i.strip()]
+            body = _run_lifecycle("user.group.update", args, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.group.update rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user_group.command("delete")
+    def user_group_delete(
+        groupname: str = typer.Argument(..., help="group name"),
+        force: bool = typer.Option(False, "--force", help="delete even if it is a primary group"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Delete a user group and its permission grants (write op, owner co-signature)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.group.delete", {"groupname": groupname, "force": force}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.group.delete rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    user_permission = typer.Typer(name="permission", help="app/system permission management", no_args_is_help=True)
+
+    @user_permission.command("list")
+    def user_permission_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List app/system permissions and allowed users/groups."""
+        _guard(lambda: _run_tool("user.permission.list", {}), output_as)
+
+    @user_permission.command("info")
+    def user_permission_info(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """One permission's full info."""
+        _guard(lambda: _run_tool("user.permission.info", {"permission": permission}), output_as)
+
+    @user_permission.command("add")
+    def user_permission_add(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        names: list[str] = typer.Argument(..., help="usernames/groups to grant"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Grant users/groups access to an app permission (write op, owner co-signature)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.permission.add", {"permission": permission, "names": names}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.permission.add rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user_permission.command("remove")
+    def user_permission_remove(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        names: list[str] = typer.Argument(..., help="usernames/groups to revoke"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Revoke users/groups access to an app permission (write op, owner co-signature)."""
+        def run() -> Any:
+            body = _run_lifecycle("user.permission.remove", {"permission": permission, "names": names}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.permission.remove rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @user_permission.command("update")
+    def user_permission_update(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        label: str = typer.Option(None, "--label", help="new display label"),
+        show_tile: bool = typer.Option(None, "--show-tile/--hide-tile", help="show/hide the SSO dashboard tile"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Update a permission's label/tile visibility (write op, owner co-signature)."""
+        def run() -> Any:
+            args = {"permission": permission}
+            if label is not None:
+                args["label"] = label
+            if show_tile is not None:
+                args["show_tile"] = show_tile
+            body = _run_lifecycle("user.permission.update", args, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"user.permission.update rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    user.add_typer(user_group, name="group")
+    user.add_typer(user_permission, name="permission")
+
+    # -- audit ---------------------------------------------------------------
+
+    audit = typer.Typer(name="audit", help="signed operation-chain audit trail", no_args_is_help=True)
+
+    @audit.command("list")
+    def audit_list(
+        limit: int = typer.Option(None, "--limit", help="max entries, newest first"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """List signed operation-chain audit entries (owner co-signature per call)."""
+        def run() -> Any:
+            body = _run_lifecycle("audit.list", {"limit": limit} if limit is not None else {}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"audit.list rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @audit.command("get")
+    def audit_get(
+        audit_id: str = typer.Argument(..., help="event id or request id"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Fetch one audit entry (owner co-signature per call)."""
+        def run() -> Any:
+            body = _run_lifecycle("audit.get", {"audit_id": audit_id}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"audit.get rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 
@@ -1588,7 +1966,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, catalog, network, credential):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app

@@ -57,12 +57,16 @@ def test_registry_has_the_safe_tools():
         "app.list",
         "app.remove",
         "app.upgrade",
+        "audit.get",
+        "audit.list",
         "backup.create",
+        "backup.delete",
         "backup.list",
         "backup.restore",
         "catalog.get",
         "catalog.list",
         "catalog.publish",
+        "catalog.verify",
         "credential.list",
         "credential.remove",
         "credential.set",
@@ -75,6 +79,8 @@ def test_registry_has_the_safe_tools():
         "dns.verify",
         "dns.watch",
         "domain.add",
+        "domain.cert.info",
+        "domain.cert.install",
         "domain.inspect",
         "domain.list",
         "domain.remove",
@@ -82,20 +88,37 @@ def test_registry_has_the_safe_tools():
         "firewall.list",
         "firewall.open",
         "firewall.reload",
+        "logs.read",
+        "logs.web",
         "network.public_ip",
         "package.plan",
         "package.reconcile",
         "rollback.apply",
         "service.control",
+        "service.history",
         "service.restart",
         "service.status",
         "state.reconcile",
+        "system.migrate",
+        "system.migrations",
         "system.status",
         "system.upgrade",
         "system.version",
+        "updates.check",
+        "updates.refresh",
         "user.create",
         "user.delete",
+        "user.group.create",
+        "user.group.delete",
+        "user.group.list",
+        "user.group.update",
         "user.list",
+        "user.permission.add",
+        "user.permission.info",
+        "user.permission.list",
+        "user.permission.remove",
+        "user.permission.update",
+        "user.update",
     ]
     assert tool_spec("system.version").scope == "server.read"
     assert tool_spec("system.version").require_approval is False
@@ -123,6 +146,29 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("firewall.open").scope == "firewall.write"
     assert tool_spec("diagnosis.run").scope == "diagnosis.read"
     assert tool_spec("diagnosis.run").require_approval is False
+    # Phase 5 backlog surface: scopes, approval posture, and the gated reads.
+    assert tool_spec("updates.check").require_approval is False
+    assert tool_spec("updates.refresh").scope == "system.update"
+    assert tool_spec("system.migrations").scope == "system.update"
+    assert tool_spec("system.migrations").require_approval is False
+    assert tool_spec("system.migrate").scope == "system.migrate"
+    assert tool_spec("service.history").require_approval is False
+    assert tool_spec("logs.read").scope == "logs.read"
+    assert tool_spec("logs.read").require_approval is False
+    assert tool_spec("logs.web").scope == "logs.read"
+    assert tool_spec("backup.delete").scope == "backups.delete"
+    assert tool_spec("domain.cert.info").scope == "domains.read"
+    assert tool_spec("domain.cert.info").require_approval is False
+    assert tool_spec("domain.cert.install").scope == "domains.write"
+    assert tool_spec("user.update").scope == "users.write"
+    assert tool_spec("user.group.list").require_approval is False
+    assert tool_spec("user.group.delete").scope == "users.delete"
+    assert tool_spec("user.permission.list").require_approval is False
+    assert tool_spec("user.permission.info").scope == "users.read"
+    assert tool_spec("catalog.verify").scope == "catalog.verify"
+    assert tool_spec("catalog.verify").require_approval is False
+    assert tool_spec("audit.list").scope == "audit.read"
+    assert tool_spec("audit.get").scope == "audit.read"
     for name, spec in TOOLS.items():
         assert spec.handler is not None
         if name not in (
@@ -146,6 +192,17 @@ def test_registry_has_the_safe_tools():
             "diagnosis.run",
             "catalog.list",
             "catalog.get",
+            "updates.check",
+            "updates.refresh",
+            "system.migrations",
+            "service.history",
+            "logs.read",
+            "logs.web",
+            "domain.cert.info",
+            "user.group.list",
+            "user.permission.list",
+            "user.permission.info",
+            "catalog.verify",
         ):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is not None

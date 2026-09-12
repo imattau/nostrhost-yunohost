@@ -103,6 +103,10 @@ SCOPE_DNS_CREDENTIALS_READ = "dns.credentials.read"
 SCOPE_CATALOG_READ = "catalog.inspect"
 SCOPE_CATALOG_VERIFY = "catalog.verify"
 SCOPE_CATALOG_PUBLISH = "catalog.publish"
+SCOPE_LOGS_READ = "logs.read"
+SCOPE_BACKUPS_DELETE = "backups.delete"
+SCOPE_SYSTEM_MIGRATE = "system.migrate"
+SCOPE_AUDIT_READ = "audit.read"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -136,6 +140,10 @@ KNOWN_SCOPES = frozenset(
         SCOPE_CATALOG_READ,
         SCOPE_CATALOG_VERIFY,
         SCOPE_CATALOG_PUBLISH,
+        SCOPE_LOGS_READ,
+        SCOPE_BACKUPS_DELETE,
+        SCOPE_SYSTEM_MIGRATE,
+        SCOPE_AUDIT_READ,
     }
 )
 

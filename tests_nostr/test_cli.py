@@ -51,11 +51,15 @@ def test_group_help_lists_commands(app):
 
 
 def test_identity_is_npub_model_not_password():
-    # no password/LDAP "user" group on the native surface; identity is npub-based
+    # Identity on the native surface is npub-based (the `identity` group), not
+    # a password/LDAP login CLI. The `user` group exists separately for the
+    # native YunoHost account/group/permission operations (MCP Phase 5) — it is
+    # not the legacy user-management shell.
     app = cli_module.build_app()
     group_names = [g.name for g in app.registered_groups]
-    assert "user" not in group_names
     assert "identity" in group_names
+    assert "user" in group_names
+    assert "capability" in group_names
 
 
 # --------------------------------------------------------------------------- #
