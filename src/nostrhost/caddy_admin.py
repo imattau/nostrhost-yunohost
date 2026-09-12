@@ -101,6 +101,17 @@ def build_domain_site(domain: str) -> dict[str, Any]:
     }
 
 
+def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str, Any]:
+    """Route ``domain/.well-known/nostr.json`` to the authd (portal-api),
+    which resolves the queried username against the identity store (W4)."""
+    return {
+        "@id": f"nostrhost-nip05:{domain}",
+        "match": [{"host": [domain]}, {"path": ["/.well-known/nostr.json"]}],
+        "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]}],
+        "terminal": True,
+    }
+
+
 def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     """Build a Caddy route JSON object for a native ``[web]`` resource.
 
@@ -237,3 +248,11 @@ class CaddyAdminClient:
     def remove_domain_site(self, domain: str) -> None:
         """Remove Caddy's site for ``domain`` (domain_remove)."""
         self.delete_route(f"nostrhost-domain:{domain}")
+
+    def ensure_nip05_route(self, domain: str) -> str:
+        """Create (or reconcile) the NIP-05 route for ``domain`` (W4)."""
+        return self.ensure_route(build_nip05_route(domain))
+
+    def remove_nip05_route(self, domain: str) -> None:
+        """Remove the NIP-05 route for ``domain`` (W4)."""
+        self.delete_route(f"nostrhost-nip05:{domain}")

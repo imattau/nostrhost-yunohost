@@ -19,6 +19,12 @@ from typing import Any, Callable
 def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
     if tool == "backup.restore":
         return "backups.restore"
+    if tool == "domain.add":
+        return "domains.write"
+    if tool == "domain.remove":
+        return "domains.write"
+    if tool == "dns.apply":
+        return "domains.dns"
     if tool == "package.reconcile":
         plan = args.get("plan")
         operations = plan.get("operations", []) if isinstance(plan, dict) else plan or []

@@ -59,6 +59,14 @@ from yunohost.nostr_operations import (
     OperationError,
     _safe_app_list,
     _safe_app_remove,
+    _safe_dns_apply,
+    _safe_dns_plan,
+    _safe_dns_verify,
+    _safe_domain_add,
+    _safe_domain_inspect,
+    _safe_domain_list,
+    _safe_domain_remove,
+    _safe_network_public_ip,
     _safe_package_plan,
     _safe_package_reconcile,
     _safe_reconcile_apply,
@@ -93,6 +101,14 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "package.reconcile": _safe_package_reconcile,
     "rollback.apply": _safe_rollback_apply,
     "state.reconcile": _safe_reconcile_apply,
+    "domain.list": _safe_domain_list,
+    "domain.inspect": _safe_domain_inspect,
+    "domain.add": _safe_domain_add,
+    "domain.remove": _safe_domain_remove,
+    "dns.plan": _safe_dns_plan,
+    "dns.apply": _safe_dns_apply,
+    "dns.verify": _safe_dns_verify,
+    "network.public_ip": _safe_network_public_ip,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
@@ -892,6 +908,126 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return {"snapshots": _restic_client().snapshots()}
         _guard(run, output_as)
 
+    # -- domain -------------------------------------------------------------
+
+    domain = typer.Typer(name="domain", help="native domain management", no_args_is_help=True)
+
+    @domain.command("list")
+    def domain_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List registered native domains."""
+        _guard(lambda: _run_tool("domain.list", {}), output_as)
+
+    @domain.command("inspect")
+    def domain_inspect(
+        name: str = typer.Argument(..., help="domain name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Inspect a native domain: intent, desired/actual DNS, diff, routes."""
+        _guard(lambda: _run_tool("domain.inspect", {"domain": name}), output_as)
+
+    @domain.command("add")
+    def domain_add(
+        name: str = typer.Argument(..., help="domain name"),
+        provider_type: str = typer.Option("manual", "--provider-type", help="dns provider (manual today)"),
+        provider_zone: str = typer.Option(None, "--provider-zone", help="override the authoritative zone"),
+        primary: bool = typer.Option(False, "--primary", help="mark as the primary domain"),
+        ipv4: bool = typer.Option(True, "--ipv4/--no-ipv4", help="manage A records"),
+        ipv6: bool = typer.Option(True, "--ipv6/--no-ipv6", help="manage AAAA records"),
+        wildcard: bool = typer.Option(True, "--wildcard/--no-wildcard", help="manage wildcard A/AAAA records"),
+        nip05: bool = typer.Option(False, "--nip05", help="serve .well-known/nostr.json on this domain"),
+        caa: str = typer.Option(None, "--caa", help="CAA issuer(s), comma-separated (e.g. letsencrypt.org)"),
+        apply_dns: bool = typer.Option(True, "--apply/--no-apply", help="apply the DNS plan (default: yes)"),
+        verify: bool = typer.Option(True, "--verify/--no-verify", help="verify DNS after apply"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Register a native domain through the signed chain.
+
+        Plans DNS for the domain, applies it via its provider, stands up
+        Caddy (root site + optional NIP-05 route) and records state.
+        """
+        def run() -> Any:
+            body = _run_lifecycle(
+                "domain.add",
+                {
+                    "domain": name,
+                    "provider_type": provider_type,
+                    "provider_zone": provider_zone,
+                    "primary": primary,
+                    "ipv4": ipv4,
+                    "ipv6": ipv6,
+                    "wildcard": wildcard,
+                    "nip05": nip05,
+                    "tls_caa": [c.strip() for c in caa.split(",") if c.strip()] if caa else None,
+                    "apply_dns": apply_dns,
+                    "verify": verify,
+                },
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"domain.add rejected: {body.get('reason') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @domain.command("remove")
+    def domain_remove(
+        name: str = typer.Argument(..., help="domain name"),
+        force: bool = typer.Option(False, "--force", help="remove even if apps still use it"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove a native domain through the signed chain.
+
+        Blocks while native apps still use the domain; deletes only
+        NostrHost-owned DNS records and drops the Caddy routes.
+        """
+        def run() -> Any:
+            body = _run_lifecycle("domain.remove", {"domain": name, "force": force}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"domain.remove rejected: {body.get('reason') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    # -- dns ----------------------------------------------------------------
+
+    dns = typer.Typer(name="dns", help="native DNS reconciliation", no_args_is_help=True)
+
+    @dns.command("plan")
+    def dns_plan(
+        name: str = typer.Argument(..., help="domain name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Compute the desired-vs-actual DNS plan for a domain (no changes)."""
+        _guard(lambda: _run_tool("dns.plan", {"domain": name}), output_as)
+
+    @dns.command("apply")
+    def dns_apply(
+        name: str = typer.Argument(..., help="domain name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Apply the DNS plan for a domain through its provider (write op)."""
+        def run() -> Any:
+            body = _run_lifecycle("dns.apply", {"domain": name}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"dns.apply rejected: {body.get('reason') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @dns.command("verify")
+    def dns_verify(
+        name: str = typer.Argument(..., help="domain name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Verify a domain's DNS records resolve."""
+        _guard(lambda: _run_tool("dns.verify", {"domain": name}), output_as)
+
+    # -- network ------------------------------------------------------------
+
+    network = typer.Typer(name="network", help="network facts", no_args_is_help=True)
+
+    @network.command("public-ip")
+    def network_public_ip(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Current public IPv4/IPv6 address."""
+        _guard(lambda: _run_tool("network.public_ip", {}), output_as)
+
     # -- package ------------------------------------------------------------
 
     package = typer.Typer(name="package", help="native package planning", no_args_is_help=True)
@@ -1136,7 +1272,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, network):
         app.add_typer(group, name=group.info.name)
 
     return app

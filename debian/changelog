@@ -1,3 +1,34 @@
+yunohost (12.1.41.24) stable; urgency=low
+
+  * nostrhost: W4 Phase A — native domains & DNS as a first-class subsystem.
+    Fully parallel to the legacy YunoHost domain/DNS/DynDNS machinery (no
+    LDAP virtualdomain, no nginx/postfix/mail/cert regenconf).
+    - New modules: nostrhost.domains (models/service/planner/operations),
+      nostrhost.dns (models/reconciler/ownership + providers/manual) and
+      nostrhost.network (public_ip).
+    - DomainResource intent: name, primary, DNS provider ref, exposure
+      (ipv4/ipv6/wildcard), tls (automatic + optional explicit CAA
+      issuers), nostr (nip05). DnsProviderResource carries a
+      secret:dns/<provider>/<name> credential reference only.
+    - Ownership-bounded reconciliation: desired vs actual diff, only
+      NostrHost-owned records are ever created/updated/deleted; external
+      zone records are preserved and reported. State under
+      /var/lib/nostrhost/state/{domains,dns}.
+    - ManualProvider: default, idempotent zone state on disk + best-effort
+      resolution verify.
+    - New ops: domain.list/inspect/add/remove, dns.plan/apply/verify,
+      network.public_ip; new scopes domains.read/domains.write/dns.write;
+      policy mapping domain.add/remove -> domains.write, dns.apply ->
+      domains.dns. CLI groups `nostrhost domain`, `dns`, `network`.
+    - NIP-05: per-domain .well-known/nostr.json via Caddy route ->
+      portal-api authd (build_nostr_json + identity store); only opt-in
+      linked identities are revealed.
+    - Legacy permission URL validation now accepts native domains via the
+      parallel registry (no LDAP); _assert_domain_exists falls back to the
+      native registry when LDAP is unavailable.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 06:00:00 +0200
+
 yunohost (12.1.41.23) stable; urgency=low
 
   * nostrhost: native app lifecycle fixes found porting the first real app

@@ -54,6 +54,14 @@ def test_registry_has_the_safe_tools():
     assert known_tools() == [
         "app.list",
         "app.remove",
+        "dns.apply",
+        "dns.plan",
+        "dns.verify",
+        "domain.add",
+        "domain.inspect",
+        "domain.list",
+        "domain.remove",
+        "network.public_ip",
         "package.plan",
         "package.reconcile",
         "rollback.apply",
@@ -69,9 +77,13 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("service.restart").scope == "services.write"
     assert tool_spec("rollback.apply").scope == "state.write"
     assert tool_spec("package.plan").require_approval is False
+    assert tool_spec("domain.list").scope == "domains.read"
+    assert tool_spec("domain.add").scope == "domains.write"
+    assert tool_spec("dns.apply").scope == "dns.write"
+    assert tool_spec("dns.plan").require_approval is False
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        if name != "package.plan":
+        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "network.public_ip"):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is None
 

@@ -71,7 +71,22 @@ SCOPE_APPS_WRITE = "apps.write"
 SCOPE_SERVICES_READ = "services.read"
 SCOPE_SERVICES_WRITE = "services.write"
 SCOPE_STATE_WRITE = "state.write"
-KNOWN_SCOPES = frozenset({SCOPE_SERVER_READ, SCOPE_APPS_READ, SCOPE_APPS_WRITE, SCOPE_SERVICES_READ, SCOPE_SERVICES_WRITE, SCOPE_STATE_WRITE})
+SCOPE_DOMAINS_READ = "domains.read"
+SCOPE_DOMAINS_WRITE = "domains.write"
+SCOPE_DNS_WRITE = "dns.write"
+KNOWN_SCOPES = frozenset(
+    {
+        SCOPE_SERVER_READ,
+        SCOPE_APPS_READ,
+        SCOPE_APPS_WRITE,
+        SCOPE_SERVICES_READ,
+        SCOPE_SERVICES_WRITE,
+        SCOPE_STATE_WRITE,
+        SCOPE_DOMAINS_READ,
+        SCOPE_DOMAINS_WRITE,
+        SCOPE_DNS_WRITE,
+    }
+)
 
 
 class OperationError(ValueError):
@@ -310,6 +325,54 @@ def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None
     return {"changes": report, "_ok": all(row["status"] == "executed" for row in report)}
 
 
+def _safe_domain_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_list as _impl
+
+    return _impl(**args)
+
+
+def _safe_domain_inspect(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_inspect as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_domain_add(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_add as _impl
+
+    return _impl(**args)
+
+
+def _safe_domain_remove(domain: str = "", force: bool = False, **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_remove as _impl
+
+    return _impl(domain=domain, force=force, **args)
+
+
+def _safe_dns_plan(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_plan as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_dns_apply(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_apply as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_dns_verify(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_verify as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_network_public_ip as _impl
+
+    return _impl(**args)
+
+
 def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     if args:
         raise OperationError(f"state.reconcile does not accept extra args: {sorted(args)}")
@@ -378,6 +441,59 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_reconcile_apply,
         scope=SCOPE_STATE_WRITE,
         description="apply an approved, bounded reconciliation plan",
+    ),
+    "domain.list": ToolSpec(
+        name="domain.list",
+        handler=_safe_domain_list,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="list registered native domains",
+    ),
+    "domain.inspect": ToolSpec(
+        name="domain.inspect",
+        handler=_safe_domain_inspect,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="inspect a native domain: intent, desired/actual DNS, diff, routes",
+    ),
+    "domain.add": ToolSpec(
+        name="domain.add",
+        handler=_safe_domain_add,
+        scope=SCOPE_DOMAINS_WRITE,
+        description="register a native domain: plan DNS, apply, stand up Caddy routes, record state",
+    ),
+    "domain.remove": ToolSpec(
+        name="domain.remove",
+        handler=_safe_domain_remove,
+        scope=SCOPE_DOMAINS_WRITE,
+        description="remove a native domain (blocks while apps use it; deletes owned DNS only)",
+    ),
+    "dns.plan": ToolSpec(
+        name="dns.plan",
+        handler=_safe_dns_plan,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="compute the desired-vs-actual DNS plan for a domain (no changes)",
+    ),
+    "dns.apply": ToolSpec(
+        name="dns.apply",
+        handler=_safe_dns_apply,
+        scope=SCOPE_DNS_WRITE,
+        description="apply the DNS plan for a domain through its provider",
+    ),
+    "dns.verify": ToolSpec(
+        name="dns.verify",
+        handler=_safe_dns_verify,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="verify a domain's DNS records resolve",
+    ),
+    "network.public_ip": ToolSpec(
+        name="network.public_ip",
+        handler=_safe_network_public_ip,
+        scope=SCOPE_SERVER_READ,
+        require_approval=False,
+        description="current public IPv4/IPv6 address",
     ),
 }
 

@@ -122,6 +122,31 @@ def _serialize_identity(identity) -> dict:
 # --------------------------------------------------------------------------- #
 # portalapi routes (registered by src/__init__.py::portalapi)
 
+def nip05_route():
+    """NIP-05 ``/.well-known/nostr.json`` (W4).
+
+    Served on every native domain with ``[nostr] nip05 = true`` via Caddy's
+    reverse-proxy to the authd. Only ever reveals a pubkey for a username
+    that has actually linked an identity (opt-in), matching NIP-05
+    behaviour across providers.
+    """
+    from bottle import request
+
+    from nostrhost_auth.nip05 import build_nostr_json
+
+    from .nostr_identity import resolve_username
+
+    class _Mapping:
+        def get_by_username(self, username):
+            for identity in resolve_username(username) or []:
+                if identity.enabled:
+                    return identity
+            return None
+
+    name = request.query.get("name")
+    return build_nostr_json(_Mapping(), name)
+
+
 def identities_route():
     """List the session user's linked Nostr identities (+ policy flag)."""
     from bottle import HTTPResponse

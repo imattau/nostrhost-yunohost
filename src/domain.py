@@ -264,8 +264,22 @@ def domain_info(domain: str) -> DomainInfo:
 
 
 def _assert_domain_exists(domain: str) -> None:
-    if domain not in _get_domains():
-        raise YunohostValidationError("domain_unknown", domain=domain)
+    try:
+        if domain in _get_domains():
+            return
+    except Exception:  # noqa: BLE001 - LDAP may be unavailable on a native-only node
+        pass
+    # W4: the native domain plane is fully parallel (no LDAP virtualdomain);
+    # accept native registered domains so permission URL validation works for
+    # native web routes without a legacy registry entry.
+    try:
+        from .nostrhost.domains.service import native_domain_names
+
+        if domain in native_domain_names():
+            return
+    except Exception:  # noqa: BLE001 - native registry is best-effort
+        pass
+    raise YunohostValidationError("domain_unknown", domain=domain)
 
 
 def _list_subdomains_of(parent_domain: str) -> list[str]:

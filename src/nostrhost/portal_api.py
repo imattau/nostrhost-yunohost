@@ -24,6 +24,7 @@ def build_app() -> Bottle:
         identities_route,
         link_challenge_route,
         link_route,
+        nip05_route,
         rename_route,
         revoke_route,
         unlink_route,
@@ -42,6 +43,7 @@ def build_app() -> Bottle:
     app.post("/nostr/identities/revoke", callback=revoke_route)
     app.post("/nostr/identities/rename", callback=rename_route)
     app.post("/nostr/unlink", callback=unlink_route)
+    app.get("/.well-known/nostr.json", callback=nip05_route)
     app.get("/.well-known/openid-configuration", callback=discovery)
     app.get("/oidc/authorize", callback=authorize)
     app.post("/oidc/token", callback=token)
