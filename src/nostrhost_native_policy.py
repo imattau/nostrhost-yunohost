@@ -30,12 +30,13 @@ def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
 
 
 def _backup_created_at() -> dict[str, float]:
+    archives: dict[str, float] = {}
     try:
         from .backup import backup_list
 
-        archives = backup_list(with_info=True).get("archives", {})
+        archives.update(backup_list(with_info=True).get("archives", {}))
     except Exception:
-        return {}
+        archives = {}
     result: dict[str, float] = {}
     for name, info in archives.items():
         if not isinstance(info, dict):
@@ -50,6 +51,24 @@ def _backup_created_at() -> dict[str, float]:
                 result[str(name)] = datetime.fromisoformat(created_at).timestamp()
             except ValueError:
                 continue
+    # The native backup plane is Restic: any snapshot is fresh backup
+    # evidence for policy rules that require one (apps.upgrade/remove).
+    try:
+        from .nostr_restic import load_restic_config, ResticClient
+
+        conf = load_restic_config()
+        if conf is not None:
+            client = ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+            for snapshot in client.snapshots():
+                stamp = snapshot.get("time")
+                if not isinstance(stamp, str):
+                    continue
+                try:
+                    result[f"restic:{snapshot.get('id', '')}"] = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+    except Exception:  # noqa: BLE001 - backup facts are best-effort
+        pass
     return result
 
 

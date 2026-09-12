@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
+from .nostr_operations_state import OpState
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
 KIND_OPERATION_REQUEST = 2200
@@ -717,3 +718,126 @@ def revoke_delegation(
 
 def _control_relay(control_relay: str | None) -> str:
     return control_relay or os.environ.get("NOSTRHOST_CONTROL_RELAY") or "ws://127.0.0.1:4848"
+
+
+# --------------------------------------------------------------------------- #
+# local signed chain (used by the CLI for native app lifecycle writes)
+
+def local_chain_deps(*, operator_sk: str | None = None, control_relay: str | None = None) -> dict[str, Any]:
+    """Wire the local execution plane exactly like ``nostr-operationsd.run``.
+
+    Returns live ``state`` (StateRecorder over the state repo with the Restic
+    snapshot hook), ``restic`` (client when configured) and ``policy`` (native
+    policy adapter when the shared policy lib is installed). Any piece that
+    cannot be built degrades to ``None`` rather than blocking writes, matching
+    the daemon's posture.
+    """
+    cfg = _operator_config(operator_sk, control_relay)
+    restic: Any = None
+    try:
+        from .nostr_restic import ResticClient, load_restic_config
+
+        conf = load_restic_config()
+        if conf is not None:
+            restic = ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+    except Exception:  # noqa: BLE001 - restic is optional
+        restic = None
+    policy: Any = None
+    try:
+        from .nostrhost_native_policy import build_native_policy_adapter
+
+        policy = build_native_policy_adapter()
+    except Exception:  # noqa: BLE001 - policy is optional on old nodes
+        policy = None
+    state: Any = None
+    try:
+        from .nostr_restic import restic_snapshot_hook
+        from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
+
+        state = StateRecorder(
+            StateRepo(state_dir_from_env(), cfg.server_pubkey),
+            capabilities=lambda: {},
+            restic_hook=restic_snapshot_hook() if restic is not None else None,
+        )
+    except Exception:  # noqa: BLE001 - state history is additive
+        state = None
+    return {"state": state, "restic": restic, "policy": policy}
+
+
+def run_signed_chain(
+    tool: str,
+    args: dict[str, Any] | None = None,
+    *,
+    operator_sk: str | None = None,
+    control_relay: str | None = None,
+    server_sk: str | None = None,
+    admins: list[str] | None = None,
+    backend: Any = None,
+    state: Any = None,
+    restic: Any = None,
+    policy: Any = None,
+    policy_owner: str | None = None,
+    approve: bool = True,
+) -> dict[str, Any]:
+    """Run one signed operation request end-to-end through the local engine.
+
+    The local admin is the operator: this builds a kind-2200 request signed
+    by the operator, feeds it to an ``OperationEngine`` wired like the daemon
+    (native backend, pre/post StateRecorder, optional Restic + policy adapter)
+    and approves it as the operator admin, so every write still passes the
+    same authorisation / policy / approval gate a remote agent's request does.
+    Returns the execution-result body (``{ok, result, policy, request_id}``);
+    a policy denial or pending-approval state is returned with ``ok: False``
+    rather than raising.
+
+    Remote/distributed writes keep using ``request_operation`` /
+    ``approve_operation`` through the relay + daemon; this is the local
+    variant for CLI lifecycle commands. ``backend`` / ``state`` / ``restic`` /
+    ``policy`` are injectable for tests (defaults come from
+    :func:`local_chain_deps` / ``YnhExecutorBackend``).
+    """
+    spec = tool_spec(tool)
+    if spec is None:
+        raise OperationError(f"unknown tool {tool!r} (known: {', '.join(known_tools())})")
+    if backend is None:
+        from .nostr_operationsd import YnhExecutorBackend
+
+        backend = YnhExecutorBackend()
+    cfg = _operator_config(operator_sk, control_relay, admins=admins, server_sk=server_sk)
+    sk = operator_sk or cfg.operator_sk
+    pk = _derive_pubkey(sk)
+    if state is None and restic is None and policy is None and admins is None:
+        deps = local_chain_deps(operator_sk=operator_sk, control_relay=control_relay)
+        state, restic, policy = deps["state"], deps["restic"], deps["policy"]
+    from .nostr_operationsd import OperationEngine
+
+    engine = OperationEngine(
+        publish=lambda _event: None,
+        server_sk=cfg.server_sk,
+        admins=cfg.admins,
+        backend=backend,
+        state=state,
+        restic=restic,
+        policy=policy,
+        policy_owner=policy_owner or cfg.operator_pubkey,
+    )
+    request = build_operation_request(sk, pk, tool, args or {}, actor_pubkey=pk)
+    if not engine.handle_event(request):
+        raise OperationError(f"{tool} request was rejected before approval")
+    record = engine.records.get(request["id"])
+    if record is None:
+        raise OperationError(f"{tool} request was not accepted")
+    if record.state == OpState.REJECTED:
+        return {"ok": False, "request_id": request["id"], "state": record.state.value, "reason": record.reason}
+    if not approve:
+        return {"ok": False, "request_id": request["id"], "state": record.state.value, "pending_approval": True}
+    approval = build_approval(sk, pk, request["id"], note="local operator approval")
+    if not engine.handle_event(approval):
+        raise OperationError(f"{tool} approval was not accepted")
+    record = engine.records[request["id"]]
+    if record.state not in (OpState.SUCCEEDED, OpState.FAILED, OpState.REJECTED):
+        return {"ok": False, "request_id": request["id"], "state": record.state.value}
+    body = dict(record.result or {})
+    body["request_id"] = request["id"]
+    body["state"] = record.state.value
+    return body

@@ -29,6 +29,7 @@ Exit codes: 0 on success, 1 on any error, 2 on usage errors.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -115,6 +116,213 @@ def _print_error(exc: Exception) -> None:
 def _run_tool(name: str, args: dict[str, Any]) -> Any:
     handler = _TOOL_HANDLERS[name]
     return handler(**args)
+
+
+# --------------------------------------------------------------------------- #
+# native app lifecycle (ALPHA-PLAN Workstream 3)
+
+PACKAGE_CACHE = Path("/var/cache/nostrhost/catalogue")
+SYSTEM_BACKUP_PATHS = ("/etc", "/home", "/opt", "/var/www", "/var/lib/nostrhost")
+
+
+def _coordinate_for(
+    app_id: str,
+    *,
+    repository: str | None = None,
+    revision: str | None = None,
+    package_path: str | None = None,
+    manifest_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve the catalogue coordinate for ``app_id`` (per-field overridable)."""
+    try:
+        from nostr_catalog_provider import native_catalog_coordinate
+
+        coordinate = native_catalog_coordinate(app_id) or {}
+    except Exception:  # noqa: BLE001 - the catalogue is an optional source
+        coordinate = {}
+    for key, value in (
+        ("repository", repository),
+        ("revision", revision),
+        ("package_path", package_path),
+        ("manifest_sha256", manifest_sha256),
+    ):
+        if value:
+            coordinate[key] = value
+    return coordinate or None
+
+
+def _load_package_data(source: Path | None, coordinate: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the resolved package.toml dict for an install/upgrade.
+
+    ``--source`` may be a directory containing ``package_path`` (default
+    ``package.toml``) or the manifest file itself. Without a local source the
+    package is fetched from the coordinate's git repository at the pinned
+    revision into the package cache."""
+    import tomllib
+
+    package_path = (coordinate or {}).get("package_path") or "package.toml"
+    if source is not None:
+        target = source / package_path if source.is_dir() else source
+    else:
+        coordinate = coordinate or {}
+        repository = coordinate.get("repository")
+        revision = coordinate.get("revision")
+        if not repository or not revision:
+            raise NostrHostError("no --source given and the catalogue coordinate lacks repository@revision")
+        target = _fetch_catalogue_file(repository, revision, package_path)
+    try:
+        with target.open("rb") as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise NostrHostError(f"cannot load package {target}: {exc}") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("app"), dict):
+        raise NostrHostError(f"{target} is not a native package.toml (missing [app])")
+    return raw
+
+
+def _fetch_catalogue_file(repository: str, revision: str, package_path: str) -> Path:
+    """Best-effort git checkout of ``repository@revision`` into the cache."""
+    slug = hashlib.sha256(f"{repository}:{revision}".encode()).hexdigest()[:16]
+    checkout = PACKAGE_CACHE / slug
+    if not checkout.is_dir():
+        PACKAGE_CACHE.mkdir(parents=True, exist_ok=True)
+        temporary = checkout.with_suffix(".tmp")
+        subprocess.run(["git", "clone", "--no-checkout", repository, str(temporary)], check=True, capture_output=True, text=True)
+        temporary.rename(checkout)
+    if not revision.startswith("refs/"):
+        subprocess.run(["git", "-C", str(checkout), "checkout", "-q", revision], check=True, capture_output=True, text=True)
+    return checkout / package_path
+
+
+def _verify_package(package_data: dict[str, Any], coordinate: dict[str, Any] | None) -> None:
+    """Refuse to plan a package whose canonical digest differs from the signed
+    catalogue declaration's ``manifest_sha256``."""
+    expected = (coordinate or {}).get("manifest_sha256")
+    if not expected:
+        return  # nothing to verify against
+    from nostrhost.package_engine import _canonical_json
+
+    actual = hashlib.sha256(_canonical_json(package_data)).hexdigest()
+    if actual.lower() != str(expected).lower():
+        raise NostrHostError(f"package manifest hash mismatch: expected {expected}, got {actual}")
+
+
+def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None) -> dict[str, Any]:
+    from nostrhost.package_engine import package_plan_envelope
+
+    return package_plan_envelope(package_data, catalogue=coordinate)
+
+
+def _run_lifecycle(tool: str, args: dict[str, Any], *, state: _State) -> dict[str, Any]:
+    from nostr_operations import run_signed_chain
+
+    return run_signed_chain(
+        tool,
+        args,
+        operator_sk=state.operator_sk,
+        control_relay=state.control_relay,
+    )
+
+
+def _lifecycle_report(action: str, envelope: dict[str, Any], body: dict[str, Any], *, previous: str | None = None) -> dict[str, Any]:
+    result = body.get("result") or {}
+    rows = (result.get("results") if isinstance(result, dict) else None) or []
+    health = next((row for row in rows if isinstance(row, dict) and row.get("operation") == "health.http.check"), None)
+    changed = sum(1 for row in rows if isinstance(row, dict))
+    report: dict[str, Any] = {
+        "action": action,
+        "package": envelope.get("package"),
+        "plan_sha256": envelope.get("plan_sha256"),
+        "operations": len(envelope.get("operations", [])),
+        "applied": changed,
+        "results": rows,
+        "request_id": body.get("request_id"),
+        "ok": bool(body.get("ok")),
+    }
+    if health is not None:
+        report["health"] = health.get("result")
+    if previous is not None:
+        report["previous_version"] = previous
+    return report
+
+
+def _installed_manifest(app_id: str) -> dict[str, Any]:
+    from nostrhost.native_providers import installed_package_manifest
+
+    manifest = installed_package_manifest(app_id)
+    if manifest is None:
+        raise NostrHostError(f"{app_id} is not installed as a native app (no recorded manifest)")
+    return manifest
+
+
+def _removal_envelope(package_data: dict[str, Any]) -> dict[str, Any]:
+    from nostrhost.package_engine import (
+        PackageManifest,
+        operation_plan_digest,
+        plan_package_removal,
+        validate_package,
+    )
+
+    package = validate_package(PackageManifest.parse_obj(package_data))
+    operations = plan_package_removal(package)
+    return {
+        "schema": 1,
+        "package": {"id": package.app.id, "version": package.app.version},
+        "manifest_sha256": "",
+        "plan_sha256": operation_plan_digest(operations),
+        "operations": [operation.json_dict() for operation in operations],
+    }
+
+
+def _web_change_envelope(app_id: str, package_data: dict[str, Any], domain: str | None, path: str | None) -> dict[str, Any]:
+    from nostrhost.package_engine import (
+        PackageManifest,
+        Operation,
+        operation_plan_digest,
+        validate_package,
+    )
+
+    package = validate_package(PackageManifest.parse_obj(package_data))
+    if package.web is None:
+        raise NostrHostError(f"{app_id} declares no web route to move")
+    args = package.web.dict()
+    if domain:
+        args["domain"] = domain
+    if path:
+        args["path"] = path
+    operation = Operation(
+        name="web.route.ensure",
+        resource=f"{app_id}:web",
+        args={**args, "app": app_id},
+        risk="medium",
+        reverse="web.route.remove",
+        summary=f"move {app_id} web route",
+    )
+    return {
+        "schema": 1,
+        "package": {"id": app_id, "version": package.app.version},
+        "manifest_sha256": "",
+        "plan_sha256": operation_plan_digest([operation]),
+        "operations": [operation.json_dict()],
+    }
+
+
+def _restic_client() -> Any:
+    from nostr_restic import ResticClient, load_restic_config
+
+    conf = load_restic_config()
+    if conf is None:
+        raise NostrHostError("restic is not configured (missing " + "/etc/nostrhost/restic.toml)")
+    return ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+
+
+def _app_backup_paths(app_id: str) -> list[str]:
+    from nostrhost.package_engine import PackageManifest, validate_package
+
+    package = validate_package(PackageManifest.parse_obj(_installed_manifest(app_id)))
+    if not package.backup or not package.backup.paths:
+        raise NostrHostError(f"{app_id} declares no backup paths in its package.toml")
+    return [str(path) for path in package.backup.paths]
 
 
 # --------------------------------------------------------------------------- #
@@ -510,14 +718,150 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """List installed applications."""
         _guard(lambda: _run_tool("app.list", {}), output_as)
 
+    @app_group.command("install")
+    def app_install(
+        coordinate: str = typer.Argument(..., help="catalogue app id (coordinate)"),
+        source: Path = typer.Option(None, "--source", help="local checkout/dir containing package.toml, or the file itself"),
+        repository: str = typer.Option(None, "--repository", help="override the catalogue git repository"),
+        revision: str = typer.Option(None, "--revision", help="override the catalogue git revision"),
+        package_path: str = typer.Option(None, "--package-path", help="override the catalogue package.toml path"),
+        manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Install a native app through the signed operation chain.
+
+        Resolves the catalogue coordinate, fetches and verifies package.toml
+        (manifest_sha256), plans the resource-engine operations and runs them
+        through the signed request -> policy -> approval -> execute chain.
+        """
+        def run() -> Any:
+            resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
+            package_data = _load_package_data(source, resolved)
+            _verify_package(package_data, resolved)
+            envelope = _plan_envelope(package_data, resolved)
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"install rejected: {body.get('reason') or body.get('state')}")
+            return _lifecycle_report("installed", envelope, body)
+        _guard(run, output_as)
+
+    @app_group.command("upgrade")
+    def app_upgrade(
+        coordinate: str = typer.Argument(..., help="catalogue app id (coordinate)"),
+        source: Path = typer.Option(None, "--source", help="local checkout/dir containing package.toml, or the file itself"),
+        repository: str = typer.Option(None, "--repository", help="override the catalogue git repository"),
+        revision: str = typer.Option(None, "--revision", help="override the catalogue git revision"),
+        package_path: str = typer.Option(None, "--package-path", help="override the catalogue package.toml path"),
+        manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Upgrade a native app to the resolved catalogue version.
+
+        Conservative by construction: the resource engine re-applies only the
+        operations whose current state no longer satisfies the new manifest,
+        so data resources are left alone unless the manifest changes them.
+        """
+        def run() -> Any:
+            installed = _installed_manifest(coordinate)
+            resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
+            package_data = _load_package_data(source, resolved)
+            _verify_package(package_data, resolved)
+            envelope = _plan_envelope(package_data, resolved)
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"upgrade rejected: {body.get('reason') or body.get('state')}")
+            previous = (installed.get("app") or {}).get("version")
+            return _lifecycle_report("upgraded", envelope, body, previous=previous)
+        _guard(run, output_as)
+
     @app_group.command("remove")
     def app_remove(
         app: str = typer.Argument(..., help="app id"),
-        purge: bool = typer.Option(False, "--purge", help="purge app data"),
+        purge: bool = typer.Option(False, "--purge", help="purge app data (legacy fallback only)"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
-        """Remove one installed app (write operation, rollback reverse-action)."""
-        _guard(lambda: _run_tool("app.remove", {"app": app, "purge": purge}), output_as)
+        """Remove one installed app.
+
+        Native apps are removed by reversing their recorded manifest through
+        the signed chain (plan_package_removal); apps without a recorded
+        native manifest fall back to the legacy removal tool.
+        """
+        def run() -> Any:
+            from nostrhost.native_providers import installed_package_manifest
+
+            manifest = installed_package_manifest(app)
+            if manifest is None:
+                return _run_tool("app.remove", {"app": app, "purge": purge})
+            envelope = _removal_envelope(manifest)
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"removal rejected: {body.get('reason') or body.get('state')}")
+            return _lifecycle_report("removed", envelope, body)
+        _guard(run, output_as)
+
+    @app_group.command("change-url")
+    def app_change_url(
+        app: str = typer.Argument(..., help="app id"),
+        domain: str = typer.Option(None, "--domain", help="new domain"),
+        path: str = typer.Option(None, "--path", help="new URL path (must start with '/')"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Move an app to a new domain and/or URL path (Caddy route update)."""
+        def run() -> Any:
+            if not domain and not path:
+                raise NostrHostError("change-url requires --domain and/or --path")
+            installed = _installed_manifest(app)
+            envelope = _web_change_envelope(app, installed, domain, path)
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"change-url rejected: {body.get('reason') or body.get('state')}")
+            return _lifecycle_report("change-url", envelope, body)
+        _guard(run, output_as)
+
+    @app_group.command("backup")
+    def app_backup(
+        app: str = typer.Argument(..., help="app id"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Back up an installed native app's declared paths (Restic snapshot)."""
+        def run() -> Any:
+            paths = _app_backup_paths(app)
+            snapshot = _restic_client().snapshot(paths, tag=app)
+            return {"app": app, "paths": paths, "snapshot": snapshot}
+        _guard(run, output_as)
+
+    @app_group.command("restore")
+    def app_restore(
+        app: str = typer.Argument(..., help="app id"),
+        snapshot: str = typer.Argument(..., help="Restic snapshot id to restore"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Restore an installed native app's data from a Restic snapshot."""
+        def run() -> Any:
+            paths = _app_backup_paths(app)
+            client = _restic_client()
+            return {"app": app, "snapshot": snapshot, "paths": paths, "result": client.restore(snapshot, "/", include=paths)}
+        _guard(run, output_as)
+
+    # -- backup -----------------------------------------------------------
+
+    backup = typer.Typer(name="backup", help="host backup (Restic + state)", no_args_is_help=True)
+
+    @backup.command("create")
+    def backup_create(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Create a full host Restic snapshot (satisfies policy backup gates)."""
+        def run() -> Any:
+            client = _restic_client()
+            snapshot = client.snapshot(list(SYSTEM_BACKUP_PATHS), tag="system")
+            return {"snapshot": snapshot, "paths": list(SYSTEM_BACKUP_PATHS)}
+        _guard(run, output_as)
+
+    @backup.command("list")
+    def backup_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List Restic snapshots on this host."""
+        def run() -> Any:
+            return {"snapshots": _restic_client().snapshots()}
+        _guard(run, output_as)
 
     # -- package ------------------------------------------------------------
 

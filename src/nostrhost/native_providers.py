@@ -57,6 +57,21 @@ class PackageProvider:
                 result["version"] = operation.args["version"]
             return result
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        if operation.name == "package.manifest.remove":
+            target = self.state_dir / f"{package_id}-manifest.json"
+            existed = target.exists()
+            target.unlink(missing_ok=True)
+            return {"package": package_id, "manifest": False, "changed": existed}
+        if operation.name == "package.manifest.ensure":
+            target = self.state_dir / f"{package_id}-manifest.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps({"id": package_id, "version": operation.args["version"], "manifest": operation.args["manifest"]}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o640)
+            temporary.replace(target)
+            return {"package": package_id, "version": operation.args["version"], "manifest": True, "changed": True}
         target = self.state_dir / f"{package_id}.json"
         if operation.name == "package.remove":
             existed = target.exists()
@@ -79,6 +94,22 @@ def _safe_name(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.@:-]*", value):
         raise ProviderError(f"unsafe systemd unit name: {value!r}")
     return value
+
+
+def installed_package_manifest(app_id: str, *, state_dir: Path | None = None) -> dict[str, Any] | None:
+    """Return the persisted native manifest dict for an installed app.
+
+    ``package.manifest.ensure`` writes this at install time so removal,
+    upgrade diffs and backup-path resolution never need the catalogue again.
+    """
+    base = state_dir or Path("/var/lib/nostrhost/state/packages")
+    target = base / f"{app_id}-manifest.json"
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    manifest = data.get("manifest") if isinstance(data, dict) else None
+    return manifest if isinstance(manifest, dict) else None
 
 
 def _target(root: Path, absolute: str | Path) -> Path:
@@ -892,12 +923,13 @@ class HealthProvider:
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         if self.client is None:
             raise ProviderError("an httpx client is required for native health checks")
+        url = desired.get("url") or desired["path"]
         attempts = desired.get("retries", 0) + 1
         last_status = None
         last_error = None
         for attempt in range(attempts):
             try:
-                response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+                response = self.client.get(url, timeout=desired.get("timeout", 10))
             except Exception as exc:
                 last_error = str(exc) or exc.__class__.__name__
                 continue
@@ -1548,6 +1580,8 @@ class NativeOperationExecutor:
             provider = self.providers.get("health")
         if provider is None and operation.name == "package.ensure":
             provider = self.providers.get("package")
+        if provider is None and operation.name.startswith("package.manifest."):
+            provider = self.providers.get("package")
         return provider
 
     def can_execute(self, operation: Operation) -> bool:
@@ -1592,4 +1626,16 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         caddy_config_builder = build_web_route
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
+    if health_client is None and root == Path("/"):
+        # Real host: the package health check hits the served app URL over
+        # the system trust store (Caddy/Let's Encrypt certs). Testbeds that
+        # use Caddy's internal CA add it to the trust store once.
+        try:
+            import httpx
+
+            health_client = httpx.Client(follow_redirects=True)
+        except ImportError:  # pragma: no cover - packaging provides httpx
+            health_client = None
+        if health_client is not None:
+            providers["health"] = HealthProvider(client=health_client)
     return providers

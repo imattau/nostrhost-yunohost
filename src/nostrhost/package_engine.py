@@ -554,6 +554,17 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     plan: list[Operation] = []
     package_op = _op("package.ensure", app, {"id": app, "version": package.app.version}, reverse="package.remove", summary=f"register package {app}")
     plan.append(package_op)
+    # Persist the resolved manifest so later lifecycle steps (native removal,
+    # upgrade diff, backup-path resolution) can recover the installed state
+    # without re-fetching the catalogue. Reverse is the manifest delete.
+    plan.append(_op(
+        "package.manifest.ensure",
+        app,
+        {"id": app, "version": package.app.version, "manifest": json.loads(package.json(by_alias=True))},
+        deps=(package_op.resource,),
+        reverse="package.manifest.remove",
+        summary=f"record installed manifest for {app}",
+    ))
     for name in package.packages.apt:
         plan.append(_op("package.apt.ensure", f"{app}:apt:{name}", {"package": name}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"ensure apt package {name}"))
     for name, port in package.ports.named.items():
@@ -611,7 +622,11 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("permission.ensure", f"{app}:permission:{name}", permission_args, deps=deps, risk="medium", reverse="permission.remove", summary=f"ensure Portal permission {app}.{name}"))
     if package.health:
         deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else (package_op.resource,))
-        plan.append(_op("health.http.check", f"{app}:health", package.health.dict(), deps=deps, risk="low", reversible=False, summary="check application health"))
+        health_args = package.health.dict()
+        if package.web and package.web.domain:
+            # Check the served URL (domain + path), not a bare path.
+            health_args["url"] = f"https://{package.web.domain.rstrip('/')}{package.web.path or '/'}"
+        plan.append(_op("health.http.check", f"{app}:health", health_args, deps=deps, risk="low", reversible=False, summary="check application health"))
     if package.timer:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
@@ -720,7 +735,7 @@ def apply_operation_plan(plan: list[Operation], executor: Any) -> list[Any]:
         ready = next((operation for operation in pending if set(operation.depends_on) <= completed), None)
         if ready is None:
             raise PackageError("operation plan contains an unknown dependency or cycle")
-        results.append(executor.execute(ready))
+        results.append({"operation": ready.name, "resource": ready.resource, "result": executor.execute(ready)})
         completed.add(ready.resource)
         pending.remove(ready)
     return results

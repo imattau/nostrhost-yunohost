@@ -1,3 +1,26 @@
+yunohost (12.1.41.9) stable; urgency=low
+
+  * nostrhost: Workstream 3 native app lifecycle.
+    - package.reconcile plans now persist the resolved package manifest
+      (package.manifest.ensure -> package.manifest.remove) so native
+      removal / upgrade diff / backup-path resolution work offline.
+    - apply_operation_plan returns per-operation results
+      ({operation, resource, result}) for the admin result.
+    - health.http.check carries the served app URL (domain + path) and
+      native_providers wires a default httpx client on real hosts.
+    - nostr_operations.run_signed_chain(): the local operator path through
+      the full signed request -> policy -> approval -> execute chain with
+      pre/post StateRecorder + Restic hooks.
+    - CLI: app install / upgrade / remove (native plan) / change-url /
+      backup / restore + backup create/list; coordinate resolution from the
+      native catalogue (native_catalog_coordinate) with manifest_sha256
+      verification and --source for local package.toml checkouts.
+    - nostrhost_native_policy counts Restic snapshots as backup evidence so
+      apps.upgrade/remove policy gates are satisfiable by the native backup
+      plane.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 18:30:00 +0200
+
 yunohost (12.1.41.8) stable; urgency=low
 
   * nostrhost: caddy.service points HOME at /var/lib/caddy so autosave and

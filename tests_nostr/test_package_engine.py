@@ -26,10 +26,10 @@ def test_plan_is_typed_and_dependency_ordered():
     plan = plan_package(PackageManifest.parse_obj(example()))
     names = [operation.name for operation in plan]
     assert names == [
-        "package.ensure", "package.apt.ensure", "system_user.ensure",
-        "directory.ensure", "directory.ensure", "source.fetch", "runtime.ensure",
-        "service.ensure", "service.enable", "service.start", "web.route.ensure",
-        "health.http.check",
+        "package.ensure", "package.manifest.ensure", "package.apt.ensure",
+        "system_user.ensure", "directory.ensure", "directory.ensure",
+        "source.fetch", "runtime.ensure", "service.ensure", "service.enable",
+        "service.start", "web.route.ensure", "health.http.check",
     ]
     assert plan[-1].depends_on == ("example:web",)
     assert plan[0].json_dict()["depends_on"] == []
