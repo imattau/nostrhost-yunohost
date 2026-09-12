@@ -1,3 +1,11 @@
+yunohost (12.1.41.18) stable; urgency=low
+
+  * nostrhost: fix the venv re-exec detection — the venv python is a symlink
+    to the system interpreter, so realpath can't tell them apart; detect via
+    sys.prefix instead (the CLI could not sign without this).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 23:00:00 +0200
+
 yunohost (12.1.41.17) stable; urgency=low
 
   * nostrhost: bin scripts re-exec into /opt/nostrhost/venv when present —
