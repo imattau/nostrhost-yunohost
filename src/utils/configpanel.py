@@ -28,7 +28,10 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, Type, Union,
 
 from nostrhost.core import Moulinette
 from nostrhost.i18n import tr, key_exists, colorize
-from pydantic import BaseModel, Extra, ValidationError, validator
+try:
+    from pydantic.v1 import BaseModel, Extra, ValidationError, validator
+except ImportError:  # pragma: no cover - real pydantic v1 (dist-packages deb)
+    from pydantic import BaseModel, Extra, ValidationError, validator
 
 from .error import YunohostError, YunohostValidationError
 from .file_utils import mkdir, read_toml, read_yaml, write_to_yaml
@@ -49,8 +52,8 @@ from .form import (
 from .i18n import _value_for_locale
 
 if TYPE_CHECKING:
-    from pydantic.fields import ModelField
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny
+    from pydantic.v1.fields import ModelField
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny
 
     from ..log import OperationLogger
     from .form import FormModel, Hooks

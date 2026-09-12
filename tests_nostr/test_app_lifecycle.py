@@ -321,3 +321,17 @@ def test_policy_writer_quotes_dotted_keys(tmp_path: Path, monkeypatch):
     assert rules["apps.remove"].require_confirmation is True
     assert rules["apps.remove"].max_backup_age_seconds == 86400
     assert rules["backups.restore"].require_owner_signature is True
+
+
+def test_portal_api_serves_authd_and_nostr_routes():
+    """The portal-api server must expose the Caddy forward_auth endpoint and
+    the Nostr sign-in routes on the loopback (the W2-era authd gap)."""
+    from nostrhost.portal_api import build_app
+
+    app = build_app()
+    paths = {route.rule for route in app.routes}
+    assert "/nostr/auth-request" in paths
+    assert "/nostr/challenge" in paths
+    assert "/nostr/login" in paths
+    assert "/nostr/identities" in paths
+    assert "/oidc/jwks.json" in paths

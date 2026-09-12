@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import toml
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -32,25 +33,57 @@ class ProviderError(RuntimeError):
 
 
 class PackageProvider:
-    """Package identity bookkeeping; resource mutations belong to providers."""
+    """Package identity bookkeeping; resource mutations belong to providers.
 
-    def __init__(self, *, state_dir: Path | None = None) -> None:
+    ``apps_dir`` (optional) is the legacy app registry (/etc/yunohost/apps):
+    native packages create a minimal entry there so the portal's permission
+    machinery (permission_create's ``_is_installed``) treats them as
+    installed without a full legacy manifest install."""
+
+    def __init__(self, *, state_dir: Path | None = None, apps_dir: Path | None = None) -> None:
         self.state_dir = state_dir
+        self.apps_dir = apps_dir
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        legacy: bool | None = None
+        legacy_domain: str | None = None
+        legacy_path: str | None = None
+        if self.apps_dir is not None:
+            legacy_dir = self.apps_dir / _safe_name(desired["id"])
+            legacy = legacy_dir.is_dir()
+            if legacy:
+                settings = self._legacy_settings(legacy_dir)
+                legacy_domain = settings.get("domain")
+                legacy_path = settings.get("path")
+        legacy_state = {"legacy_aware": self.apps_dir is not None, "legacy": legacy, "legacy_domain": legacy_domain, "legacy_path": legacy_path}
         if self.state_dir is None:
-            return {"exists": False, "version": None}
+            return {"exists": False, "version": None, **legacy_state}
         target = self.state_dir / f"{_safe_name(desired['id'])}.json"
         if not target.is_file():
-            return {"exists": False, "version": None}
+            return {"exists": False, "version": None, **legacy_state}
         try:
             data = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ProviderError(f"invalid native package state: {target}") from exc
-        return {"exists": True, "version": data.get("version"), "state": str(target)}
+        return {"exists": True, "version": data.get("version"), "state": str(target), **legacy_state}
+
+    @staticmethod
+    def _legacy_settings(legacy_dir: Path) -> dict[str, Any]:
+        try:
+            import yaml
+
+            data = yaml.safe_load((legacy_dir / "settings.yml").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001 - best-effort settings read
+            return {}
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         package_id = _safe_name(operation.args["id"])
+        legacy_dir = (self.apps_dir / package_id) if self.apps_dir is not None else None
+        if operation.name == "package.ensure":
+            self._ensure_legacy(legacy_dir, app_id=package_id, domain=operation.args.get("domain"), path=operation.args.get("path"))
+        elif operation.name in {"package.remove", "package.manifest.remove"}:
+            self._drop_legacy(legacy_dir)
         if self.state_dir is None:
             result = {"package": package_id, "changed": False}
             if operation.name != "package.remove":
@@ -82,6 +115,40 @@ class PackageProvider:
         os.chmod(temporary, 0o640)
         temporary.replace(target)
         return {"package": package_id, "version": operation.args["version"], "changed": True}
+
+    @staticmethod
+    def _ensure_legacy(legacy_dir: Path | None, *, app_id: str | None = None, domain: str | None = None, path: str | None = None) -> None:
+        """Create the minimal legacy app-registry entry (permission gateway)."""
+        if legacy_dir is None:
+            return
+        existed = legacy_dir.is_dir()
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if existed:
+            existing = PackageProvider._legacy_settings(legacy_dir)
+        settings: dict[str, Any] = {"installed": True}
+        if app_id:
+            settings["id"] = app_id
+            settings["install_time"] = int(time.time())
+        if domain:
+            settings["domain"] = domain
+            settings["path"] = path or "/"
+        elif existing.get("domain"):
+            settings["domain"] = existing["domain"]
+            settings["path"] = existing.get("path", "/")
+        body = "".join(f"{key}: {value}\n" for key, value in settings.items())
+        target = legacy_dir / "settings.yml"
+        if not existed or target.read_text(encoding="utf-8") != body:
+            target.write_text(body, encoding="utf-8")
+            os.chmod(target, 0o644)
+
+    @staticmethod
+    def _drop_legacy(legacy_dir: Path | None) -> None:
+        if legacy_dir is None or not legacy_dir.exists():
+            return
+        import shutil
+
+        shutil.rmtree(legacy_dir, ignore_errors=True)
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
         return self.inspect(desired)
@@ -1597,7 +1664,7 @@ class NativeOperationExecutor:
 def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, runtime_installer: Callable[[dict[str, Any]], Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
-        "package": PackageProvider(state_dir=(root / "var/lib/nostrhost/state/packages") if root != Path("/") else Path("/var/lib/nostrhost/state/packages")),
+        "package": PackageProvider(state_dir=(root / "var/lib/nostrhost/state/packages") if root != Path("/") else Path("/var/lib/nostrhost/state/packages"), apps_dir=(root / "etc/yunohost/apps") if root != Path("/") else Path("/etc/yunohost/apps")),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "access": AccessProvider(root=root),
         "permission": PermissionProvider(),

@@ -552,7 +552,13 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     """Create a stable install plan from desired state only."""
     app = package.app.id
     plan: list[Operation] = []
-    package_op = _op("package.ensure", app, {"id": app, "version": package.app.version}, reverse="package.remove", summary=f"register package {app}")
+    ensure_args: dict[str, Any] = {"id": app, "version": package.app.version}
+    if package.web and package.web.domain:
+        # The legacy app registry needs domain/path so permission_url can
+        # build the app's portal URL.
+        ensure_args["domain"] = package.web.domain
+        ensure_args["path"] = package.web.path or "/"
+    package_op = _op("package.ensure", app, ensure_args, reverse="package.remove", summary=f"register package {app}")
     plan.append(package_op)
     # Persist the resolved manifest so later lifecycle steps (native removal,
     # upgrade diff, backup-path resolution) can recover the installed state
@@ -778,7 +784,14 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
             packages = [operation.args["package"]]
         return bool(packages) and set(packages) <= set(actual.get("installed", []))
     if operation.name == "package.ensure":
-        return actual.get("exists") is True and actual.get("version") == operation.args.get("version")
+        # A legacy app-registry entry (portal permission gateway) is part of
+        # the desired state when the provider tracks it (legacy_aware).
+        legacy_ok = not actual.get("legacy_aware") or actual.get("legacy") is True
+        if legacy_ok and operation.args.get("domain") and actual.get("legacy_domain") != operation.args.get("domain"):
+            legacy_ok = False
+        if legacy_ok and operation.args.get("domain") and actual.get("legacy_path") != operation.args.get("path", "/"):
+            legacy_ok = False
+        return actual.get("exists") is True and actual.get("version") == operation.args.get("version") and legacy_ok
     if operation.name == "runtime.ensure":
         return actual.get("matches") is True
     if operation.name == "config.ensure":

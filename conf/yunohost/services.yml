@@ -33,6 +33,8 @@ nostr-securityd:
   category: security
 nostr-api:
   category: admin
+nostr-portal-api:
+  category: admin
 nostrhost-certd:
   category: web
   actual_systemd_service: nostrhost-certd.timer

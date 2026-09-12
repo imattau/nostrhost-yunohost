@@ -81,7 +81,7 @@ from .utils.file_utils import (
 )
 
 if TYPE_CHECKING:
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny
 
     from .utils.configpanel import ConfigPanelModel, RawConfig, RawSettings
     from .utils.form import FormModel

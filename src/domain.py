@@ -53,7 +53,7 @@ from .utils.file_utils import (
 from .utils.mail import mail_stack_installed
 
 if TYPE_CHECKING:
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny, cast
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny, cast
 
     from .dns import DNSRecord
     from .utils.configpanel import ConfigPanel, ConfigPanelModel, RawConfig, RawSettings

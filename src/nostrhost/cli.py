@@ -335,6 +335,7 @@ POSTINSTALL_UNITS = [
     "nostr-operationsd",
     "nostr-securityd",
     "nostr-api",
+    "nostr-portal-api",
     "nostrhost-certd.timer",
 ]
 

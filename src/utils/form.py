@@ -45,18 +45,34 @@ from typing import (
 
 from nostrhost.core import Moulinette
 from nostrhost.i18n import tr, key_exists, colorize
-from pydantic import (
-    BaseModel,
-    Extra,
-    ValidationError,
-    create_model,
-    root_validator,
-    validator,
-)
-from pydantic.color import Color
-from pydantic.fields import Field
-from pydantic.networks import EmailStr, HttpUrl
-from pydantic.types import constr
+try:
+    # The runtime bundles pydantic v2; pydantic.v1 is its full v1-compat
+    # module. The fork core is written against the v1 API.
+    from pydantic.v1 import (
+        BaseModel,
+        Extra,
+        ValidationError,
+        create_model,
+        root_validator,
+        validator,
+    )
+    from pydantic.v1.color import Color
+    from pydantic.v1.fields import Field
+    from pydantic.v1.networks import EmailStr, HttpUrl
+    from pydantic.v1.types import constr
+except ImportError:  # pragma: no cover - real pydantic v1 (dist-packages deb)
+    from pydantic import (
+        BaseModel,
+        Extra,
+        ValidationError,
+        create_model,
+        root_validator,
+        validator,
+    )
+    from pydantic.color import Color
+    from pydantic.fields import Field
+    from pydantic.networks import EmailStr, HttpUrl
+    from pydantic.types import constr
 
 from ..log import OperationLogger
 from ..utils.error import YunohostError, YunohostValidationError
@@ -64,7 +80,7 @@ from ..utils.i18n import _value_for_locale
 from .file_utils import read_yaml, write_to_file
 
 if TYPE_CHECKING:
-    from pydantic.fields import FieldInfo, ModelField
+    from pydantic.v1.fields import FieldInfo, ModelField
 
 logger = getLogger("yunohost.form")
 

@@ -36,7 +36,7 @@ from .utils.mail import mail_stack_installed
 if TYPE_CHECKING:
     from typing import cast
 
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny
 
     from .log import OperationLogger
     from .utils.configpanel import (

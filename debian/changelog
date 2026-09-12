@@ -1,3 +1,19 @@
+yunohost (12.1.41.21) stable; urgency=low
+
+  * nostrhost: core pydantic imports migrate to pydantic.v1 (the full v1
+    compat module bundled with pydantic v2) — the runtime ships pydantic v2
+    for the auth lib, which silently broke the fork's v1-native form.py /
+    configpanel.py / settings / domain / app machinery under the venv.
+  * nostrhost: package.ensure registers a minimal legacy app entry
+    (/etc/yunohost/apps/<id>/settings.yml with id/domain/path) so the portal
+    permission machinery treats native apps as installed; removal cleans it.
+  * nostrhost: new nostr-portal-api daemon (127.0.0.1:6788) serving the Caddy
+    forward_auth authd + Nostr sign-in/identity/OIDC routes — the W2-era
+    gap that left every auth-required web route with a dead forward_auth
+    backend (502).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 02:00:00 +0200
+
 yunohost (12.1.41.20) stable; urgency=low
 
   * nostrhost: apply_reconciled_plan seeds already-satisfied (skipped)

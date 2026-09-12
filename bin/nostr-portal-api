@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""nostr-portal-api — portal-api / authd server (Caddy forward_auth + Nostr sign-in).
+
+Serves the auth-request bridge, the Nostr challenge/login routes and the
+portal identity routes on 127.0.0.1:6788 (the loopback Caddy's forward_auth
+and the /yunohost/portalapi reverse_proxy point at).  Public by design.
+"""
+
+from __future__ import annotations
+
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
+# for nodes where the runtime has not been installed yet. The venv's python
+# binary is a symlink to the system interpreter, so detect it via sys.prefix
+# rather than the executable path.
+_VENV = _Path("/opt/nostrhost/venv")
+if (_VENV / "bin/python3").is_file() and _Path(_sys.prefix) != _VENV:
+    _os.execv(str(_VENV / "bin/python3"), [str(_VENV / "bin/python3"), _sys.argv[0]] + _sys.argv[1:])
+
+
+import argparse
+import sys
+from pathlib import Path
+
+try:  # installed layout: yunohost is a real package
+    import yunohost  # noqa: F401
+except ImportError:  # source-tree layout: alias src/ as the yunohost package
+    _src = Path(__file__).resolve().parent.parent / "src"
+    if _src.is_dir():
+        import types
+
+        _pkg = types.ModuleType("yunohost")
+        _pkg.__path__ = [str(_src)]  # type: ignore[attr-defined]
+        sys.modules["yunohost"] = _pkg
+
+from nostrhost.portal_api import run
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="NostrHost portal-api / authd server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=6788)
+    args = parser.parse_args(argv)
+    run(host=args.host, port=args.port)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
