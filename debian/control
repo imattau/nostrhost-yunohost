@@ -10,7 +10,7 @@ Package: nostrhost-core
 Essential: yes
 Architecture: all
 Provides: yunohost
-Replaces: yunohost (<< 12.1.41.14)
+Replaces: yunohost (<< 12.1.41.15)
 Depends: python3-all (>= 3.11),
  , nostrhost-runtime
  , python3-nostrhost
@@ -48,7 +48,7 @@ Conflicts: iptables-persistent
  , slapd (>= 2.6)
  , dovecot-core (>= 1:2.4)
  , nftables (>= 1.1)
- , yunohost (<< 12.1.41.14)
+ , yunohost (<< 12.1.41.15)
 Description: manageable and configured self-hosting server
  YunoHost aims to make self-hosting accessible to everyone. It configures
  a Web server alongside a LDAP base (email is an optional app, not part of
@@ -81,7 +81,7 @@ Description: native nostrhost framework — moulinette replacement
 Package: yunohost
 Architecture: all
 Section: utils
-Depends: nostrhost-core (>= 12.1.41.14)
+Depends: nostrhost-core (>= 12.1.41.15)
 Description: transitional package (core renamed to nostrhost-core)
  Empty dependency package so existing installs and scripts that reference
  `yunohost` keep resolving after the engine moved to nostrhost-core. This

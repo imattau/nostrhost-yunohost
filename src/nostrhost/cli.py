@@ -135,7 +135,7 @@ def _coordinate_for(
 ) -> dict[str, Any] | None:
     """Resolve the catalogue coordinate for ``app_id`` (per-field overridable)."""
     try:
-        from nostr_catalog_provider import native_catalog_coordinate
+        from yunohost.nostr_catalog_provider import native_catalog_coordinate
 
         coordinate = native_catalog_coordinate(app_id) or {}
     except Exception:  # noqa: BLE001 - the catalogue is an optional source
@@ -214,7 +214,7 @@ def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | No
 
 
 def _run_lifecycle(tool: str, args: dict[str, Any], *, state: _State) -> dict[str, Any]:
-    from nostr_operations import run_signed_chain
+    from yunohost.nostr_operations import run_signed_chain
 
     return run_signed_chain(
         tool,
@@ -308,7 +308,7 @@ def _web_change_envelope(app_id: str, package_data: dict[str, Any], domain: str 
 
 
 def _restic_client() -> Any:
-    from nostr_restic import ResticClient, load_restic_config
+    from yunohost.nostr_restic import ResticClient, load_restic_config
 
     conf = load_restic_config()
     if conf is None:

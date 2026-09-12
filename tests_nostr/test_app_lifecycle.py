@@ -170,7 +170,7 @@ def test_coordinate_from_catalogue(tmp_path: Path):
             },
         }],
     }))
-    from nostr_catalog_provider import native_catalog_coordinate
+    from yunohost.nostr_catalog_provider import native_catalog_coordinate
 
     coordinate = native_catalog_coordinate("nostrhost-test", path=state)
     assert coordinate["repository"] == "https://example.org/repo.git"
@@ -282,3 +282,24 @@ def test_backup_paths_come_from_installed_manifest(tmp_path: Path):
     stored = installed_package_manifest("nostrhost-test", state_dir=tmp_path)
     package = validate_package(PackageManifest.parse_obj(stored))
     assert [str(path) for path in package.backup.paths] == ["/var/www/nostrhost-test"]
+
+
+# --------------------------------------------------------------------------- #
+# CLI helper import paths (node-safe: yunohost.* modules, not top-level)
+
+def test_cli_lifecycle_helpers_use_node_safe_imports(tmp_path: Path, monkeypatch):
+    """The lifecycle helpers must import through yunohost.* so they resolve on
+    an installed node (nostr_restic/nostr_operations are inside the yunohost
+    package, not top-level)."""
+    from nostrhost import cli as cli_module
+
+    # _restic_client with no config present must raise the friendly error
+    # AFTER resolving the import (a bad top-level import would fail with
+    # ModuleNotFoundError instead).
+    monkeypatch.setenv("NOSTRHOST_RESTIC_CONFIG", str(tmp_path / "missing.toml"))
+    with pytest.raises(Exception, match="restic is not configured"):
+        cli_module._restic_client()
+
+    # _coordinate_for must resolve the catalogue provider import cleanly.
+    monkeypatch.delenv("NOSTRHOST_CATALOG_STATE", raising=False)
+    assert cli_module._coordinate_for("nostrhost-test") in (None, {})

@@ -1,3 +1,12 @@
+yunohost (12.1.41.15) stable; urgency=low
+
+  * nostrhost: fix the lifecycle helpers' import paths — they imported
+    nostr_restic/nostr_operations/nostr_catalog_provider as top-level
+    modules, which only works in the source tree; on an installed node they
+    live inside the yunohost package. Regression test added.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 21:30:00 +0200
+
 yunohost (12.1.41.14) stable; urgency=low
 
   * nostrhost: register the `backup` CLI group (create/list) — it was built
