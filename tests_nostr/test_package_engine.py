@@ -35,6 +35,17 @@ def test_plan_is_typed_and_dependency_ordered():
     assert plan[0].json_dict()["depends_on"] == []
 
 
+def test_plan_operation_args_are_json_serializable():
+    """Every op's args must survive json.dumps without default=str — the signed
+    request serializes the envelope, so a Path (e.g. service.working_directory)
+    leaks through build_operation_request and breaks the chain."""
+    import json
+
+    plan = plan_package(PackageManifest.parse_obj(example()))
+    for operation in plan:
+        json.dumps(operation.args)  # must not raise
+
+
 def test_plan_envelope_binds_manifest_and_operations():
     envelope = package_plan_envelope(example())
     assert envelope["schema"] == 1

@@ -33,7 +33,9 @@ class AppResource(BaseModel):
 
     @validator("id")
     def valid_id(cls, value: str) -> str:
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value):
+        # underscores allowed: NostrHost-native ids use the `_nh` tail
+        # (YunoHost's convention is `_ynh`).
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", value):
             raise ValueError("app id must be a lowercase name")
         return value
 
@@ -281,6 +283,7 @@ class ServiceSecurity(BaseModel):
     protect_system: Literal["strict", "full", "yes", "no"] = "strict"
     protect_home: bool = True
     no_new_privileges: bool = True
+    read_write_paths: list[str] = Field(default_factory=list)
 
 
 class ServiceResource(BaseModel):
@@ -615,6 +618,10 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         service = package.service.dict()
         service["name"] = package.service.name or app
         service["user"] = service.get("user") or (package.user.name if package.user else app)
+        if service.get("working_directory"):
+            service["working_directory"] = str(service["working_directory"])
+        if service.get("credentials"):
+            service["credentials"] = {key: str(value) for key, value in service["credentials"].items()}
         plan.append(_op("service.ensure", f"{app}:service", service, deps=deps, risk="medium", reverse="service.remove", summary=f"render service {package.service.name or app}"))
         plan.append(_op("service.enable", f"{app}:service:enable", {"name": package.service.name or app}, deps=(f"{app}:service",), reverse="service.disable", summary="enable service"))
         plan.append(_op("service.start", f"{app}:service:start", {"name": package.service.name or app}, deps=(f"{app}:service:enable",), risk="medium", reverse="service.stop", summary="start service"))

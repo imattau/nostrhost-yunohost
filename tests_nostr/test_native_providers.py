@@ -175,6 +175,13 @@ def test_service_provider_renders_hardened_unit(tmp_path: Path):
     assert "PrivateTmp=yes" in unit
 
 
+def test_service_provider_inspects_enable_op_without_exec(tmp_path: Path):
+    """enable/start ops carry only a name; inspect must not render the unit."""
+    provider = ServiceProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
+    assert provider.inspect({"name": "example"})["exists"] is False
+    assert provider.inspect({"name": "example", "exec": "/bin/true"})["exists"] is False
+
+
 def test_service_provider_rejects_unsafe_unit_names(tmp_path: Path):
     provider = ServiceProvider(unit_dir=tmp_path)
     operation = provider.plan({"name": "../bad", "exec": "/bin/true"})[0]

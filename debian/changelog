@@ -1,3 +1,17 @@
+yunohost (12.1.41.23) stable; urgency=low
+
+  * nostrhost: native app lifecycle fixes found porting the first real app
+    (opencode-web_nh):
+    - plan_package stringifies service.working_directory/credentials (a Path
+      in the signed request envelope broke build_operation_request).
+    - ServiceProvider.inspect tolerates enable/start/remove ops (name-only)
+      instead of rendering the unit and KeyError'ing on missing exec.
+    - ServiceSecurity gains read_write_paths (rendered as ReadWritePaths) so
+      service packages can declare writable data dirs under ProtectSystem.
+    - app ids may contain underscores (NostrHost-native `_nh` tail).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 04:00:00 +0200
+
 yunohost (12.1.41.22) stable; urgency=low
 
   * nostrhost: package.ensure writes a minimal legacy manifest.json (id/

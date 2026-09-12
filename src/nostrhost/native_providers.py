@@ -907,7 +907,9 @@ class ServiceProvider:
         name = _safe_name(desired.get("name") or "nostrhost-app")
         unit = self.unit_dir / f"{name}.service"
         result = {"unit": str(unit), "exists": unit.is_file()}
-        if unit.is_file():
+        # enable/start/remove ops carry only a name; only the ensure op has the
+        # full desired unit (exec, env, security) to diff against.
+        if unit.is_file() and desired.get("exec"):
             result["sha256"] = hashlib.sha256(unit.read_bytes()).hexdigest()
             result["desired_sha256"] = hashlib.sha256(self.render_unit(name, desired).encode()).hexdigest()
         return result
@@ -951,6 +953,9 @@ class ServiceProvider:
         if args.get("working_directory"):
             lines.append(f"WorkingDirectory={args['working_directory']}")
         lines.extend([f"Restart={args.get('restart', 'on-failure')}", f"PrivateTmp={'yes' if security.get('private_tmp', True) else 'no'}", f"ProtectSystem={security.get('protect_system', 'strict')}", f"ProtectHome={'yes' if security.get('protect_home', True) else 'no'}", f"NoNewPrivileges={'yes' if security.get('no_new_privileges', True) else 'no'}"])
+        read_write_paths = security.get("read_write_paths") or []
+        if read_write_paths:
+            lines.append(f"ReadWritePaths={' '.join(read_write_paths)}")
         if environment:
             lines.append(environment)
         for credential, path in sorted(args.get("credentials", {}).items()):
