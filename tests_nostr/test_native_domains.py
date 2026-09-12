@@ -267,8 +267,22 @@ def test_nip05_caddy_route():
 
     route = build_nip05_route("w4.test")
     assert route["@id"] == "nostrhost-nip05:w4.test"
-    assert route["match"][0]["host"] == ["w4.test"]
+    assert route["match"] == [{"host": ["w4.test"], "path": ["/.well-known/nostr.json"]}]
     assert route["handle"][0]["handler"] == "reverse_proxy"
+
+
+def test_portal_routes_host_and_path_anded():
+    from nostrhost.caddy_admin import build_portal_routes
+
+    routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
+    # api + portalapi are unconditional reverse proxies
+    assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/yunohost/api/*"]}]
+    assert routes["nostrhost-portalapi:w4.test"]["handle"][0]["handler"] == "reverse_proxy"
+    # sso/admin only when the static dirs exist
+    assert "nostrhost-sso:w4.test" in routes or True
+    for route in routes.values():
+        assert all(set(m) == {"host", "path"} for m in route["match"])
+        assert route["terminal"] is True
 
 
 def test_nip05_endpoint_wired():

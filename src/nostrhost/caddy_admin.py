@@ -21,6 +21,7 @@ through ``/id/<id>``.
 from __future__ import annotations
 
 import logging
+import os
 import urllib.parse
 from typing import Any
 
@@ -110,10 +111,46 @@ def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str
     which resolves the queried username against the identity store (W4)."""
     return {
         "@id": f"nostrhost-nip05:{domain}",
-        "match": [{"host": [domain]}, {"path": ["/.well-known/nostr.json"]}],
+        "match": [{"host": [domain], "path": ["/.well-known/nostr.json"]}],
         "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]}],
         "terminal": True,
     }
+
+
+def build_portal_routes(domain: str) -> list[dict[str, Any]]:
+    """The per-domain portal/SSO surface an auth-required app needs.
+
+    The authd ``forward_auth`` 302s unauthenticated requests to
+    ``/yunohost/sso/``; without routes serving the portal (and the API /
+    portal-api / admin paths a browser needs), the redirect lands on a 404
+    and an auth app's health check fails even though its backend is up.
+    Mirrors the per-domain Caddyfile handlers the testbed writes by hand.
+    """
+    routes: list[dict[str, Any]] = [
+        {
+            "@id": f"nostrhost-api:{domain}",
+            "match": [{"host": [domain], "path": ["/yunohost/api/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6787"}]}],
+            "terminal": True,
+        },
+        {
+            "@id": f"nostrhost-portalapi:{domain}",
+            "match": [{"host": [domain], "path": ["/yunohost/portalapi/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6788"}]}],
+            "terminal": True,
+        },
+    ]
+    for root, tag in (("/usr/share/nostrhost/portal", "sso"), ("/usr/share/nostrhost/admin", "admin")):
+        if os.path.isdir(root):
+            routes.append(
+                {
+                    "@id": f"nostrhost-{tag}:{domain}",
+                    "match": [{"host": [domain], "path": [f"/yunohost/{tag}/*"]}],
+                    "handle": [{"handler": "file_server", "root": root}],
+                    "terminal": True,
+                }
+            )
+    return routes
 
 
 def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
@@ -260,3 +297,12 @@ class CaddyAdminClient:
     def remove_nip05_route(self, domain: str) -> None:
         """Remove the NIP-05 route for ``domain`` (W4)."""
         self.delete_route(f"nostrhost-nip05:{domain}")
+
+    def ensure_portal_routes(self, domain: str) -> list[str]:
+        """Create (or reconcile) the per-domain portal/SSO routes (W4)."""
+        return [self.ensure_route(route) for route in build_portal_routes(domain)]
+
+    def remove_portal_routes(self, domain: str) -> None:
+        """Remove the per-domain portal/SSO routes (W4)."""
+        for tag in ("api", "portalapi", "sso", "admin"):
+            self.delete_route(f"nostrhost-{tag}:{domain}")

@@ -168,9 +168,10 @@ class DomainService:
         if apply_dns:
             applied = reconciler.apply_plan(plan, provider)
 
-        routes = {"domain_site": self._ensure_domain_site(domain.name)}
+        routes: dict[str, Any] = {"domain_site": self._ensure_domain_site(domain.name)}
         if domain.nostr.nip05:
             routes["nip05"] = self._ensure_nip05_route(domain.name)
+        routes["portal"] = self._ensure_portal_routes(domain.name)
 
         save_domain(self.state_dir, domain)
 
@@ -212,6 +213,10 @@ class DomainService:
             try:
                 self.caddy.remove_nip05_route(domain.name)
             except Exception:  # noqa: BLE001 - nip05 route may not exist
+                pass
+            try:
+                self.caddy.remove_portal_routes(domain.name)
+            except Exception:  # noqa: BLE001 - portal routes may not exist
                 pass
 
         unlink_domain(self.state_dir, domain.name)
@@ -287,6 +292,11 @@ class DomainService:
         if self.caddy is None:
             return "no-caddy"
         return self.caddy.ensure_nip05_route(name)
+
+    def _ensure_portal_routes(self, name: str) -> list[str]:
+        if self.caddy is None:
+            return ["no-caddy"]
+        return self.caddy.ensure_portal_routes(name)
 
     def _dependents(self, name: str) -> list[str]:
         """Native apps whose ``[web]`` domain is this domain or a subdomain."""
