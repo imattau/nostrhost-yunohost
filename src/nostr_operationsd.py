@@ -195,6 +195,12 @@ class OperationEngine:
             return True
 
         try:
+            record.args = spec.validate_args(record.args)
+        except Exception as exc:  # noqa: BLE001 - invalid args are a rejected request
+            self._reject(record, f"invalid_args:{exc}")
+            return True
+
+        try:
             self._evaluate_policy(record)
         except Exception as exc:  # noqa: BLE001 - policy denial is a rejected request
             self._reject(record, f"policy_denied:{exc}")

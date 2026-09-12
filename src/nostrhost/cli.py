@@ -86,6 +86,7 @@ from yunohost.nostr_operations import (
     grant_capability,
     revoke_delegation,
 )
+from yunohost.nostrhost import native_ops
 
 EXIT_OK = 0
 EXIT_ERR = 1
@@ -123,6 +124,24 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "credential.set": _safe_credential_set,
     "credential.remove": _safe_credential_remove,
     "credential.list": _safe_credential_list,
+    "system.status": native_ops._safe_system_status,
+    "app.install": native_ops._safe_app_install,
+    "app.upgrade": native_ops._safe_app_upgrade,
+    "app.change_url": native_ops._safe_app_change_url,
+    "app.config.read": native_ops._safe_app_config_read,
+    "app.config.set": native_ops._safe_app_config_set,
+    "backup.create": native_ops._safe_backup_create,
+    "backup.list": native_ops._safe_backup_list,
+    "backup.restore": native_ops._safe_backup_restore,
+    "user.list": native_ops._safe_user_list,
+    "user.create": native_ops._safe_user_create,
+    "user.delete": native_ops._safe_user_delete,
+    "system.upgrade": native_ops._safe_system_upgrade,
+    "firewall.list": native_ops._safe_firewall_list,
+    "firewall.open": native_ops._safe_firewall_open,
+    "firewall.close": native_ops._safe_firewall_close,
+    "firewall.reload": native_ops._safe_firewall_reload,
+    "diagnosis.run": native_ops._safe_diagnosis_run,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")

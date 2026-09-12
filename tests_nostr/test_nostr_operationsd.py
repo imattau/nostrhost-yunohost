@@ -93,9 +93,9 @@ def _content(ev):
 
 def test_e2e_request_approval_execute_result():
     h = Harness()
-    h.grant(["server.read"])
+    h.grant(["services.restart"])
 
-    ev, handled = h.request("system.version")
+    ev, handled = h.request("service.restart", {"name": "caddy"})
     request_id = ev["id"]
     assert handled
     assert h.engine.state(request_id) == OpState.REQUESTED
@@ -103,7 +103,7 @@ def test_e2e_request_approval_execute_result():
 
     assert h.approve(request_id)
     assert h.engine.state(request_id) == OpState.SUCCEEDED
-    assert h.backend.calls == [("system.version", {})]
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
 
     started = h.events_by_kind(2203)
     results = h.events_by_kind(2204)
@@ -113,7 +113,7 @@ def test_e2e_request_approval_execute_result():
     assert results[0]["pubkey"] == h.server_pk
     body = _content(results[0])
     assert body["ok"] is True
-    assert body["result"]["versions"]["yunohost"] == "12.1.41.2"
+    assert body["result"] == {"ok": "service.restart"}
 
 
 def test_policy_adapter_receives_actor_and_is_published_in_result():
@@ -124,11 +124,11 @@ def test_policy_adapter_receives_actor_and_is_published_in_result():
         return {"allow": True, "version": "policy-v1", "plan_sha256": "abc"}
 
     h = Harness(policy=policy)
-    h.grant(["server.read"])
-    ev, _ = h.request("system.version")
+    h.grant(["services.restart"])
+    ev, _ = h.request("service.restart", {"name": "caddy"})
     assert h.approve(ev["id"])
     assert len(decisions) == 2  # request-time and approval-time evaluation
-    assert decisions[0][0] == "system.version" and decisions[0][2] == h.agent_pk
+    assert decisions[0][0] == "service.restart" and decisions[0][2] == h.agent_pk
     body = _content(h.events_by_kind(2204)[0])
     assert body["policy"] == {"allow": True, "version": "policy-v1", "plan_sha256": "abc"}
 
@@ -144,8 +144,8 @@ def test_policy_adapter_can_deny_before_provider_execution():
 
 def test_owner_policy_requires_operator_approval():
     h = Harness(policy=lambda _tool, _args, _actor: {"allow": True, "owner_signature_required": True})
-    h.grant(["server.read"])
-    ev, _ = h.request("system.version")
+    h.grant(["services.restart"])
+    ev, _ = h.request("service.restart", {"name": "caddy"})
     assert not h.approve(ev["id"])
     assert h.engine.state(ev["id"]) == OpState.REQUESTED
 
@@ -156,9 +156,9 @@ def test_owner_policy_requires_operator_approval():
 
 def test_e2e_preserves_actor_separately_from_request_signer():
     h = Harness()
-    h.grant(["server.read"])
+    h.grant(["services.restart"])
     _, actor_pk = new_key()
-    ev = build_operation_request(h.agent_sk, h.agent_pk, "system.version", {}, actor_pubkey=actor_pk)
+    ev = build_operation_request(h.agent_sk, h.agent_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
     assert h.engine.handle_event(ev)
     assert h.engine.records[ev["id"]].requester == h.agent_pk
     assert h.engine.records[ev["id"]].actor == actor_pk
@@ -189,17 +189,17 @@ def test_unknown_tool_is_auto_rejected():
 
 def test_admin_can_operate_without_grant():
     h = Harness()
-    ev, handled = h.request("system.version", requester_sk=h.admin_sk, requester_pk=h.admin_pk)
+    ev, handled = h.request("service.restart", {"name": "caddy"}, requester_sk=h.admin_sk, requester_pk=h.admin_pk)
     assert h.engine.state(ev["id"]) == OpState.REQUESTED
     assert h.approve(ev["id"])
     assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
-    assert h.backend.calls == [("system.version", {})]
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
 
 
 def test_rejection_by_admin_denies():
     h = Harness()
-    h.grant(["server.read"])
-    ev, handled = h.request("system.version")
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
     request_id = ev["id"]
     ev_rej = build_rejection(h.admin_sk, h.admin_pk, request_id, reason="not now")
     assert h.engine.handle_event(ev_rej)
@@ -213,8 +213,8 @@ def test_rejection_by_admin_denies():
 
 def test_approval_by_non_admin_is_ignored():
     h = Harness()
-    h.grant(["server.read"])
-    ev, handled = h.request("system.version")
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
     request_id = ev["id"]
     other_sk, other_pk = new_key()
     ev_na = build_approval(other_sk, other_pk, request_id)
@@ -225,10 +225,10 @@ def test_approval_by_non_admin_is_ignored():
 
 def test_execute_requires_approval_for_default_tools():
     h = Harness()
-    h.grant(["server.read"])
-    ev, handled = h.request("system.version")
-    request_id = ev["id"]
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
     # no approval given -> nothing executed
+    assert handled
     assert h.backend.calls == []
     assert h.events_by_kind(2203) == []
     assert h.events_by_kind(2204) == []
@@ -265,9 +265,10 @@ def test_replay_is_idempotent():
 
 def test_result_events_observed_into_state():
     h = Harness()
-    h.grant(["server.read"])
-    ev, handled = h.request("system.version")
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
     request_id = ev["id"]
+    assert h.engine.state(request_id) == OpState.REQUESTED  # approval-gated, not auto-executed
     # simulate another executor's lifecycle replaying 2203/2204
     h.engine.handle_event(build_execution_started(h.server_sk, h.server_pk, request_id))
     assert h.engine.state(request_id) == OpState.EXECUTING
@@ -391,7 +392,7 @@ def test_write_tool_requires_write_scope():
 
 def test_write_tool_requires_approval_then_executes():
     h = Harness()
-    h.grant(["services.write"])
+    h.grant(["services.restart"])
     ev, handled = h.request("service.restart", args={"name": "dnsmasq"})
     request_id = ev["id"]
     assert handled
@@ -471,21 +472,21 @@ def test_delegation_authorizes_subset_and_revocation_removes_access():
     import time
 
     h = Harness()
-    h.grant(["apps.read"])
+    h.grant(["services.restart"])
     delegate_sk, delegate_pk = new_key()
     delegation = build_delegation(
-        h.agent_sk, h.agent_pk, delegate_pk, h.server_pk, ["apps.read"], int(time.time()) + 3600
+        h.agent_sk, h.agent_pk, delegate_pk, h.server_pk, ["services.restart"], int(time.time()) + 3600
     )
     assert h.engine.handle_event(delegation)
 
-    request = build_operation_request(delegate_sk, delegate_pk, "app.list", {})
+    request = build_operation_request(delegate_sk, delegate_pk, "service.restart", {"name": "caddy"})
     assert h.engine.handle_event(request)
     assert h.engine.state(request["id"]) == OpState.REQUESTED
     assert h.approve(request["id"])
     assert h.engine.state(request["id"]) == OpState.SUCCEEDED
 
     assert h.engine.handle_event(build_delegation_revocation(h.agent_sk, h.agent_pk, delegation["id"]))
-    denied = build_operation_request(delegate_sk, delegate_pk, "app.list", {"after_revoke": True})
+    denied = build_operation_request(delegate_sk, delegate_pk, "service.restart", {"name": "other"})
     assert h.engine.handle_event(denied)
     assert h.engine.state(denied["id"]) == OpState.REJECTED
 

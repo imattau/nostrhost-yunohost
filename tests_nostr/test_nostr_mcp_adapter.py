@@ -81,7 +81,7 @@ def test_mcp_adapter_rejects_unknown_tool():
         transport=lambda relay, event: None,
     )
     with pytest.raises(MCPAdapterError):
-        adapter.call_tool("system.upgrade")
+        adapter.call_tool("app.bogus")
 
 
 def test_mcp_adapter_uses_nip46_for_privileged_approval():

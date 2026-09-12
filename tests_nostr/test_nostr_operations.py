@@ -52,11 +52,20 @@ class FakeTransport:
 
 def test_registry_has_the_safe_tools():
     assert known_tools() == [
+        "app.change_url",
+        "app.config.read",
+        "app.config.set",
+        "app.install",
         "app.list",
         "app.remove",
+        "app.upgrade",
+        "backup.create",
+        "backup.list",
+        "backup.restore",
         "credential.list",
         "credential.remove",
         "credential.set",
+        "diagnosis.run",
         "dns.apply",
         "dns.plan",
         "dns.subscribe",
@@ -68,6 +77,10 @@ def test_registry_has_the_safe_tools():
         "domain.inspect",
         "domain.list",
         "domain.remove",
+        "firewall.close",
+        "firewall.list",
+        "firewall.open",
+        "firewall.reload",
         "network.public_ip",
         "package.plan",
         "package.reconcile",
@@ -76,23 +89,89 @@ def test_registry_has_the_safe_tools():
         "service.restart",
         "service.status",
         "state.reconcile",
+        "system.status",
+        "system.upgrade",
         "system.version",
+        "user.create",
+        "user.delete",
+        "user.list",
     ]
     assert tool_spec("system.version").scope == "server.read"
+    assert tool_spec("system.version").require_approval is False
     assert tool_spec("app.list").scope == "apps.read"
+    assert tool_spec("app.list").require_approval is False
     assert tool_spec("service.status").scope == "services.read"
-    assert tool_spec("service.restart").scope == "services.write"
+    assert tool_spec("service.status").require_approval is False
+    assert tool_spec("service.restart").scope == "services.restart"
     assert tool_spec("rollback.apply").scope == "state.write"
     assert tool_spec("package.plan").require_approval is False
     assert tool_spec("domain.list").scope == "domains.read"
     assert tool_spec("domain.add").scope == "domains.write"
     assert tool_spec("dns.apply").scope == "dns.write"
     assert tool_spec("dns.plan").require_approval is False
+    # Broadened native surface (MCP transition Phase 0): granular scopes and
+    # the reference policy tiers.
+    assert tool_spec("app.remove").scope == "apps.remove"
+    assert tool_spec("app.install").scope == "apps.install"
+    assert tool_spec("app.upgrade").scope == "apps.upgrade"
+    assert tool_spec("backup.create").scope == "backups.create"
+    assert tool_spec("backup.restore").scope == "backups.restore"
+    assert tool_spec("user.create").scope == "users.write"
+    assert tool_spec("user.delete").scope == "users.delete"
+    assert tool_spec("system.upgrade").scope == "system.upgrade"
+    assert tool_spec("firewall.open").scope == "firewall.write"
+    assert tool_spec("diagnosis.run").scope == "diagnosis.read"
+    assert tool_spec("diagnosis.run").require_approval is False
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "dns.watch", "dns.subscriptions", "network.public_ip", "credential.list"):
+        if name not in (
+            "package.plan",
+            "domain.list",
+            "domain.inspect",
+            "dns.plan",
+            "dns.verify",
+            "dns.watch",
+            "dns.subscriptions",
+            "network.public_ip",
+            "credential.list",
+            "system.version",
+            "app.list",
+            "service.status",
+            "system.status",
+            "app.config.read",
+            "backup.list",
+            "user.list",
+            "firewall.list",
+            "diagnosis.run",
+        ):
             assert spec.require_approval is True
-    assert tool_spec("app.upgrade") is None
+    assert tool_spec("app.upgrade") is not None
+
+
+def test_registry_schemas_and_catalog():
+    """Every new op exposes a JSON-Schema input model through the catalogue."""
+    from yunohost.nostr_operations import operation_catalog
+
+    catalog = operation_catalog()
+    by_name = {entry["name"]: entry for entry in catalog}
+    assert len(catalog) == len(known_tools())
+    for name, spec in TOOLS.items():
+        entry = by_name[name]
+        assert entry["scope"] == spec.scope
+        assert entry["require_approval"] == spec.require_approval
+        assert entry["risk"] in ("low", "medium", "high")
+        assert entry["reversibility"] in ("reversible", "partial", "irreversible")
+        assert entry["description"]
+    app_install = by_name["app.install"]
+    assert app_install["risk"] == "high"
+    assert app_install["input_schema"]["required"] == ["app"]
+    # extra="forbid" models surface as additionalProperties: false
+    assert app_install["input_schema"].get("additionalProperties") is False
+    # unknown tools carry no schema
+    assert operation_catalog()
+    import json
+
+    assert json.dumps(catalog)  # fully JSON-serialisable
 
 
 def test_service_status_accepts_the_planner_name_argument(monkeypatch):
@@ -178,7 +257,7 @@ def test_request_operation_publishes_via_transport():
 
 def test_request_operation_rejects_unknown_tool():
     with pytest.raises(OperationError):
-        request_operation("app.upgrade", {}, transport=FakeTransport())
+        request_operation("app.bogus", {}, transport=FakeTransport())
 
 
 def test_approve_and_reject_publish_as_admin():

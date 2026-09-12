@@ -123,8 +123,7 @@ def test_execution_progress_publishes_with_injected_transport():
 def test_executor_emits_progress_before_during_after():
     h = Harness()
     h.grant(["server.read"])
-    request = h.request("system.version")
-    h.approve(request["id"])
+    request = h.request("system.version")  # read op auto-executes (ungated)
 
     progress = h.published and [e for e in h.published if e["kind"] == KIND_EXECUTION_PROGRESS]
     assert len(progress) == 3
@@ -139,7 +138,7 @@ def test_executor_emits_progress_before_during_after():
 
 def test_executor_progress_on_error_path():
     h = Harness()
-    h.grant(["services.write"])
+    h.grant(["services.restart"])
     request = h.request("service.restart", {"name": "caddy"})
     h.approve(request["id"])
     # on failure the 1.0 "finished" progress is not reached

@@ -17,12 +17,32 @@ from typing import Any, Callable
 
 
 def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
+    if tool == "app.remove":
+        return "apps.remove"
+    if tool == "app.install":
+        return "apps.install"
+    if tool == "app.upgrade":
+        return "apps.upgrade"
+    if tool == "app.change_url":
+        return "apps.change_url"
+    if tool == "app.config.set":
+        return "apps.config"
     if tool == "backup.restore":
         return "backups.restore"
+    if tool == "backup.create":
+        return "backups.create"
+    if tool == "user.create":
+        return "users.admin_access" if args.get("admin") is True else "users.write"
+    if tool == "user.delete":
+        return "users.delete"
+    if tool == "system.upgrade":
+        return "system.upgrade"
+    if tool in ("firewall.open", "firewall.close", "firewall.reload"):
+        return "firewall.write"
     if tool == "domain.add":
         return "domains.write"
     if tool == "domain.remove":
-        return "domains.write"
+        return "domains.remove"
     if tool == "dns.apply":
         return "domains.dns"
     if tool in ("credential.set", "credential.remove"):

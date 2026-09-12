@@ -64,13 +64,35 @@ CHAIN_KINDS = (
 
 # Scope names (nostrhost-policy vocabulary). Read scopes cover the safe
 # read-only tools; write scopes gate the minimal control executor's
-# write-capable operations (approval-gated on top of the scope).
+# write-capable operations (approval-gated on top of the scope). Coarse
+# write scopes (apps.write / services.write / state.write) are NostrHost
+# natives for primitives that span several granular actions (the resource
+# reconciler, the bounded service controller, the state layer); the granular
+# scopes come from the shared nostrhost-policy Scope enum so grants and
+# delegations verify against the ops that consume them.
 SCOPE_SERVER_READ = "server.read"
+SCOPE_DIAGNOSIS_READ = "diagnosis.read"
 SCOPE_APPS_READ = "apps.read"
+SCOPE_APPS_INSTALL = "apps.install"
+SCOPE_APPS_UPGRADE = "apps.upgrade"
+SCOPE_APPS_REMOVE = "apps.remove"
 SCOPE_APPS_WRITE = "apps.write"
+SCOPE_APPS_CONFIG_READ = "apps.config.read"
+SCOPE_APPS_CONFIG_WRITE = "apps.config.write"
 SCOPE_SERVICES_READ = "services.read"
+SCOPE_SERVICES_RESTART = "services.restart"
 SCOPE_SERVICES_WRITE = "services.write"
 SCOPE_STATE_WRITE = "state.write"
+SCOPE_BACKUPS_READ = "backups.read"
+SCOPE_BACKUPS_CREATE = "backups.create"
+SCOPE_BACKUPS_RESTORE = "backups.restore"
+SCOPE_USERS_READ = "users.read"
+SCOPE_USERS_WRITE = "users.write"
+SCOPE_USERS_DELETE = "users.delete"
+SCOPE_SYSTEM_UPDATE = "system.update"
+SCOPE_SYSTEM_UPGRADE = "system.upgrade"
+SCOPE_FIREWALL_READ = "firewall.read"
+SCOPE_FIREWALL_WRITE = "firewall.write"
 SCOPE_DOMAINS_READ = "domains.read"
 SCOPE_DOMAINS_WRITE = "domains.write"
 SCOPE_DNS_WRITE = "dns.write"
@@ -79,11 +101,28 @@ SCOPE_DNS_CREDENTIALS_READ = "dns.credentials.read"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
+        SCOPE_DIAGNOSIS_READ,
         SCOPE_APPS_READ,
+        SCOPE_APPS_INSTALL,
+        SCOPE_APPS_UPGRADE,
+        SCOPE_APPS_REMOVE,
         SCOPE_APPS_WRITE,
+        SCOPE_APPS_CONFIG_READ,
+        SCOPE_APPS_CONFIG_WRITE,
         SCOPE_SERVICES_READ,
+        SCOPE_SERVICES_RESTART,
         SCOPE_SERVICES_WRITE,
         SCOPE_STATE_WRITE,
+        SCOPE_BACKUPS_READ,
+        SCOPE_BACKUPS_CREATE,
+        SCOPE_BACKUPS_RESTORE,
+        SCOPE_USERS_READ,
+        SCOPE_USERS_WRITE,
+        SCOPE_USERS_DELETE,
+        SCOPE_SYSTEM_UPDATE,
+        SCOPE_SYSTEM_UPGRADE,
+        SCOPE_FIREWALL_READ,
+        SCOPE_FIREWALL_WRITE,
         SCOPE_DOMAINS_READ,
         SCOPE_DOMAINS_WRITE,
         SCOPE_DNS_WRITE,
@@ -103,6 +142,12 @@ class ToolSpec:
 
     `handler` is the *safe* wrapper — a thin call into the fork's own
     decorated function. The executor backend injects a fake for tests.
+
+    `input_model` / `result_model` are optional Pydantic models whose JSON
+    Schema drives generated interfaces (MCP tool schemas, Admin forms, API
+    docs) — the registry is the single source of truth (MCP transition
+    Phase 0 / docs/MCP-TRANSITION.md). `risk` and `reversibility` feed the
+    operation catalogue and risk classification.
     """
 
     name: str
@@ -110,6 +155,41 @@ class ToolSpec:
     scope: str
     require_approval: bool = True
     description: str = ""
+    input_model: Any = None
+    result_model: Any = None
+    risk: str = "low"  # low | medium | high
+    reversibility: str = "reversible"  # reversible | partial | irreversible
+
+    def input_schema(self) -> dict[str, Any] | None:
+        """The JSON Schema for this tool's arguments, if an input model exists."""
+        if self.input_model is None:
+            return None
+        return self.input_model.model_json_schema()
+
+    def validate_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Coerce/validate ``args`` through the input model when present.
+
+        Returns the validated (coerced) arguments. Unknown tools or models
+        that reject the input raise :class:`OperationError`."""
+        if self.input_model is None:
+            if not isinstance(args, dict):
+                raise OperationError(f"{self.name} arguments must be a JSON object")
+            return dict(args)
+        if not isinstance(args, dict):
+            raise OperationError(f"{self.name} arguments must be a JSON object")
+        try:
+            return self.input_model.model_validate(args).model_dump(exclude_none=True)
+        except Exception as exc:  # pydantic ValidationError -> OperationError
+            raise OperationError(f"invalid arguments for {self.name}: {exc}") from exc
+
+
+# Risk / reversibility tiers used across the registry (MCP transition §6).
+RISK_LOW = "low"
+RISK_MEDIUM = "medium"
+RISK_HIGH = "high"
+REVERSIBLE = "reversible"
+REVERSIBLE_WITH_PLAN = "partial"
+IRREVERSIBLE = "irreversible"
 
 
 def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
@@ -435,10 +515,24 @@ def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
 
 
-# The default registry: read-only tools plus one minimal write operation
-# (service.restart). Read tools are safe by construction; the write tool is
-# safe by gating — `services.write` scope + admin approval on top of the
-# chain, and it is bounded to a single known service name.
+# The default registry: read-only tools plus write operations gated by scope
+# + admin approval. Read tools are safe by construction and run un-gated
+# (require_approval=False); every write carries an approval on top of the
+# scope. The broadened native surface (app lifecycle, backup, user, firewall,
+# diagnosis, system upgrade) lives in nostrhost/native_ops.py and is merged
+# in below so the registry remains the single source of truth.
+def _native_tools() -> dict[str, ToolSpec]:
+    """The broadened native surface (MCP transition Phase 0).
+
+    Imported lazily so the heavy handlers and their Pydantic models are only
+    loaded when the registry is constructed, and so the module can import
+    back from this registry without a cycle.
+    """
+    from .nostrhost.native_ops import NATIVE_TOOLS
+
+    return NATIVE_TOOLS
+
+
 TOOLS: dict[str, ToolSpec] = {
     "package.plan": ToolSpec(
         name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
@@ -452,30 +546,33 @@ TOOLS: dict[str, ToolSpec] = {
         name="system.version",
         handler=_safe_system_version,
         scope=SCOPE_SERVER_READ,
+        require_approval=False,
         description="read-only OS/package version information",
     ),
     "app.list": ToolSpec(
         name="app.list",
         handler=_safe_app_list,
         scope=SCOPE_APPS_READ,
+        require_approval=False,
         description="list installed applications",
     ),
     "app.remove": ToolSpec(
         name="app.remove",
         handler=_safe_app_remove,
-        scope=SCOPE_APPS_WRITE,
+        scope=SCOPE_APPS_REMOVE,
         description="remove one installed app (rollback reverse-action, write operation)",
     ),
     "service.status": ToolSpec(
         name="service.status",
         handler=_safe_service_status,
         scope=SCOPE_SERVICES_READ,
+        require_approval=False,
         description="status of running services",
     ),
     "service.restart": ToolSpec(
         name="service.restart",
         handler=_safe_service_restart,
-        scope=SCOPE_SERVICES_WRITE,
+        scope=SCOPE_SERVICES_RESTART,
         description="restart one named service (write operation)",
     ),
     "service.control": ToolSpec(
@@ -594,6 +691,7 @@ TOOLS: dict[str, ToolSpec] = {
         require_approval=False,
         description="list configured DNS credential references (names only, never values)",
     ),
+    **_native_tools(),
 }
 
 
@@ -604,6 +702,28 @@ def tool_spec(name: str) -> ToolSpec | None:
 
 def known_tools() -> list[str]:
     return sorted(TOOLS)
+
+
+def operation_catalog() -> list[dict[str, Any]]:
+    """JSON-serialisable catalogue of the whole operation registry.
+
+    One entry per tool: name, scope, approval requirement, risk tier,
+    reversibility, description and the input JSON Schema. Generated MCP
+    tools (nostrhost-mcp), Admin forms and API docs all derive from this —
+    the registry is the single source of truth (MCP transition §6).
+    """
+    return [
+        {
+            "name": spec.name,
+            "scope": spec.scope,
+            "require_approval": spec.require_approval,
+            "risk": spec.risk,
+            "reversibility": spec.reversibility,
+            "description": spec.description,
+            "input_schema": spec.input_schema(),
+        }
+        for spec in TOOLS.values()
+    ]
 
 
 # --------------------------------------------------------------------------- #

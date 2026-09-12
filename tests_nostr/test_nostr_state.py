@@ -234,7 +234,6 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     assert engine.handle_event(build_capability(admin_sk, admin_pk, agent_pk, "agent", ["server.read"]))
     req = build_operation_request(agent_sk, agent_pk, "system.version", {})
     assert engine.handle_event(req)
-    assert engine.handle_event(build_approval(admin_sk, admin_pk, req["id"]))
     assert engine.state(req["id"]) == OpState.SUCCEEDED
 
     hist = repo.history()
@@ -280,7 +279,6 @@ def test_executor_failure_marks_post_not_known_good(tmp_path: Path):
     assert engine.handle_event(build_capability(admin_sk, admin_pk, agent_pk, "agent", ["server.read"]))
     req = build_operation_request(agent_sk, agent_pk, "system.version", {})
     assert engine.handle_event(req)
-    assert engine.handle_event(build_approval(admin_sk, admin_pk, req["id"]))
     assert engine.state(req["id"]) == OpState.FAILED
 
     pre, post = repo.history()[1], repo.history()[0]
