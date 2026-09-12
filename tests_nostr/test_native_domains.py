@@ -279,9 +279,12 @@ def test_portal_routes_host_and_path_anded():
     from nostrhost.caddy_admin import build_portal_routes
 
     routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
-    # api + portalapi are unconditional reverse proxies
+    # YunoHost and native API endpoints are unconditional reverse proxies
     assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/yunohost/api/*"]}]
     assert routes["nostrhost-portalapi:w4.test"]["handle"][0]["handler"] == "reverse_proxy"
+    native_api = routes["nostrhost-native-api:w4.test"]
+    assert native_api["match"] == [{"host": ["w4.test"], "path": ["/package/*"]}]
+    assert native_api["handle"][0]["upstreams"] == [{"dial": "127.0.0.1:8190"}]
     # sso/admin only when the static dirs exist
     assert "nostrhost-sso:w4.test" in routes or True
     for route in routes.values():

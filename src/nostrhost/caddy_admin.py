@@ -139,6 +139,12 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6788"}]}],
             "terminal": True,
         },
+        {
+            "@id": f"nostrhost-native-api:{domain}",
+            "match": [{"host": [domain], "path": ["/package/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8190"}]}],
+            "terminal": True,
+        },
     ]
     for root, tag in (("/usr/share/nostrhost/portal", "sso"), ("/usr/share/nostrhost/admin", "admin")):
         if os.path.isdir(root):
@@ -308,5 +314,5 @@ class CaddyAdminClient:
 
     def remove_portal_routes(self, domain: str) -> None:
         """Remove the per-domain portal/SSO routes (W4)."""
-        for tag in ("api", "portalapi", "sso", "admin"):
+        for tag in ("api", "portalapi", "native-api", "sso", "admin"):
             self.delete_route(f"nostrhost-{tag}:{domain}")
