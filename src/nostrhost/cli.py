@@ -64,6 +64,9 @@ from yunohost.nostr_operations import (
     _safe_credential_set,
     _safe_dns_apply,
     _safe_dns_plan,
+    _safe_dns_subscribe,
+    _safe_dns_subscriptions,
+    _safe_dns_unsubscribe,
     _safe_dns_verify,
     _safe_dns_watch,
     _safe_domain_add,
@@ -113,6 +116,9 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "dns.apply": _safe_dns_apply,
     "dns.verify": _safe_dns_verify,
     "dns.watch": _safe_dns_watch,
+    "dns.subscribe": _safe_dns_subscribe,
+    "dns.subscriptions": _safe_dns_subscriptions,
+    "dns.unsubscribe": _safe_dns_unsubscribe,
     "network.public_ip": _safe_network_public_ip,
     "credential.set": _safe_credential_set,
     "credential.remove": _safe_credential_remove,
@@ -1034,6 +1040,50 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     def dns_watch(output_as: str = typer.Option(None, "--output-as")) -> None:
         """DDNS watcher status: last-seen public IPs and dynamic domains."""
         _guard(lambda: _run_tool("dns.watch", {}), output_as)
+
+    @dns.command("subscribe")
+    def dns_subscribe(
+        hostname: str = typer.Argument(..., help="free hostname to claim, a <label> under nohost.me / noho.st / ynh.fr"),
+        secret: str = typer.Option(None, "--secret", help="TSIG secret to provision (default: generated)"),
+        rotate: bool = typer.Option(False, "--rotate", help="regenerate the TSIG secret on re-subscribe"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Claim a nostr-native free hostname: the operator identity signs the
+        ownership claim and the TSIG secret goes into the credential broker."""
+        def run() -> Any:
+            body = _run_lifecycle("dns.subscribe", {"hostname": hostname, "secret": secret, "rotate": rotate}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"dns.subscribe rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            result = body.get("result") or body
+            return {
+                "hostname": result.get("hostname"),
+                "zone": result.get("zone"),
+                "pubkey": result.get("pubkey"),
+                "claim_id": result.get("claim_id"),
+                "secret_ref": result.get("secret_ref"),
+                "next": result.get("next"),
+            }
+        _guard(run, output_as)
+
+    @dns.command("subscriptions")
+    def dns_subscriptions(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List nostr-native free-hostname subscriptions (identity claims)."""
+        _guard(lambda: _run_tool("dns.subscriptions", {}), output_as)
+
+    @dns.command("unsubscribe")
+    def dns_unsubscribe(
+        hostname: str = typer.Argument(..., help="free hostname to release"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Release a nostr-native free-hostname subscription and drop its
+        broker secret."""
+        def run() -> Any:
+            body = _run_lifecycle("dns.unsubscribe", {"hostname": hostname}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"dns.unsubscribe rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            result = body.get("result") or body
+            return {"hostname": result.get("hostname"), "secret_ref": result.get("secret_ref"), "unsubscribed": result.get("unsubscribed")}
+        _guard(run, output_as)
 
     # -- network ------------------------------------------------------------
 

@@ -59,6 +59,9 @@ def test_registry_has_the_safe_tools():
         "credential.set",
         "dns.apply",
         "dns.plan",
+        "dns.subscribe",
+        "dns.subscriptions",
+        "dns.unsubscribe",
         "dns.verify",
         "dns.watch",
         "domain.add",
@@ -87,9 +90,35 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("dns.plan").require_approval is False
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "dns.watch", "network.public_ip", "credential.list"):
+        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "dns.watch", "dns.subscriptions", "network.public_ip", "credential.list"):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is None
+
+
+def test_service_status_accepts_the_planner_name_argument(monkeypatch):
+    import sys
+    from types import ModuleType
+    from yunohost.nostr_operations import _safe_service_status
+
+    calls = []
+
+    def fake_status(names=None):
+        calls.append(names)
+        if names is None:
+            return {"caddy": {"status": "running"}, "opendkim": {"status": "running"}}
+        return {names: {"status": "running"}}
+
+    service = ModuleType("yunohost.service")
+    service._get_services = lambda: {"caddy": {}, "opendkim": {}}
+    service.service_status = fake_status
+    monkeypatch.setitem(sys.modules, "yunohost.service", service)
+
+    assert _safe_service_status(name="opendkim") == {"opendkim": {"status": "running"}}
+    assert _safe_service_status() == {
+        "caddy": {"status": "running"},
+        "opendkim": {"status": "running"},
+    }
+    assert calls == ["opendkim", None]
 
 
 def test_request_event_shape():

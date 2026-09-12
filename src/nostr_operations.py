@@ -224,10 +224,18 @@ def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[st
     return {"app": app, "purge": bool(purge)}
 
 
-def _safe_service_status(**args: Any) -> dict[str, Any]:
-    from yunohost.service import service_status
+def _safe_service_status(name: str = "", **args: Any) -> dict[str, Any]:
+    """Read all managed services or one explicitly named service."""
+    name = str(name or "").strip()
+    if args:
+        raise OperationError(f"service.status does not accept extra args: {sorted(args)}")
+    from yunohost.service import _get_services, service_status
 
-    return service_status(**args)
+    if name:
+        if name not in _get_services():
+            raise OperationError(f"unknown service {name!r}")
+        return service_status(name)
+    return service_status()
 
 
 def _safe_service_restart(name: str = "", **args: Any) -> dict[str, Any]:
@@ -377,6 +385,24 @@ def _safe_dns_watch(**args: Any) -> dict[str, Any]:
     return _impl(**args)
 
 
+def _safe_dns_subscribe(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_subscribe as _impl
+
+    return _impl(**args)
+
+
+def _safe_dns_subscriptions(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_subscriptions as _impl
+
+    return _impl(**args)
+
+
+def _safe_dns_unsubscribe(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_unsubscribe as _impl
+
+    return _impl(**args)
+
+
 def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
     from .nostrhost.domains.operations import _safe_network_public_ip as _impl
 
@@ -522,6 +548,25 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_DOMAINS_READ,
         require_approval=False,
         description="DDNS watcher status: last-seen public IPs and dynamic-IP domains",
+    ),
+    "dns.subscribe": ToolSpec(
+        name="dns.subscribe",
+        handler=_safe_dns_subscribe,
+        scope=SCOPE_DNS_WRITE,
+        description="claim a nostr-native free hostname (identity-backed Dynette): sign the ownership claim with the operator key and provision its TSIG secret in the broker",
+    ),
+    "dns.subscriptions": ToolSpec(
+        name="dns.subscriptions",
+        handler=_safe_dns_subscriptions,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="list nostr-native free-hostname subscriptions (claims signed by the operator identity)",
+    ),
+    "dns.unsubscribe": ToolSpec(
+        name="dns.unsubscribe",
+        handler=_safe_dns_unsubscribe,
+        scope=SCOPE_DNS_WRITE,
+        description="release a nostr-native free-hostname subscription and drop its broker secret",
     ),
     "network.public_ip": ToolSpec(
         name="network.public_ip",

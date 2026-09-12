@@ -14,12 +14,16 @@ The TSIG key is resolved *conditionally*, in this order:
 1. an explicit ``secret:dns/dynette/<name>`` reference — the secret is the
    base64 TSIG key (the part after ``... IN KEY 0 3 165`` in the legacy key
    file);
-2. the key file the legacy subscription wrote:
+2. the *default* broker reference ``secret:dns/dynette/<hostname>`` — the
+   identity-backed subscription (``nostrhost dns subscribe``, W4 Phase E:
+   the node's Nostr identity signs the ownership claim, no TOTP needed);
+3. the key file the legacy subscription wrote:
    ``/etc/yunohost/dyndns/K<hostname>.+165+1234.key``;
 
-so a Dynette host subscribed the legacy way can be registered as a native
-domain without re-entering its key. If neither exists a CredentialError is
-raised pointing at ``yunohost dyndns subscribe``.
+so a Dynette host subscribed either the nostr-native way or the legacy way
+can be registered as a native domain without re-entering its key. If none
+exists a CredentialError is raised pointing at ``nostrhost dns subscribe``
+(and, for legacy compat, ``yunohost dyndns subscribe``).
 
 The domain service and the watcher resolve the desired A/AAAA from the
 server's current public addresses; this provider pushes them through a
@@ -171,11 +175,16 @@ class DynetteProvider:
             return self._secret
         if self._credential:
             return credentials.read_secret(self._credential, dir=self.credential_dir)
+        default_ref = f"secret:dns/dynette/{self.zone}"
+        if credentials.exists(default_ref, dir=self.credential_dir):
+            return credentials.read_secret(default_ref, dir=self.credential_dir)
         key_file = find_tsig_key(self.zone, self.key_dir)
         if key_file is None:
             raise credentials.CredentialError(
-                "dynette requires a secret:dns/dynette/<name> credential or an existing "
-                f"/etc/yunohost/dyndns/K{self.zone}.+*.key (legacy 'yunohost dyndns subscribe')"
+                "dynette requires a secret:dns/dynette/<name> credential, a "
+                f"nostr free-hostname subscription (nostrhost dns subscribe {self.zone}), "
+                f"or an existing /etc/yunohost/dyndns/K{self.zone}.+*.key (legacy "
+                "'yunohost dyndns subscribe')"
             )
         return _read_key_secret(key_file)
 

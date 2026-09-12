@@ -1,3 +1,20 @@
+yunohost (12.1.41.28) stable; urgency=low
+
+  * nostrhost: W4 Phase E — nostr-native free hostname (identity-backed Dynette).
+    - `nostrhost dns subscribe <label>.nohost.me` claims a free Dynette
+      hostname with the node's OWN Nostr identity instead of the legacy TOTP
+      dance: the operator key signs a kind-39910 ownership claim (persisted
+      root-0600 under state/free-hostnames/) and the TSIG secret goes into
+      the credential broker as secret:dns/dynette/<hostname>.
+    - DynetteProvider resolves that broker ref (no explicit credential, no
+      legacy key file); the domain.add gate accepts an identity-subscribed
+      host without a --credential. dns.subscribe/dns.unsubscribe
+      (dns.write), dns.subscriptions (domains.read).
+    - The ownership proof is the signature: the claim is NIP-01 signed by the
+      operator pubkey and verifiable offline.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 18:00:00 +0000
+
 yunohost (12.1.41.27) stable; urgency=low
 
   * nostrhost: W4 Phase D — Dynette compat provider.

@@ -24,6 +24,17 @@ def _dynette_legacy_key(domain: str) -> Any:
     return find_tsig_key(domain)
 
 
+def _dynette_available(domain: str) -> bool:
+    """Whether ``domain`` can be a Dynette host without a credential ref:
+    either a legacy TSIG key file or an identity-backed free-hostname
+    subscription (its default broker ref exists)."""
+    if _dynette_legacy_key(domain) is not None:
+        return True
+    from ..credentials import exists
+
+    return exists(f"secret:dns/dynette/{domain}")
+
+
 def _safe_domain_list(**args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError("domain.list takes no arguments")
@@ -62,9 +73,13 @@ def _safe_domain_add(
 
     if provider_type != "manual" and not credential:
         # Dynette is the legacy-DDNS compat case: the TSIG key may already
-        # exist from a `yunohost dyndns subscribe`, so no credential ref is
-        # required then (the provider resolves the key file itself).
-        if provider_type != "dynette" or _dynette_legacy_key(domain) is None:
+        # exist from a `yunohost dyndns subscribe` OR the host may have been
+        # claimed the nostr-native way (`nostrhost dns subscribe`, identity-
+        # backed: the operator signed the ownership claim and the broker
+        # holds the secret at secret:dns/dynette/<domain>). In both cases no
+        # credential ref is required then (the provider resolves the secret
+        # itself).
+        if provider_type != "dynette" or not _dynette_available(domain):
             raise NostrHostError(
                 f"domain.add with the {provider_type} provider requires a --credential secret:dns/{provider_type}/<name> reference"
             )
@@ -172,3 +187,39 @@ def _safe_credential_list(provider: str | None = None, **args: Any) -> dict[str,
     from ..credentials import list_secrets
 
     return {"credentials": list_secrets(provider)}
+
+
+# -- nostr-native free hostname (identity-backed Dynette) ------------------- #
+
+def _safe_dns_subscribe(hostname: str = "", secret: str | None = None, rotate: bool = False, **args: Any) -> dict[str, Any]:
+    if args or not hostname:
+        raise NostrHostError("dns.subscribe requires a hostname (a <label> under nohost.me / noho.st / ynh.fr)")
+    from ..dns.freehost import subscribe
+
+    try:
+        return subscribe(_service().state_dir, hostname, secret=secret, rotate=rotate)
+    except NostrHostError:
+        raise
+    except Exception as exc:
+        raise NostrHostError(f"dns.subscribe failed: {exc}") from exc
+
+
+def _safe_dns_subscriptions(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError("dns.subscriptions takes no arguments")
+    from ..dns.freehost import list_subscriptions
+
+    return {"subscriptions": list_subscriptions(_service().state_dir)}
+
+
+def _safe_dns_unsubscribe(hostname: str = "", **args: Any) -> dict[str, Any]:
+    if args or not hostname:
+        raise NostrHostError("dns.unsubscribe requires a hostname")
+    from ..dns.freehost import unsubscribe
+
+    try:
+        return unsubscribe(_service().state_dir, hostname)
+    except NostrHostError:
+        raise
+    except Exception as exc:
+        raise NostrHostError(f"dns.unsubscribe failed: {exc}") from exc
