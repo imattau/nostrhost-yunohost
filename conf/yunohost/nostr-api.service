@@ -1,0 +1,20 @@
+[Unit]
+Description=NostrHost native HTTP API (NIP-98 authenticated, 127.0.0.1:8190)
+After=network-online.target nostrhost-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-api --host 127.0.0.1 --port 8190
+Restart=on-failure
+RestartSec=5s
+User=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+
+[Install]
+WantedBy=multi-user.target

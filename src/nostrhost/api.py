@@ -27,6 +27,7 @@ from .cli import _TOOL_HANDLERS
 from .core import NostrHostError
 from yunohost.nostr_identity import (
     IdentityError,
+    _operator_config,
     _parse_pubkey,
     link_identity,
     list_identities,
@@ -330,19 +331,48 @@ def _json_body() -> dict[str, Any]:
 def _config_operator_sk() -> str | None:
     import os
 
-    return os.environ.get("NOSTRHOST_OPERATOR_SK")
+    sk = os.environ.get("NOSTRHOST_OPERATOR_SK")
+    if sk:
+        return sk
+    try:
+        return _operator_config().operator_sk
+    except (IdentityError, OSError):
+        return None
 
 
 def _config_admin_sk() -> str | None:
     import os
 
-    return os.environ.get("NOSTRHOST_ADMIN_SK")
+    sk = os.environ.get("NOSTRHOST_ADMIN_SK")
+    if sk:
+        return sk
+    try:
+        return _operator_config().operator_sk
+    except (IdentityError, OSError):
+        return None
 
 
 def _config_control_relay() -> str | None:
     import os
 
-    return os.environ.get("NOSTRHOST_CONTROL_RELAY")
+    relay = os.environ.get("NOSTRHOST_CONTROL_RELAY")
+    if relay:
+        return relay
+    try:
+        return _operator_config().control_relay
+    except (IdentityError, OSError):
+        return None
+
+
+def _identity_pubkeys_from_config() -> tuple[tuple[str, ...], str | None]:
+    """Derive (admin_pubkeys, operator_pubkey) from operator.toml when the
+    caller did not pass them explicitly — makes `nostr-api` self-contained
+    behind the nostr-api systemd unit (no environment injection needed)."""
+    try:
+        cfg = _operator_config()
+    except (IdentityError, OSError):
+        return (), None
+    return tuple(cfg.admins), cfg.operator_pubkey
 
 
 def _identity_dict(identity: Any) -> dict[str, Any]:
@@ -365,7 +395,13 @@ def run(
     operator_pubkey: str | None = None,
     app: Bottle | None = None,
 ) -> None:
-    """Serve the native API (used by bin/nostr-api)."""
+    """Serve the native API (used by bin/nostr-api).
+
+    When neither ``operator_pubkey`` nor ``admin_pubkeys`` is given, the
+    operator + admins are derived from /etc/nostrhost/operator.toml (the
+    nostr-api unit relies on this; nothing needs to be injected)."""
+    if app is None and operator_pubkey is None and not admin_pubkeys:
+        admin_pubkeys, operator_pubkey = _identity_pubkeys_from_config()
     app = app or build_app(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
     app.run(host=host, port=port)
 

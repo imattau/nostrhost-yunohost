@@ -52,6 +52,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -589,6 +590,26 @@ class StateRepo:
         except StateError:
             return False
 
+    def manifest_for(self, revision: str | None = None) -> dict[str, Any]:
+        """Read the manifest.toml recorded at ``revision`` (default HEAD).
+
+        Used by ``postinstall --restore`` to recover a known-good revision's
+        linked Restic snapshot id and health/phase bookkeeping."""
+        rev = revision or self.revision()
+        if not rev:
+            return {}
+        res = subprocess.run(
+            ["git", "-C", str(self.path), "show", f"{rev}:manifest.toml"],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            return {}
+        try:
+            return tomllib.loads(res.stdout)
+        except tomllib.TOMLDecodeError:
+            return {}
+
     def history(self, n: int = 20) -> list[dict[str, Any]]:
         fmt = "%H%x00%s%x00%ct"
         try:
@@ -717,8 +738,6 @@ def _reconciliation_tool(
 ) -> tuple[str | None, dict[str, Any]]:
     """Map only narrowly bounded drift to an operation-registry tool."""
     try:
-        import tomllib
-
         source = desired if action != "remove" else actual
         data = tomllib.loads(source[path].decode("utf-8"))
     except (KeyError, UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -909,6 +928,106 @@ def announce_state_repository(
         failed = ", ".join(f"{relay}: {exc}" for relay, exc in failures)
         raise StateError(f"repository announcement failed on {len(failures)} relay(s): {failed}")
     return event
+
+
+def discover_state_repository(
+    relay_url: str,
+    *,
+    server_pubkey: str,
+    name: str = STATE_REPO_NAME,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Discover the node's kind-30617 state-repository announcement on a relay.
+
+    Subscribes ``REQ {"kinds": [30617], "authors": [server_pubkey], "#d":
+    [name]}`` (NIP-42-authenticated when the node is bootstrapped) and returns
+    the first matching signed event. Raises :class:`StateError` if none
+    arrives within ``timeout`` or the relay cannot be reached. This is the
+    ``postinstall --restore`` discovery side of :func:`announce_state_repository`.
+    """
+    import secrets
+    import time
+
+    from .nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
+    from websockets.sync.client import connect
+
+    auth = default_auth()
+    deadline = time.time() + timeout
+    try:
+        with connect(relay_url, open_timeout=timeout) as ws:
+            sub_id = "nostrhost-discover-" + secrets.token_hex(4)
+            request = json.dumps(
+                [
+                    "REQ",
+                    sub_id,
+                    {"kinds": [KIND_REPOSITORY_ANNOUNCEMENT], "authors": [server_pubkey], "#d": [name]},
+                ]
+            )
+            ws.send(request)
+            while time.time() < deadline:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "AUTH":
+                    if auth is not None:
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth_event = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                        ws.send(json.dumps(["AUTH", auth_event]))
+                        _wait_auth_ok(ws, auth_event["id"], deadline)
+                        ws.send(request)  # re-send after auth
+                    continue
+                if msg[0] == "EVENT":
+                    return msg[2]
+    except Exception as exc:  # noqa: BLE001 - relay unreachable / protocol error
+        raise StateError(f"state repository discovery failed on {relay_url}: {exc}") from exc
+    raise StateError(
+        f"no kind-30617 state repository announcement for {server_pubkey[:16]}… "
+        f"on {relay_url} (expected name {name!r})"
+    )
+
+
+def clone_state_repository(
+    relay_url: str,
+    *,
+    server_pubkey: str,
+    destination: Path,
+    name: str = STATE_REPO_NAME,
+    timeout: float = 15.0,
+) -> Path:
+    """Restore the state repository by discovery + clone (postinstall --restore).
+
+    Discovers the announcement (see :func:`discover_state_repository`) and
+    clones the git repository named by its ``r`` tag into ``destination``.
+    Only an ``r`` tag that is a usable git remote URL (http(s)://, ssh://,
+    git@, file://) can be cloned directly; a bare NIP-34 name (e.g.
+    ``nostrhost-state.git`` or ``nostr://…``) means no git transport is
+    published for this node, so the caller must recover via a state bundle
+    (``nostrhost-state replicate``/``restore``) instead — that raises here
+    with a clear error rather than silently succeeding.
+    """
+    announcement = discover_state_repository(relay_url, server_pubkey=server_pubkey, name=name, timeout=timeout)
+    r_tag = next((tag[1] for tag in announcement.get("tags") or [] if tag and tag[0] == "r" and len(tag) > 1), "")
+    if not r_tag:
+        raise StateError("state repository announcement carries no 'r' tag to clone")
+    if not (r_tag.startswith(("http://", "https://", "ssh://", "git@", "file://"))):
+        raise StateError(
+            f"state repository announcement names {r_tag!r} — no git transport is published "
+            "for this node. Recover via a state bundle instead: run `nostrhost-state replicate` "
+            "on the source node and `postinstall restore --bundle <file>` here."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--no-hardlinks", r_tag, str(destination)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=max(timeout * 4, 60),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise StateError(f"state repository clone from {r_tag!r} failed: {exc.stderr.strip() or exc}") from exc
+    return destination
 
 
 # --------------------------------------------------------------------------- #

@@ -1,3 +1,22 @@
+yunohost (12.1.41.6) stable; urgency=low
+
+  * nostrhost: native postinstall (ALPHA-PLAN W2) — `nostrhost postinstall
+    new` bootstraps a fresh node (bootstrap_node key-gen callable, operator/
+    portal/relay/policy configs, Caddy base render, daemon + certd enablement,
+    state S0 commit + kind-30617 announce, initial capability grant); `restore`
+    recovers identity + state via bundle or kind-30617 discovery/clone and
+    reconciles. Legacy tools_postinstall deprecated (kept for the SPA wizard).
+  * nostrhost: ship + enable native systemd units (nostr-identityd,
+    nostr-operationsd, nostr-securityd, nostr-api, caddy) on the venv
+    interpreter; add services.yml entries; control unit ships from the
+    nostrhost-control submodule.
+  * nostrhost: nostr-api derives operator/admins from operator.toml so the
+    unit is self-contained; caddy_domain.conf serves /usr/share/nostrhost/
+    {portal,admin}; nostr_state gains kind-30617 discovery + clone helpers.
+  * nostrhost-core now Depends on nostrhost-runtime (fork-side W1 closure).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 15:00:00 +0200
+
 yunohost (12.1.41.5) stable; urgency=low
 
   * nostrhost: core rename Stage 2 — binary package is now nostrhost-core

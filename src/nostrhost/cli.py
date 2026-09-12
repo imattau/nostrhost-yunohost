@@ -15,6 +15,7 @@ Command groups:
     state       apply a reconciliation plan
     identity    npub-based user identities (link / revoke / list / resolve)
     capability  grant / delegate / revoke capabilities to an npub
+    postinstall first-run bootstrap / restore (new / restore / status)
 
 The CLI runs as the authorized admin: read tools execute directly, and write
 tools execute through their safe handlers here (the local admin is the
@@ -29,6 +30,9 @@ Exit codes: 0 on success, 1 on any error, 2 on usage errors.
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -38,7 +42,10 @@ import typer
 from . import ui
 from .core import NostrHostError
 from yunohost.nostr_identity import (
+    OPERATOR_CONFIG,
     IdentityError,
+    _is_hex64,
+    _npub,
     _parse_pubkey,
     link_identity,
     list_identities,
@@ -108,6 +115,320 @@ def _print_error(exc: Exception) -> None:
 def _run_tool(name: str, args: dict[str, Any]) -> Any:
     handler = _TOOL_HANDLERS[name]
     return handler(**args)
+
+
+# --------------------------------------------------------------------------- #
+# native postinstall (ALPHA-PLAN Workstream 2)
+
+POSTINSTALL_UNITS = [
+    "caddy",
+    "nostrhost-control",
+    "nostr-identityd",
+    "nostr-operationsd",
+    "nostr-securityd",
+    "nostr-api",
+    "nostrhost-certd.timer",
+]
+
+CADDY_BASE_DIR = "/etc/caddy"
+CADDY_CONF_DIR = "/etc/caddy/conf.d"
+CADDY_TEMPLATE_DIR = "/usr/share/yunohost/conf/caddy"
+POLICY_CONFIG = "/etc/nostrhost/policy.toml"
+RELAY_CONFIG = "/etc/nostrhost/relay.toml"
+INSTALLED_MARKER = "/etc/yunohost/installed"
+
+
+def _write_policy_toml(operator_npub: str) -> Path:
+    """Write the editable shared host policy (defaults apply for unlisted
+    keys; the ``[owner]`` block documents the operator identity)."""
+    path = Path(POLICY_CONFIG)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# NostrHost shared host policy (nostrhost_policy.policy.rules).\n"
+        "# Any [policy.<key>] section overrides the built-in default for that\n"
+        "# key only; unlisted keys keep their built-in default. Owner\n"
+        "# enforcement uses operator.toml's operator_pubkey; [owner] below is\n"
+        "# the documented identity.\n"
+        f'\n[owner]\nowner_npub = "{operator_npub}"\n'
+        "\n[policy.apps.upgrade]\n"
+        'require_backup = true\nminimum_free_space = "2GB"\n'
+        "\n[policy.apps.remove]\n"
+        'require_confirmation = true\nrequire_backup = true\nmax_backup_age = "24h"\n'
+        "\n[policy.backups.restore]\n"
+        "require_confirmation = true\nrequire_owner_signature = true\n"
+        "\n[policy.system.upgrade]\n"
+        "require_confirmation = true\nrequire_owner_signature = true\n"
+        "\n[policy.firewall.write]\n"
+        "require_confirmation = true\nrequire_owner_signature = true\n"
+    )
+    os.chmod(path, 0o644)
+    return path
+
+
+def _render_caddy_base(domain: str) -> None:
+    """Render the base Caddyfile + one per-domain snippet directly.
+
+    The native path renders ``/etc/caddy`` from the shipped templates;
+    regenconf's ``15-caddy`` category tracks the same files so later domain
+    adds / drift detection keep working. Uses plain string substitution for
+    ``{{ domain }}`` — the snippet's only variable."""
+    Path(CADDY_BASE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(CADDY_CONF_DIR).mkdir(parents=True, exist_ok=True)
+    template_dir = Path(CADDY_TEMPLATE_DIR)
+    caddyfile = template_dir / "Caddyfile.template"
+    domain_tpl = template_dir / "caddy_domain.conf"
+    if not caddyfile.exists() or not domain_tpl.exists():
+        raise NostrHostError(f"caddy templates not found in {CADDY_TEMPLATE_DIR}")
+    Path(CADDY_BASE_DIR, "Caddyfile").write_text(caddyfile.read_text(encoding="utf-8"))
+    conf = domain_tpl.read_text(encoding="utf-8").replace("{{ domain }}", domain)
+    Path(CADDY_CONF_DIR, f"{domain}.conf").write_text(conf)
+
+
+def _systemctl(*args: str) -> None:
+    subprocess.run(["systemctl", *args], check=False, capture_output=True, text=True)
+
+
+def _enable_postinstall_daemons() -> list[str]:
+    """daemon-reload + enable --now the native stack. Returns the units that
+    did not reach an active/activating state (best-effort — surfaced in the
+    summary, never fatal here)."""
+    _systemctl("daemon-reload")
+    failed: list[str] = []
+    for unit in POSTINSTALL_UNITS:
+        _systemctl("enable", unit)
+        _systemctl("start", unit)
+        res = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True)
+        if res.stdout.strip() not in ("active", "activating"):
+            failed.append(unit)
+    return failed
+
+
+def _prepare_node(domain: str, operator_npub: str) -> None:
+    """Shared postinstall base configuration (both --new and --restore)."""
+    Path("/var/lib/nostrhost").mkdir(parents=True, exist_ok=True)
+    Path("/var/log/caddy").mkdir(parents=True, exist_ok=True)
+    _write_policy_toml(operator_npub)
+    _render_caddy_base(domain)
+    Path("/etc/yunohost/current_host").write_text(domain + "\n")
+
+
+def _publish_initial_capability(operator_pubkey: str) -> dict[str, Any] | None:
+    """Grant the operator the full scope set (published to the control relay
+    as the operator; non-fatal when the relay is not yet up)."""
+    from yunohost.nostr_operations import KNOWN_SCOPES, grant_capability
+
+    try:
+        return grant_capability(operator_pubkey, list(KNOWN_SCOPES), type_="admin")
+    except Exception as exc:  # noqa: BLE001 - surfaced in the summary
+        return {"error": str(exc)}
+
+
+def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) -> dict[str, Any]:
+    """Fresh bootstrap: generate the node identity, stand up the native stack
+    and record state S0. This is the canonical first-run path (the legacy
+    interactive tools_postinstall wizard is not involved)."""
+    from yunohost.nostr_identity import _init_headless_yunohost, bootstrap_node
+    from yunohost.nostr_state import (
+        StateRepo,
+        YunohostBackend,
+        announce_state_repository,
+        export_state,
+        state_dir_from_env,
+    )
+
+    if os.geteuid() != 0:
+        raise NostrHostError("postinstall must be run as root")
+    if Path(INSTALLED_MARKER).exists() and not force:
+        raise NostrHostError(
+            f"{INSTALLED_MARKER} exists — the node is already postinstalled "
+            "(pass --force to re-run)"
+        )
+
+    _init_headless_yunohost()
+    domain = domain or socket.getfqdn()
+
+    boot = bootstrap_node(admins=[admin_npub] if admin_npub else None, force=force, write_relay=RELAY_CONFIG)
+    operator_npub = _npub(boot["operator_pubkey"])
+    _prepare_node(domain, operator_npub)
+
+    failed = _enable_postinstall_daemons()
+    grant = _publish_initial_capability(boot["operator_pubkey"])
+
+    repo = StateRepo(state_dir_from_env(), boot["server_pubkey"])
+    tree = export_state(YunohostBackend())
+    rev = repo.commit(tree, known_good=True, health="passed", message="initial state (postinstall --new)")
+
+    announce: dict[str, Any] | str | None = None
+    try:
+        announce_state_repository()
+        announce = "published"
+    except Exception as exc:  # noqa: BLE001 - non-fatal
+        announce = str(exc)
+
+    Path(INSTALLED_MARKER).touch()
+
+    return {
+        "domain": domain,
+        "operator_npub": operator_npub,
+        "operator_pubkey": boot["operator_pubkey"],
+        "server_npub": _npub(boot["server_pubkey"]),
+        "control_relay": boot["control_relay"],
+        "state_revision": rev[:16],
+        "policy_file": POLICY_CONFIG,
+        "relay_config": RELAY_CONFIG,
+        "state_announcement": announce,
+        "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
+        "daemons_failed": failed or "none",
+        "note": "operator_npub is the owner identity; log in via the portal and link it.",
+    }
+
+
+def _postinstall_restore(
+    operator_sk: str,
+    server_sk: str | None,
+    notice_sk: str | None,
+    domain: str | None,
+    bundle: Path | None,
+    state_relay: str | None,
+    restic: str | None,
+    force: bool,
+) -> dict[str, Any]:
+    """Restore a node from its state repository: recover the identity, restore
+    the known-good state (bundle or discovered/cloned repo), restore the
+    linked Restic data snapshot, reconcile, and stand the stack back up."""
+    from yunohost.nostr_identity import _init_headless_yunohost, bootstrap_node
+    from yunohost.nostr_operationsd import YnhExecutorBackend
+    from yunohost.nostr_restic import ResticError, restic_client
+    from yunohost.nostr_state import (
+        StateRepo,
+        YunohostBackend,
+        announce_state_repository,
+        apply_reconciliation_plan,
+        clone_state_repository,
+        export_state,
+        state_dir_from_env,
+    )
+
+    if os.geteuid() != 0:
+        raise NostrHostError("postinstall must be run as root")
+    if not operator_sk or not _is_hex64(operator_sk):
+        raise NostrHostError("restore requires --operator-sk (the recovered admin key)")
+    if bundle is None and not state_relay:
+        raise NostrHostError("restore needs a state source: --bundle PATH or --state-relay URL")
+    if Path(INSTALLED_MARKER).exists() and not force:
+        raise NostrHostError(
+            f"{INSTALLED_MARKER} exists — the node is already postinstalled "
+            "(pass --force to re-run)"
+        )
+
+    _init_headless_yunohost()
+    domain = domain or socket.getfqdn()
+
+    boot = bootstrap_node(
+        operator_sk=operator_sk,
+        server_sk=server_sk or operator_sk,
+        notice_sk=notice_sk,
+        force=force,
+        write_relay=RELAY_CONFIG,
+    )
+    _prepare_node(domain, _npub(boot["operator_pubkey"]))
+
+    # restore the state repository
+    state_dir = state_dir_from_env()
+    if bundle is not None:
+        StateRepo.verify_bundle(bundle)
+        restored = StateRepo.restore_bundle(bundle, state_dir)
+        repo = StateRepo(restored, boot["server_pubkey"])
+        restored_from = f"bundle:{bundle}"
+    else:
+        assert state_relay is not None
+        clone_state_repository(state_relay, server_pubkey=boot["server_pubkey"], destination=state_dir)
+        repo = StateRepo(state_dir, boot["server_pubkey"])
+        restored_from = f"relay:{state_relay}"
+
+    target = repo.known_good_revision() or repo.revision()
+    if not target:
+        raise NostrHostError("restored state repository has no revisions to restore")
+
+    manifest = repo.manifest_for(target)
+    snapshot_id = restic or manifest.get("restic_snapshot") or ""
+    data_restore: dict[str, Any] = {"snapshot": snapshot_id or "none"}
+    if snapshot_id:
+        try:
+            restic_client().restore(snapshot_id, target=None)
+            data_restore["status"] = "restored"
+        except (ResticError, Exception) as exc:  # noqa: BLE001 - report, do not abort
+            data_restore["status"] = "failed"
+            data_restore["error"] = str(exc)
+
+    failed = _enable_postinstall_daemons()
+    grant = _publish_initial_capability(boot["operator_pubkey"])
+
+    # reconcile: converge live state to the restored desired state (bounded)
+    reconcile: dict[str, Any] = {"target": target[:16]}
+    try:
+        plan = repo.reconciliation_plan(export_state(YunohostBackend()))
+        report = apply_reconciliation_plan(plan, backend=YnhExecutorBackend(), approve=True, repo=repo)
+        reconcile["changes"] = sum(1 for row in report if row["status"] == "executed")
+        reconcile["report"] = report
+    except Exception as exc:  # noqa: BLE001 - report, do not abort
+        reconcile["error"] = str(exc)
+
+    announce: dict[str, Any] | str | None = None
+    try:
+        announce_state_repository()
+        announce = "published"
+    except Exception as exc:  # noqa: BLE001 - non-fatal
+        announce = str(exc)
+
+    rev = repo.commit(
+        export_state(YunohostBackend()),
+        known_good=False,
+        health="passed",
+        restic_snapshot=snapshot_id,
+        message=f"post-restore reconcile from {restored_from}",
+    )
+    Path(INSTALLED_MARKER).touch()
+
+    return {
+        "domain": domain,
+        "restored_from": restored_from,
+        "operator_npub": _npub(boot["operator_pubkey"]),
+        "operator_pubkey": boot["operator_pubkey"],
+        "server_npub": _npub(boot["server_pubkey"]),
+        "restored_revision": target[:16],
+        "data_restore": data_restore,
+        "reconcile": reconcile,
+        "state_revision": rev[:16],
+        "policy_file": POLICY_CONFIG,
+        "state_announcement": announce,
+        "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
+        "daemons_failed": failed or "none",
+    }
+
+
+def _postinstall_status() -> dict[str, Any]:
+    from yunohost.nostr_identity import is_bootstrapped
+    from yunohost.nostr_state import StateRepo, state_dir_from_env
+
+    bootstrapped = is_bootstrapped()
+    state_dir = state_dir_from_env()
+    revision = ""
+    known_good = ""
+    if bootstrapped and state_dir.exists():
+        from yunohost.nostr_identity import _operator_config
+
+        cfg = _operator_config()
+        repo = StateRepo(state_dir, cfg.server_pubkey)
+        revision = repo.revision()[:16] or ""
+        known_good = repo.known_good_revision()[:16] or ""
+    return {
+        "installed": Path(INSTALLED_MARKER).exists(),
+        "bootstrapped": bootstrapped,
+        "operator_config": OPERATOR_CONFIG if bootstrapped else None,
+        "state_revision": revision or None,
+        "known_good": known_good or None,
+    }
 
 
 def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.Typer:
@@ -405,7 +726,43 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 print(f"{request_id[:16]} … no chain events (pending or unknown)")
         _guard(run, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group):
+    # -- postinstall --------------------------------------------------------
+
+    postinstall = typer.Typer(name="postinstall", help="first-run bootstrap / restore", no_args_is_help=True)
+
+    @postinstall.command("new")
+    def postinstall_new(
+        domain: str = typer.Option(None, "--domain", help="primary domain (default: hostname)"),
+        admin_npub: str = typer.Option(None, "--admin-npub", help="operator admin npub (default: the generated operator)"),
+        force: bool = typer.Option(False, "--force", help="re-run even if /etc/yunohost/installed exists"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Bootstrap a fresh node: generate the identity, stand up the native
+        stack (relay, daemons, Caddy) and record state S0."""
+        _guard(lambda: _postinstall_new(domain, admin_npub, force), output_as)
+
+    @postinstall.command("restore")
+    def postinstall_restore(
+        operator_sk: str = typer.Option(..., "--operator-sk", help="recovered admin secret key (64-hex)"),
+        server_sk: str = typer.Option(None, "--server-sk", help="recovered server key (default: operator key)"),
+        notice_sk: str = typer.Option(None, "--notice-sk", help="recovered portal notice key"),
+        domain: str = typer.Option(None, "--domain", help="primary domain (default: hostname)"),
+        bundle: Path = typer.Option(None, "--bundle", help="state-replica bundle to restore (nostrhost-state replicate)"),
+        state_relay: str = typer.Option(None, "--state-relay", help="relay to discover the kind-30617 state repo on"),
+        restic: str = typer.Option(None, "--restic", help="override the restic snapshot id"),
+        force: bool = typer.Option(False, "--force", help="re-run even if /etc/yunohost/installed exists"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Restore a node: recover identity + state, restore the linked Restic
+        snapshot, reconcile and stand the stack back up."""
+        _guard(lambda: _postinstall_restore(operator_sk, server_sk, notice_sk, domain, bundle, state_relay, restic, force), output_as)
+
+    @postinstall.command("status")
+    def postinstall_status(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Show bootstrap / postinstall state."""
+        _guard(_postinstall_status, output_as)
+
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall):
         app.add_typer(group, name=group.info.name)
 
     return app

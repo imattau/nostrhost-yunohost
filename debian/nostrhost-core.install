@@ -16,6 +16,16 @@ share/* /usr/share/yunohost/
 hooks/* /usr/share/yunohost/hooks/
 helpers/* /usr/share/yunohost/
 conf/* /usr/share/yunohost/conf/
+# Native daemon + reverse-proxy units: shipped both under /usr/share/yunohost/
+# (via conf/* above, the services.yml base) and as real systemd units. They
+# are NOT auto-enabled at package install — `nostrhost postinstall` enables
+# them after writing /etc/nostrhost/operator.toml so the daemons never
+# crash-loop pre-bootstrap.
+conf/yunohost/nostr-identityd.service /lib/systemd/system/
+conf/yunohost/nostr-operationsd.service /lib/systemd/system/
+conf/yunohost/nostr-securityd.service /lib/systemd/system/
+conf/yunohost/nostr-api.service /lib/systemd/system/
+conf/yunohost/caddy.service /lib/systemd/system/
 locales/* /usr/share/yunohost/locales/
 doc/yunohost.8.gz /usr/share/man/man8/
 doc/bash_completion.d/* /etc/bash_completion.d/

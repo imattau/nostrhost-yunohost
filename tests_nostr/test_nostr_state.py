@@ -346,3 +346,58 @@ def test_toml_serializer_handles_nested_and_ordered(tmp_path: Path):
     tree["system"]["host.toml"]["settings"] = OrderedDict([("security.root_access", OrderedDict([("root", True)]))])
     repo.commit(tree, op_event_id="c" * 64, phase="post", known_good=True, health="passed")
     assert repo.known_good_revision()  # commit succeeded despite nested data
+
+
+def test_manifest_for_reads_commit_metadata(tmp_path: Path):
+    """manifest_for recovers a revision's manifest (restic linkage etc.),
+    used by postinstall --restore to find the linked data snapshot."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    rev = repo.commit(
+        export_state(FakeBackend()),
+        op_event_id="c" * 64,
+        phase="post",
+        known_good=True,
+        restic_snapshot="9f" * 32,
+        health="passed",
+    )
+    manifest = repo.manifest_for(rev)
+    assert manifest["state"]["known_good"] is True
+    assert manifest["backup"]["restic_snapshot"] == "9f" * 32
+    assert manifest["health"]["result"] == "passed"
+    assert manifest["operation"]["phase"] == "post"
+    # HEAD manifest equals the committed revision's (no later commit)
+    assert repo.manifest_for()["backup"]["restic_snapshot"] == "9f" * 32
+    # unknown revision -> empty
+    assert repo.manifest_for("0" * 40) == {}
+
+
+def test_clone_state_repository_rejects_no_git_transport(tmp_path: Path, monkeypatch):
+    """A NIP-34 announcement with a bare relative 'r' name cannot be cloned:
+    postinstall --restore must fall back to a state bundle."""
+    from yunohost.nostr_state import STATE_REPO_NAME, clone_state_repository
+
+    def fake_discover(*args, **kwargs):
+        return {
+            "kind": 30617,
+            "content": "nostrhost state",
+            "tags": [["d", STATE_REPO_NAME], ["r", "nostrhost-state.git"]],
+        }
+
+    monkeypatch.setattr("yunohost.nostr_state.discover_state_repository", fake_discover)
+    with pytest.raises(StateError, match="no git transport"):
+        clone_state_repository(
+            "ws://127.0.0.1:9", server_pubkey="b" * 64, destination=tmp_path / "state"
+        )
+
+
+def test_clone_state_repository_requires_r_tag(tmp_path: Path, monkeypatch):
+    from yunohost.nostr_state import STATE_REPO_NAME, StateError, clone_state_repository
+
+    def fake_discover(*args, **kwargs):
+        return {"kind": 30617, "content": "no repo tag", "tags": [["d", STATE_REPO_NAME]]}
+
+    monkeypatch.setattr("yunohost.nostr_state.discover_state_repository", fake_discover)
+    with pytest.raises(StateError, match="'r' tag"):
+        clone_state_repository(
+            "ws://127.0.0.1:9", server_pubkey="b" * 64, destination=tmp_path / "state"
+        )

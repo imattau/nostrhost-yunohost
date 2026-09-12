@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from yunohost.nostr_identity import (
     IdentityError,
     _build_identity_event,
     _parse_pubkey,
+    _pubkey,
     _store,
     link_identity,
     resolve_pubkey,
@@ -332,3 +334,55 @@ def test_publish_to_relay_nip42_handshake(tmp_path, monkeypatch):
     done.set()
     t.join(timeout=5)
     assert auth_seen["n"] == 1
+
+
+def test_bootstrap_node_writes_configs(tmp_path: Path, monkeypatch):
+    """bootstrap_node generates the three keys and writes operator/portal/relay
+    configs (the native postinstall --new bootstrap path)."""
+    from yunohost.nostr_identity import bootstrap_node
+
+    op_cfg = tmp_path / "operator.toml"
+    notice_cfg = tmp_path / "portal.toml"
+    relay_cfg = tmp_path / "relay.toml"
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(op_cfg))
+    monkeypatch.setenv("NOSTRHOST_NOTICE_CONFIG", str(notice_cfg))
+
+    result = bootstrap_node(force=True, write_relay=str(relay_cfg))
+    for key in ("server_sk", "operator_sk", "notice_sk"):
+        assert len(result[key]) == 64
+        assert int(result[key], 16) >= 0
+    assert result["server_pubkey"] == _pubkey(result["server_sk"])
+    assert result["operator_pubkey"] == _pubkey(result["operator_sk"])
+    assert result["admins"] == [result["operator_pubkey"]]
+
+    data = tomllib.loads(op_cfg.read_text())
+    assert data["operator_sk"] == result["operator_sk"]
+    assert data["server_sk"] == result["server_sk"]
+    assert data["admins"] == [result["operator_pubkey"]]
+
+    notice = tomllib.loads(notice_cfg.read_text())
+    assert notice["notice_sk"] == result["notice_sk"]
+
+    relay = tomllib.loads(relay_cfg.read_text())
+    assert relay["operator_pubkey"] == result["operator_pubkey"]
+    assert relay["server_pubkey"] == result["server_pubkey"]
+    assert relay["notice_pubkey"] == result["notice_pubkey"]
+    assert relay["allowlist_mode"] is True
+
+    # second run without force refuses to overwrite
+    with pytest.raises(IdentityError):
+        bootstrap_node()
+
+    # importing an explicit operator key keeps its identity
+    sk, pk = new_key()
+    result2 = bootstrap_node(operator_sk=sk, force=True)
+    assert result2["operator_pubkey"] == pk
+    assert tomllib.loads(op_cfg.read_text())["operator_sk"] == sk
+
+
+def test_bootstrap_node_rejects_bad_import(tmp_path: Path, monkeypatch):
+    from yunohost.nostr_identity import IdentityError, bootstrap_node
+
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "operator.toml"))
+    with pytest.raises(IdentityError):
+        bootstrap_node(operator_sk="not-hex", force=True)

@@ -145,6 +145,13 @@ def tools_postinstall(
     overwrite_root_password: bool = True,
     i_have_read_terms_of_services: bool = False,
 ) -> None:
+    """Legacy interactive postinstall wizard.
+
+    Deprecated on NostrHost: fresh native installs use
+    ``nostrhost postinstall new`` (root CLI) instead — no interactive
+    admin/password flow, npub identity instead of LDAP. This entry point is
+    retained for the admin SPA's legacy wizard and compatibility; a fresh
+    NostrHost node no longer depends on it."""
     import psutil
 
     from .app_catalog import _update_apps_catalog

@@ -23,6 +23,19 @@ caddy:
   test_conf: caddy validate --config /etc/caddy/Caddyfile
   needs_exposed_ports: [80, 443]
   category: web
+nostrhost-control:
+  category: core
+nostr-identityd:
+  category: admin
+nostr-operationsd:
+  category: admin
+nostr-securityd:
+  category: security
+nostr-api:
+  category: admin
+nostrhost-certd:
+  category: web
+  actual_systemd_service: nostrhost-certd.timer
 # Yunohost will dynamically add installed php-fpm services (7.3, 7.4, 8.0, ...) in services.py
 #php7.4-fpm:
 #  log: /var/log/php7.4-fpm.log
