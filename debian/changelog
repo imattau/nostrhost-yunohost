@@ -1,3 +1,12 @@
+yunohost (12.1.41.19) stable; urgency=low
+
+  * nostrhost: postinstall's policy.toml must quote dotted section keys
+    ([policy."apps.upgrade"]) — an unquoted [policy.apps.upgrade] parses as a
+    nested TOML table that load_policy() silently ignores, so the generated
+    overrides (require_backup, minimum_free_space, ...) never applied.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 00:00:00 +0200
+
 yunohost (12.1.41.18) stable; urgency=low
 
   * nostrhost: fix the venv re-exec detection — the venv python is a symlink

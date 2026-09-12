@@ -351,6 +351,9 @@ def _write_policy_toml(operator_npub: str) -> Path:
     keys; the ``[owner]`` block documents the operator identity)."""
     path = Path(POLICY_CONFIG)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Section headers quote the dotted key ([policy."apps.upgrade"]) so TOML
+    # keeps it as one literal key; an unquoted `[policy.apps.upgrade]` parses
+    # as a nested table that load_policy() cannot read.
     path.write_text(
         "# NostrHost shared host policy (nostrhost_policy.policy.rules).\n"
         "# Any [policy.<key>] section overrides the built-in default for that\n"
@@ -358,15 +361,15 @@ def _write_policy_toml(operator_npub: str) -> Path:
         "# enforcement uses operator.toml's operator_pubkey; [owner] below is\n"
         "# the documented identity.\n"
         f'\n[owner]\nowner_npub = "{operator_npub}"\n'
-        "\n[policy.apps.upgrade]\n"
+        '\n[policy."apps.upgrade"]\n'
         'require_backup = true\nminimum_free_space = "2GB"\n'
-        "\n[policy.apps.remove]\n"
+        '\n[policy."apps.remove"]\n'
         'require_confirmation = true\nrequire_backup = true\nmax_backup_age = "24h"\n'
-        "\n[policy.backups.restore]\n"
+        '\n[policy."backups.restore"]\n'
         "require_confirmation = true\nrequire_owner_signature = true\n"
-        "\n[policy.system.upgrade]\n"
+        '\n[policy."system.upgrade"]\n'
         "require_confirmation = true\nrequire_owner_signature = true\n"
-        "\n[policy.firewall.write]\n"
+        '\n[policy."firewall.write"]\n'
         "require_confirmation = true\nrequire_owner_signature = true\n"
     )
     os.chmod(path, 0o644)

@@ -303,3 +303,21 @@ def test_cli_lifecycle_helpers_use_node_safe_imports(tmp_path: Path, monkeypatch
     # _coordinate_for must resolve the catalogue provider import cleanly.
     monkeypatch.delenv("NOSTRHOST_CATALOG_STATE", raising=False)
     assert cli_module._coordinate_for("nostrhost-test") in (None, {})
+
+
+def test_policy_writer_quotes_dotted_keys(tmp_path: Path, monkeypatch):
+    """The generated policy.toml must use [policy."apps.upgrade"]-style quoted
+    keys so load_policy() reads them as one literal key (an unquoted
+    `[policy.apps.upgrade]` parses as a nested table and is silently ignored)."""
+    from nostrhost import cli as cli_module
+    from nostrhost_policy.policy.rules import load_policy
+
+    target = tmp_path / "policy.toml"
+    monkeypatch.setattr(cli_module, "POLICY_CONFIG", str(target))
+    cli_module._write_policy_toml("npub1test")
+    rules = load_policy(target)
+    assert rules["apps.upgrade"].require_backup is True
+    assert rules["apps.upgrade"].minimum_free_space_bytes == 2_000_000_000
+    assert rules["apps.remove"].require_confirmation is True
+    assert rules["apps.remove"].max_backup_age_seconds == 86400
+    assert rules["backups.restore"].require_owner_signature is True
