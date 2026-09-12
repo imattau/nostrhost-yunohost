@@ -1,3 +1,16 @@
+yunohost (12.1.41.22) stable; urgency=low
+
+  * nostrhost: package.ensure writes a minimal legacy manifest.json (id/
+    version/name) so the app registry can enumerate native apps; app.list
+    now lists native packages from the resource-engine state (best-effort
+    merge with the legacy registry) instead of depending on it.
+  * nostrhost: full native app lifecycle verified on a clean VM — install
+    (coordinate -> fetch/verify -> signed chain -> policy -> approval ->
+    execute -> Caddy route -> permission -> health), backup, upgrade
+    (conservative re-apply), change-url and native removal.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 03:00:00 +0200
+
 yunohost (12.1.41.21) stable; urgency=low
 
   * nostrhost: core pydantic imports migrate to pydantic.v1 (the full v1

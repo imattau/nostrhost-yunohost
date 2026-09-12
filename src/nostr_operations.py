@@ -35,6 +35,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
@@ -144,9 +145,45 @@ def _safe_system_version(**args: Any) -> dict[str, Any]:
 
 
 def _safe_app_list(**args: Any) -> dict[str, Any]:
-    from yunohost.app import app_list
+    """List installed applications — native packages from the resource-engine
+    state, plus the legacy YunoHost registry (best-effort)."""
+    native: dict[str, Any] = {}
+    try:
+        from nostrhost.native_providers import installed_package_manifest
 
-    return app_list(**args)
+        for state_file in sorted(Path("/var/lib/nostrhost/state/packages").glob("*-manifest.json")):
+            app_id = state_file.name[: -len("-manifest.json")]
+            try:
+                manifest = installed_package_manifest(app_id)
+            except Exception:  # noqa: BLE001 - a broken state file is a listing warning
+                manifest = None
+            if not isinstance(manifest, dict):
+                continue
+            app = manifest.get("app") or {}
+            native[app_id] = {
+                "id": app_id,
+                "version": app.get("version"),
+                "name": {"en": app.get("name") or app_id},
+                "repository": "nostrhost",
+                "source": "nostr",
+                "native": True,
+            }
+    except Exception:  # noqa: BLE001 - state listing is additive
+        native = {}
+    legacy: dict[str, Any] = {}
+    try:
+        from yunohost.app import app_list
+
+        legacy = app_list(**args) or {}
+    except Exception:  # noqa: BLE001 - a partially-registered native app must not break the list
+        legacy = {}
+    if legacy:
+        apps = dict(legacy.get("apps") or {})
+        apps.update(native)
+        return {"apps": apps}
+    if native:
+        return {"apps": native}
+    return legacy
 
 
 def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[str, Any]:

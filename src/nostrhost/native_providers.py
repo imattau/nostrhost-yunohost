@@ -81,7 +81,7 @@ class PackageProvider:
         package_id = _safe_name(operation.args["id"])
         legacy_dir = (self.apps_dir / package_id) if self.apps_dir is not None else None
         if operation.name == "package.ensure":
-            self._ensure_legacy(legacy_dir, app_id=package_id, domain=operation.args.get("domain"), path=operation.args.get("path"))
+            self._ensure_legacy(legacy_dir, app_id=package_id, version=operation.args.get("version"), domain=operation.args.get("domain"), path=operation.args.get("path"))
         elif operation.name in {"package.remove", "package.manifest.remove"}:
             self._drop_legacy(legacy_dir)
         if self.state_dir is None:
@@ -117,7 +117,7 @@ class PackageProvider:
         return {"package": package_id, "version": operation.args["version"], "changed": True}
 
     @staticmethod
-    def _ensure_legacy(legacy_dir: Path | None, *, app_id: str | None = None, domain: str | None = None, path: str | None = None) -> None:
+    def _ensure_legacy(legacy_dir: Path | None, *, app_id: str | None = None, version: str | None = None, domain: str | None = None, path: str | None = None) -> None:
         """Create the minimal legacy app-registry entry (permission gateway)."""
         if legacy_dir is None:
             return
@@ -130,6 +130,8 @@ class PackageProvider:
         if app_id:
             settings["id"] = app_id
             settings["install_time"] = int(time.time())
+        if version:
+            settings["version"] = version
         if domain:
             settings["domain"] = domain
             settings["path"] = path or "/"
@@ -141,6 +143,19 @@ class PackageProvider:
         if not existed or target.read_text(encoding="utf-8") != body:
             target.write_text(body, encoding="utf-8")
             os.chmod(target, 0o644)
+        # Minimal manifest.json so the legacy app registry (app_map / app_list)
+        # can enumerate the native app without a full legacy manifest install.
+        manifest: dict[str, Any] = {
+            "id": app_id or "app",
+            "version": settings.get("version"),
+            "name": {"en": app_id or "app"},
+            "description": {"en": ""},
+            "integration": {"architectures": []},
+        }
+        manifest_target = legacy_dir / "manifest.json"
+        payload = json.dumps(manifest, sort_keys=True, indent=1) + "\n"
+        if not existed or manifest_target.read_text(encoding="utf-8") != payload:
+            manifest_target.write_text(payload, encoding="utf-8")
 
     @staticmethod
     def _drop_legacy(legacy_dir: Path | None) -> None:
