@@ -64,6 +64,7 @@ def provider_capabilities(provider_type: str) -> DnsProviderCapabilities:
         "desec": {"dynamic_ip": True, "full_zone": True, "wildcard": True, "txt": True, "caa": True},
         "duckdns": {"dynamic_ip": True, "full_zone": False, "wildcard": False, "txt": True, "caa": False},
         "dynu": {"dynamic_ip": True, "full_zone": False, "wildcard": False, "txt": False, "caa": False},
+        "dynette": {"dynamic_ip": True, "full_zone": False, "wildcard": False, "txt": False, "caa": False},
     }
     if provider_type not in defaults:
         raise ValueError(f"unknown DNS provider {provider_type!r}")
@@ -109,6 +110,14 @@ def build_provider(resource: DnsProviderResource, state_dir: Path) -> Any:
         from .desec import DesecProvider
 
         return DesecProvider(
+            credential=resource.credential,
+            zone=resource.zone or "",
+            state_dir=state_dir,
+        )
+    if resource.type == "dynette":
+        from .dynette import DynetteProvider
+
+        return DynetteProvider(
             credential=resource.credential,
             zone=resource.zone or "",
             state_dir=state_dir,

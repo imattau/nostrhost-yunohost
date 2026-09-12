@@ -17,6 +17,13 @@ def _service() -> DomainService:
     return DomainService()
 
 
+def _dynette_legacy_key(domain: str) -> Any:
+    """The legacy Dynette TSIG key file for ``domain``, if any (compat conditional)."""
+    from ..dns.providers.dynette import find_tsig_key
+
+    return find_tsig_key(domain)
+
+
 def _safe_domain_list(**args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError("domain.list takes no arguments")
@@ -54,8 +61,14 @@ def _safe_domain_add(
     from .models import DomainExposure, DomainNostr, DomainTls
 
     if provider_type != "manual" and not credential:
-        raise NostrHostError(f"domain.add with the {provider_type} provider requires a --credential secret:dns/{provider_type}/<name> reference")
-    if provider_type != "manual":
+        # Dynette is the legacy-DDNS compat case: the TSIG key may already
+        # exist from a `yunohost dyndns subscribe`, so no credential ref is
+        # required then (the provider resolves the key file itself).
+        if provider_type != "dynette" or _dynette_legacy_key(domain) is None:
+            raise NostrHostError(
+                f"domain.add with the {provider_type} provider requires a --credential secret:dns/{provider_type}/<name> reference"
+            )
+    elif provider_type != "manual":
         from ..credentials import resolve as resolve_credential
 
         resolve_credential(credential or "")  # fails fast on a missing/typo'd ref

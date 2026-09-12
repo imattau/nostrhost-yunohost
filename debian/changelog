@@ -1,3 +1,21 @@
+yunohost (12.1.41.27) stable; urgency=low
+
+  * nostrhost: W4 Phase D — Dynette compat provider.
+    - DynetteProvider (dynamic-IP only): point-to-point A/AAAA updates for a
+      legacy yunohost.dyndns host (nohost.me / noho.st / ynh.fr) via an RFC
+      2136 TSIG hmac-sha512 update pushed to dyndns.yunohost.org, mirroring
+      the legacy `yunohost dyndns update` behavior.
+    - Compat-conditional credentials: an explicit secret:dns/dynette/<name>
+      reference, else the TSIG key file the legacy subscription wrote
+      (/etc/yunohost/dyndns/K<host>.+165+1234.key). domain.add lets such a
+      host be registered natively without re-entering its key; without the
+      key file a credential ref is still required.
+    - Wired into the native registry: capabilities (full_zone=False, dynamic)
+      route dynette domains through the point-to-point push path, so the DDNS
+      watcher reconciles them on public-IP change just like DuckDNS/Dynu.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 12:00:00 +0000
+
 yunohost (12.1.41.26) stable; urgency=low
 
   * nostrhost: W4 Phase C — DDNS providers (DuckDNS/Dynu/deSEC) + IP watcher.

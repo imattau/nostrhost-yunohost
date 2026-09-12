@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - plain pydantic for local dev
 
 DNS_RECORD_TYPES = ("A", "AAAA", "CNAME", "TXT", "SRV", "CAA", "NS", "MX")
 
-PROVIDER_TYPES = ("manual", "cloudflare", "duckdns", "dynu", "desec")
+PROVIDER_TYPES = ("manual", "cloudflare", "duckdns", "dynu", "desec", "dynette")
 
 
 class DnsProviderCapabilities(BaseModel):
