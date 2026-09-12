@@ -105,6 +105,11 @@ do_configure() {
     mkdir -p /etc/yunohost/apps
     mkdir -p /etc/yunohost/portal
 
+    # Directories the operationsd executor sandbox mounts read-write
+    # (nostr-operationsd.service ReadWritePaths). ReadWritePaths must exist at
+    # unit start or the mount namespace fails; create them here idempotently.
+    mkdir -p /var/lib/yunohost /var/cache/yunohost /var/log/yunohost /home/yunohost.backup
+
     # CrowdSec provisioning (P4 of the fail2ban->CrowdSec migration).
     # Runs on both fresh install and upgrade; every step is idempotent.
     # crowdsec + crowdsec-firewall-bouncer are hard Depends, so the daemon

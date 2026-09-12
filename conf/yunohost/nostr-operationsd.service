@@ -12,9 +12,13 @@ User=root
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+ProtectHome=read-only
 ProtectSystem=full
-ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+# The executor is the single writer to the engine (roadmap §6); the broadened
+# native surface (firewall, backup, user, app lifecycle, diagnosis, system
+# upgrade) writes the yunohost state/log dirs, so they are explicit read-write
+# mounts alongside the NostrHost state dirs. Everything else stays read-only.
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt
 
 [Install]
 WantedBy=multi-user.target
