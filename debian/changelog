@@ -1,3 +1,11 @@
+yunohost (12.1.41.17) stable; urgency=low
+
+  * nostrhost: bin scripts re-exec into /opt/nostrhost/venv when present —
+    the runtime's wheels (coincurve, nostr-sdk, ...) live only in the venv,
+    so the system-python CLI could not sign operation requests.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 22:30:00 +0200
+
 yunohost (12.1.41.16) stable; urgency=low
 
   * nostr_restic.snapshots() no longer filters by the configured tag by

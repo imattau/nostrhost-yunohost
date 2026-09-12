@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
+# for nodes where the runtime has not been installed yet.
+_VENV_PY = _Path("/opt/nostrhost/venv/bin/python3")
+if _VENV_PY.is_file() and _os.path.realpath(_sys.executable) != _os.path.realpath(str(_VENV_PY)):
+    _os.execv(str(_VENV_PY), [str(_VENV_PY), _sys.argv[0]] + _sys.argv[1:])
+
 """nostr-securityd — CrowdSec security-event projector daemon (P5).
 
 Subscribes to the local CrowdSec LAPI (polling `cscli alerts list -o json`)
