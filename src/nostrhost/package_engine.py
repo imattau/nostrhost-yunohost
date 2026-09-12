@@ -22,6 +22,8 @@ try:  # Keep the package stable on both the declared v1 and transitional v2 host
 except ImportError:  # pragma: no cover - exercised on Pydantic v1 installations
     from pydantic import BaseModel, Field, root_validator, validator
 
+from .dns.models import DNS_RECORD_TYPES
+
 
 class PackageError(ValueError):
     """A package is syntactically or semantically invalid."""
@@ -324,6 +326,36 @@ class WebResource(BaseModel):
         return value
 
 
+class DnsRecordResource(BaseModel):
+    """One app-declared DNS record (``[dns.<name>]``, W4 Phase B).
+
+    ``name`` is relative to the app's ``web.domain`` (``@`` for the apex).
+    NostrHost enforces the record through the domain's provider and owns it
+    (``app:<id>``), deleting it when the app goes away. The record is
+    reconciled inside the domain's own zone, so ``web.domain`` must be a
+    registered native domain.
+    """
+
+    name: str = "@"
+    type: str
+    value: str
+    ttl: int = 3600
+
+    @validator("type")
+    def known_type(cls, value: str) -> str:
+        if value.upper() not in DNS_RECORD_TYPES:
+            raise ValueError(f"unsupported DNS record type {value!r}")
+        return value.upper()
+
+    @validator("name")
+    def sane_name(cls, value: str) -> str:
+        if value == "@":
+            return value
+        if not re.fullmatch(r"[a-zA-Z0-9*_.-]+", value):
+            raise ValueError(f"invalid DNS record name {value!r}")
+        return value
+
+
 class HealthResource(BaseModel):
     type: Literal["http"] = "http"
     path: str = "/health"
@@ -436,6 +468,7 @@ class PackageManifest(BaseModel):
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
     web: WebResource | None = None
+    dns: dict[str, DnsRecordResource] = Field(default_factory=dict)
     health: HealthResource | None = None
     timer: TimerResource | None = None
     backup: BackupResource | None = None
@@ -444,11 +477,19 @@ class PackageManifest(BaseModel):
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies")
+    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies", "dns")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
         return value
+
+    @root_validator
+    def dns_needs_web_domain(cls, values: dict[str, Any]) -> dict[str, Any]:
+        declared = values.get("dns") or {}
+        web = values.get("web")
+        if declared and (web is None or not (web.domain or "").strip()):
+            raise ValueError("dns records require a declared web.domain (they are enforced inside the domain's zone)")
+        return values
 
     @validator("service")
     def service_user(cls, value: ServiceResource | None, values: dict[str, Any]) -> ServiceResource | None:
@@ -629,6 +670,19 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         web_args = {**package.web.dict(), "app": app}
         plan.append(_op("web.route.ensure", f"{app}:web", web_args, deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
+    if package.dns:
+        web_domain = (package.web.domain if package.web else None) or ""
+        records = [record.dict() for record in package.dns.values()]
+        deps = (f"{app}:web",) if package.web else (package_op.resource,)
+        plan.append(_op(
+            "dns.records.ensure",
+            f"{app}:dns",
+            {"app": app, "domain": web_domain, "records": records},
+            deps=deps,
+            risk="medium",
+            reverse="dns.records.remove",
+            summary=f"enforce {len(records)} DNS record(s) for {app} on {web_domain}",
+        ))
     for name, permission in package.permissions.items():
         deps = (f"{app}:web",) if package.web else (package_op.resource,)
         permission_args = {**permission.dict(), "app": app, "name": name}

@@ -1,3 +1,31 @@
+yunohost (12.1.41.25) stable; urgency=low
+
+  * nostrhost: W4 Phase B — provider credentials, Cloudflare, app [dns.*]
+    records (enforce + own) and drift report-vs-reconcile.
+    - Credential broker: DNS provider tokens live in root mode-600 files
+      under /var/lib/nostrhost/credentials/dns/<provider>/<name>; resources
+      reference them as secret:dns/<provider>/<name> and providers resolve
+      the token internally (operators/agents never see it). New ops
+      credential.set/remove/list; new scopes dns.credentials.write/read;
+      policy key dns.credentials.write (confirmation-gated). CLI group
+      `nostrhost credential`.
+    - CloudflareProvider: zone discovery + record CRUD through the REST API
+      (verified HTTPS), ownership-bounded via the local mirror (only records
+      NostrHost created are mutated; provider record ids are mirrored so
+      updates/deletes target the Cloudflare record id). DnsRecord gains a
+      provider_id field; the reconciler prefers it over the fingerprint.
+      domain.add --provider cloudflare --credential secret:dns/cloudflare/x.
+    - App [dns.*] manifest section: apps declare DNS records relative to
+      their web.domain; plan_package emits dns.records.ensure (reverse
+      dns.records.remove). The domain desired-set folds app records owned as
+      app:<id>, so domain.add/inspect/dns.plan/apply/verify enforce them and
+      app removal (or a dns.records.remove step) deletes exactly the
+      departing app's records. The web.domain must be a registered native
+      domain.
+    - Drift report-vs-reconcile: dns.plan (and domain.inspect) now include a
+      drift object (in_sync, summary, to_create/to_update/to_delete,
+      preserved); dns.apply reconciles.
+
 yunohost (12.1.41.24) stable; urgency=low
 
   * nostrhost: W4 Phase A — native domains & DNS as a first-class subsystem.

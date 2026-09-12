@@ -17,7 +17,6 @@ from typing import Any, Callable
 from ..dns import reconciler
 from ..dns.models import DnsProviderResource, DnsRecord
 from ..dns.providers import build_provider
-from ..dns.providers.manual import ManualProvider
 from .models import DomainResource
 
 
@@ -148,6 +147,7 @@ class DomainService:
             "desired": [r.dict() for r in desired],
             "actual": [r.dict() for r in actual],
             "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
+            "drift": self._drift_report(plan),
             "state": str(domain_state_path(self.state_dir, name)),
         }
 
@@ -239,13 +239,52 @@ class DomainService:
         desired = self._desired(domain)
         actual = provider.list_records(zone)
         plan = reconciler.build_plan(desired, actual)
-        return {"domain": name, "zone": zone, "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]}}
+        return {
+            "domain": name,
+            "zone": zone,
+            "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
+            "drift": self._drift_report(plan),
+        }
+
+    def _drift_report(self, plan: Any) -> dict[str, Any]:
+        """Drift report-vs-reconcile summary: what would change and why."""
+        summary = plan.summarize()
+        report: dict[str, Any] = {"in_sync": summary["create"] == 0 and summary["update"] == 0 and summary["delete"] == 0}
+        report["summary"] = summary
+        for action in ("create", "update", "delete"):
+            report[f"to_{action}"] = [c.record.fingerprint() for c in plan.changes if c.action == action]
+        report["preserved"] = [r.fingerprint() for r in plan.preserved]
+        return report
 
     def dns_apply(self, name: str) -> dict[str, Any]:
         domain = self._require(name)
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain)
+        actual = provider.list_records(zone)
+        plan = reconciler.build_plan(desired, actual)
+        applied = reconciler.apply_plan(plan, provider)
+        return {"domain": name, "zone": zone, "applied": applied, "ok": True}
+
+    def dns_reconcile_app(self, app_id: str, domain: str, *, exclude_app: bool = False) -> dict[str, Any]:
+        """Reconcile a domain after an app's ``[dns.*]`` records changed.
+
+        Used by the package engine's ``dns.records.ensure`` / ``.remove``
+        lifecycle steps. ``dns.records.remove`` runs before the app manifest
+        is deleted (plan removal reverses in reverse order), so it passes
+        ``exclude_app=True`` to drop the departing app's records from the
+        desired set — the reconciler then deletes exactly its owned records.
+        The domain must be registered as a native domain (app records are
+        enforced through the domain's provider).
+        """
+        self._require(domain)
+        return self._dns_apply_named(domain, exclude_app=app_id if exclude_app else None)
+
+    def _dns_apply_named(self, name: str, *, exclude_app: str | None = None) -> dict[str, Any]:
+        domain = self._require(name)
+        zone = self._zone_for(domain)
+        provider = self._provider(domain, zone)
+        desired = self._desired(domain, exclude_app=exclude_app)
         actual = provider.list_records(zone)
         plan = reconciler.build_plan(desired, actual)
         applied = reconciler.apply_plan(plan, provider)
@@ -268,20 +307,74 @@ class DomainService:
         return domain
 
     def _zone_for(self, domain: DomainResource) -> str:
-        from .planner import discover_zone
+        if domain.provider.type == "manual":
+            from .planner import discover_zone
 
-        return discover_zone(domain.name, provider_zone=domain.provider.zone, registered=native_domain_names(self.state_dir))
+            return discover_zone(domain.name, provider_zone=domain.provider.zone, registered=native_domain_names(self.state_dir))
+        provider = self._provider(domain)
+        try:
+            return provider.discover_zone(domain.name)
+        except Exception as exc:  # noqa: BLE001 - surface provider zone failures
+            raise DomainError(f"cannot discover zone for {domain.name}: {exc}") from exc
 
-    def _provider(self, domain: DomainResource, zone: str):
-        provider = self.provider_factory(domain.provider, self.state_dir)
-        if isinstance(provider, ManualProvider) and not provider.zone:
-            provider.zone = zone
+    def _provider(self, domain: DomainResource, zone: str | None = None):
+        provider: Any = self.provider_factory(domain.provider, self.state_dir)
+        if getattr(provider, "zone", None) is not None:
+            provider.zone = provider.zone or zone or domain.name
         return provider
 
-    def _desired(self, domain: DomainResource) -> list[DnsRecord]:
+    def _desired(self, domain: DomainResource, *, exclude_app: str | None = None) -> list[DnsRecord]:
         from .planner import desired_records
 
-        return desired_records(domain, ipv4=self.public_ipv4(), ipv6=self.public_ipv6())
+        records = desired_records(domain, ipv4=self.public_ipv4(), ipv6=self.public_ipv6())
+        records.extend(self._app_records(domain, exclude=exclude_app))
+        return records
+
+    def _app_records(self, domain: DomainResource, *, exclude: str | None = None) -> list[DnsRecord]:
+        """Fold in ``[dns.*]`` records declared by native apps on this domain.
+
+        Each folded record is owned by ``app:<id>`` so reconciliation is
+        bounded: an app's records are created/updated with its install and
+        deleted when the app (or its records) go away. Only apps whose
+        ``web.domain`` is exactly this domain fold here; apps on subdomains
+        reconcile under their own (registered) native domain.
+        """
+        records: list[DnsRecord] = []
+        packages_dir = self.state_dir / "packages"
+        if not packages_dir.is_dir():
+            return records
+        for path in packages_dir.glob("*-manifest.json"):
+            app_id = path.name[: -len("-manifest.json")]
+            if exclude and app_id == exclude:
+                continue
+            try:
+                from ..native_providers import installed_package_manifest
+
+                manifest = installed_package_manifest(app_id, state_dir=packages_dir)
+                if not isinstance(manifest, dict):
+                    continue
+                web = manifest.get("web") or {}
+                if str((web or {}).get("domain", "")).rstrip(".") != domain.name:
+                    continue
+                for declared in (manifest.get("dns") or {}).values():
+                    if not isinstance(declared, dict):
+                        continue
+                    try:
+                        records.append(
+                            DnsRecord(
+                                zone=domain.name,
+                                name=str(declared.get("name") or "@"),
+                                type=str(declared["type"]).upper(),
+                                value=str(declared["value"]),
+                                ttl=int(declared.get("ttl") or 3600),
+                                owner=f"app:{app_id}",
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 - skip malformed app records
+                        continue
+            except (json.JSONDecodeError, OSError):
+                continue
+        return records
 
     def _ensure_domain_site(self, name: str) -> str:
         if self.caddy is None:

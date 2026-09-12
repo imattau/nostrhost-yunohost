@@ -1652,6 +1652,49 @@ class CaddyProvider:
         return [Operation("web.route.remove", label or "web", desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
 
 
+class DnsRecordsProvider:
+    """Enforce/remove an app's ``[dns.*]`` records through its native domain.
+
+    The apply step re-runs the domain's reconciliation with the app's records
+    folded in (install/upgrade) or excluded (removal), so the domain's
+    provider creates/updates the owned records or deletes exactly the
+    departing app's records. Domain must be a registered native domain.
+    """
+
+    resource_type = "dns.records"
+
+    def __init__(self, *, reconciler: Callable[[str, str, bool], Any] | None = None) -> None:
+        self.reconciler = reconciler
+
+    def _run(self, app_id: str, domain: str, exclude_app: bool) -> Any:
+        if self.reconciler is not None:
+            return self.reconciler(app_id, domain, exclude_app)
+        from .domains.service import DomainService
+
+        return DomainService().dns_reconcile_app(app_id, domain, exclude_app=exclude_app)
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        return {"app": desired.get("app"), "domain": desired.get("domain"), "records": desired.get("records", [])}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        app = desired.get("app")
+        domain = desired.get("domain") or ""
+        return [Operation("dns.records.ensure", f"{app}:dns", desired, risk="medium", reverse="dns.records.remove", summary=f"enforce DNS records for {app} on {domain}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        exclude_app = operation.name == "dns.records.remove"
+        result = self._run(operation.args.get("app", ""), operation.args.get("domain", ""), exclude_app)
+        return {"app": operation.args.get("app"), "domain": operation.args.get("domain"), "reconciled": result, "ok": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        app = desired.get("app")
+        domain = desired.get("domain") or ""
+        return [Operation("dns.records.remove", f"{app}:dns", desired, risk="medium", reverse="dns.records.ensure", summary=f"remove DNS records for {app} from {domain}")]
+
+
 class NativeOperationExecutor:
     """Apply only operations backed by registered native providers."""
 
@@ -1704,6 +1747,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
+        "dns.records": DnsRecordsProvider(),
     }
     if caddy_client is None and root == Path("/"):
         # Real host: talk to the local Caddy admin API with @id-tagged routes.

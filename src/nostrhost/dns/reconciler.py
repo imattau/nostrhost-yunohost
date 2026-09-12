@@ -63,15 +63,15 @@ def build_plan(desired: list[DnsRecord], actual: list[DnsRecord]) -> DnsPlan:
         if current is None:
             changes.append(DnsChange(action="create", record=record, note="missing on provider"))
         elif current.value != record.value or current.ttl != record.ttl:
-            changes.append(DnsChange(action="update", record=record, provider_id=record.fingerprint(), note="value/ttl differs"))
+            changes.append(DnsChange(action="update", record=record, provider_id=current.provider_id or record.fingerprint(), note="value/ttl differs"))
         else:
-            changes.append(DnsChange(action="keep", record=record, provider_id=record.fingerprint()))
+            changes.append(DnsChange(action="keep", record=record, provider_id=current.provider_id or record.fingerprint()))
 
     for record in actual:
         if record.diff_key() in desired_index:
             continue
         if _owned(record):
-            changes.append(DnsChange(action="delete", record=record, provider_id=record.fingerprint(), note="no longer desired"))
+            changes.append(DnsChange(action="delete", record=record, provider_id=record.provider_id or record.fingerprint(), note="no longer desired"))
         else:
             preserved.append(record)
 

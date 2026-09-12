@@ -59,6 +59,9 @@ from yunohost.nostr_operations import (
     OperationError,
     _safe_app_list,
     _safe_app_remove,
+    _safe_credential_list,
+    _safe_credential_remove,
+    _safe_credential_set,
     _safe_dns_apply,
     _safe_dns_plan,
     _safe_dns_verify,
@@ -109,6 +112,9 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "dns.apply": _safe_dns_apply,
     "dns.verify": _safe_dns_verify,
     "network.public_ip": _safe_network_public_ip,
+    "credential.set": _safe_credential_set,
+    "credential.remove": _safe_credential_remove,
+    "credential.list": _safe_credential_list,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
@@ -928,8 +934,9 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @domain.command("add")
     def domain_add(
         name: str = typer.Argument(..., help="domain name"),
-        provider_type: str = typer.Option("manual", "--provider-type", help="dns provider (manual today)"),
+        provider_type: str = typer.Option("manual", "--provider-type", help="dns provider (manual or cloudflare)"),
         provider_zone: str = typer.Option(None, "--provider-zone", help="override the authoritative zone"),
+        credential: str = typer.Option(None, "--credential", help="secret:dns/<provider>/<name> credential ref (cloudflare)"),
         primary: bool = typer.Option(False, "--primary", help="mark as the primary domain"),
         ipv4: bool = typer.Option(True, "--ipv4/--no-ipv4", help="manage A records"),
         ipv6: bool = typer.Option(True, "--ipv6/--no-ipv6", help="manage AAAA records"),
@@ -952,6 +959,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                     "domain": name,
                     "provider_type": provider_type,
                     "provider_zone": provider_zone,
+                    "credential": credential,
                     "primary": primary,
                     "ipv4": ipv4,
                     "ipv6": ipv6,
@@ -1027,6 +1035,46 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     def network_public_ip(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Current public IPv4/IPv6 address."""
         _guard(lambda: _run_tool("network.public_ip", {}), output_as)
+
+    # -- credential ----------------------------------------------------------
+
+    credential = typer.Typer(name="credential", help="DNS provider credential broker", no_args_is_help=True)
+
+    @credential.command("set")
+    def credential_set(
+        provider: str = typer.Argument(..., help="dns provider (cloudflare)"),
+        name: str = typer.Argument(..., help="credential name"),
+        value: str = typer.Option(..., "--value", help="provider token (stored root-0600; never echoed)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Store a DNS provider token: secret:dns/<provider>/<name>."""
+        def run() -> Any:
+            body = _run_lifecycle("credential.set", {"provider": provider, "name": name, "value": value}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"credential.set rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            result = body.get("result") or body
+            return {"ref": result.get("ref"), "path": result.get("path"), "set": True}
+        _guard(run, output_as)
+
+    @credential.command("remove")
+    def credential_remove(
+        provider: str = typer.Argument(..., help="dns provider"),
+        name: str = typer.Argument(..., help="credential name"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove a DNS provider token."""
+        def run() -> Any:
+            body = _run_lifecycle("credential.remove", {"provider": provider, "name": name}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"credential.remove rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            result = body.get("result") or body
+            return {"ref": result.get("ref"), "removed": result.get("removed")}
+        _guard(run, output_as)
+
+    @credential.command("list")
+    def credential_list(provider: str = typer.Option(None, "--provider", help="filter by provider"), output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List configured DNS credential references (names only)."""
+        _guard(lambda: _run_tool("credential.list", {"provider": provider}), output_as)
 
     # -- package ------------------------------------------------------------
 
@@ -1272,7 +1320,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, network):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app

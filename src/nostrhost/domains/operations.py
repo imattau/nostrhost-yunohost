@@ -36,6 +36,7 @@ def _safe_domain_add(
     domain: str = "",
     provider_type: str = "manual",
     provider_zone: str | None = None,
+    credential: str | None = None,
     primary: bool = False,
     ipv4: bool = True,
     ipv6: bool = True,
@@ -51,11 +52,18 @@ def _safe_domain_add(
     from ..dns.models import DnsProviderResource, DnsProviderCapabilities
     from .models import DomainExposure, DomainNostr, DomainTls
 
+    if provider_type == "cloudflare" and not credential:
+        raise NostrHostError("domain.add with the cloudflare provider requires a --credential secret:dns/cloudflare/<name> reference")
+    if provider_type == "cloudflare":
+        from ..credentials import resolve as resolve_credential
+
+        resolve_credential(credential or "")  # fails fast on a missing/typo'd ref
+
     try:
         resource = DomainResource(
             name=domain,
             primary=primary,
-            provider=DnsProviderResource(type=provider_type, zone=provider_zone, capabilities=DnsProviderCapabilities()),
+            provider=DnsProviderResource(type=provider_type, zone=provider_zone, credential=credential, capabilities=DnsProviderCapabilities()),
             exposure=DomainExposure(ipv4=ipv4, ipv6=ipv6, wildcard=wildcard),
             tls=DomainTls(caa=list(tls_caa or [])),
             nostr=DomainNostr(nip05=nip05),
@@ -106,3 +114,29 @@ def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
         raise NostrHostError("network.public_ip takes no arguments")
     service = _service()
     return {"ipv4": service.public_ipv4(), "ipv6": service.public_ipv6()}
+
+
+# -- credential broker ------------------------------------------------------ #
+
+def _safe_credential_set(provider: str = "", name: str = "", value: str = "", **args: Any) -> dict[str, Any]:
+    if args or not provider or not name:
+        raise NostrHostError("credential.set requires a provider and a name")
+    from ..credentials import set_secret
+
+    return set_secret(f"secret:dns/{provider}/{name}", value)
+
+
+def _safe_credential_remove(provider: str = "", name: str = "", **args: Any) -> dict[str, Any]:
+    if args or not provider or not name:
+        raise NostrHostError("credential.remove requires a provider and a name")
+    from ..credentials import remove_secret
+
+    return remove_secret(f"secret:dns/{provider}/{name}")
+
+
+def _safe_credential_list(provider: str | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError("credential.list accepts only an optional provider")
+    from ..credentials import list_secrets
+
+    return {"credentials": list_secrets(provider)}

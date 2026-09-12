@@ -25,6 +25,8 @@ def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
         return "domains.write"
     if tool == "dns.apply":
         return "domains.dns"
+    if tool in ("credential.set", "credential.remove"):
+        return "dns.credentials.write"
     if tool == "package.reconcile":
         plan = args.get("plan")
         operations = plan.get("operations", []) if isinstance(plan, dict) else plan or []

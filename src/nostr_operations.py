@@ -74,6 +74,8 @@ SCOPE_STATE_WRITE = "state.write"
 SCOPE_DOMAINS_READ = "domains.read"
 SCOPE_DOMAINS_WRITE = "domains.write"
 SCOPE_DNS_WRITE = "dns.write"
+SCOPE_DNS_CREDENTIALS_WRITE = "dns.credentials.write"
+SCOPE_DNS_CREDENTIALS_READ = "dns.credentials.read"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -85,6 +87,8 @@ KNOWN_SCOPES = frozenset(
         SCOPE_DOMAINS_READ,
         SCOPE_DOMAINS_WRITE,
         SCOPE_DNS_WRITE,
+        SCOPE_DNS_CREDENTIALS_WRITE,
+        SCOPE_DNS_CREDENTIALS_READ,
     }
 )
 
@@ -373,6 +377,24 @@ def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
     return _impl(**args)
 
 
+def _safe_credential_set(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_set as _impl
+
+    return _impl(**args)
+
+
+def _safe_credential_remove(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_remove as _impl
+
+    return _impl(**args)
+
+
+def _safe_credential_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_list as _impl
+
+    return _impl(**args)
+
+
 def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     if args:
         raise OperationError(f"state.reconcile does not accept extra args: {sorted(args)}")
@@ -494,6 +516,25 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_SERVER_READ,
         require_approval=False,
         description="current public IPv4/IPv6 address",
+    ),
+    "credential.set": ToolSpec(
+        name="credential.set",
+        handler=_safe_credential_set,
+        scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        description="store a DNS provider token in the credential broker (secret:dns/<provider>/<name>)",
+    ),
+    "credential.remove": ToolSpec(
+        name="credential.remove",
+        handler=_safe_credential_remove,
+        scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        description="remove a DNS provider token from the credential broker",
+    ),
+    "credential.list": ToolSpec(
+        name="credential.list",
+        handler=_safe_credential_list,
+        scope=SCOPE_DNS_CREDENTIALS_READ,
+        require_approval=False,
+        description="list configured DNS credential references (names only, never values)",
     ),
 }
 

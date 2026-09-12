@@ -100,6 +100,19 @@ def delete_record_entry(state_dir: Path, zone: str, record_id: str) -> bool:
     return False
 
 
+def delete_record_by_provider_id(state_dir: Path, zone: str, provider_id: str) -> bool:
+    """Delete the mirror entry whose provider record id matches (used by
+    providers whose ids differ from the fingerprint, e.g. Cloudflare)."""
+    state = load_zone_state(state_dir, zone)
+    records = state.get("records", {})
+    for record_id, raw in list(records.items()):
+        if isinstance(raw, dict) and raw.get("provider_id") == provider_id:
+            del records[record_id]
+            save_zone_state(state_dir, zone, state)
+            return True
+    return False
+
+
 def owned_record_ids(state_dir: Path, zone: str) -> set[str]:
     return set(load_zone_state(state_dir, zone).get("records", {}).keys())
 

@@ -50,11 +50,19 @@ class DnsProvider(Protocol):
 def build_provider(resource: DnsProviderResource, state_dir: Path) -> DnsProvider:
     """Instantiate a provider from its resource declaration.
 
-    ``credential`` is resolved by the provider itself (currently only the
-    manual provider exists; Cloudflare lands in W4 Phase B).
+    ``credential`` is resolved by the provider itself (via the ``secret:``
+    reference and the credential broker) so operators/agents never see tokens.
     """
     from .manual import ManualProvider
 
     if resource.type == "manual":
         return ManualProvider(zone=resource.zone or "", state_dir=state_dir)
+    if resource.type == "cloudflare":
+        from .cloudflare import CloudflareProvider
+
+        return CloudflareProvider(
+            credential=resource.credential,
+            zone=resource.zone or "",
+            state_dir=state_dir,
+        )
     raise ValueError(f"DNS provider {resource.type!r} is not implemented yet")

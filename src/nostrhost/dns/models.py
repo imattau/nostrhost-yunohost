@@ -78,6 +78,7 @@ class DnsRecord(BaseModel):
     value: str
     ttl: int = 3600
     owner: str = "nostrhost"
+    provider_id: str | None = None
 
     @validator("type")
     def known_type(cls, value: str) -> str:
