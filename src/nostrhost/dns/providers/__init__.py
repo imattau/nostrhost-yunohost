@@ -8,13 +8,18 @@ credentials internally (via the ``secret:` reference on
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..models import DnsProviderCapabilities, DnsProviderResource, DnsRecord
 
 
 class DnsProvider(Protocol):
-    """The minimal surface every provider implements."""
+    """The full-zone surface a provider implements (``full_zone=True``).
+
+    Dynamic-IP-only providers (``capabilities.full_zone is False``) instead
+    implement :meth:`push_records` and do not offer the record CRUD surface;
+    the domain service routes them through the point-to-point push path.
+    """
 
     capabilities: DnsProviderCapabilities
 
@@ -47,11 +52,30 @@ class DnsProvider(Protocol):
         ...
 
 
-def build_provider(resource: DnsProviderResource, state_dir: Path) -> DnsProvider:
+def provider_capabilities(provider_type: str) -> DnsProviderCapabilities:
+    """The default capabilities a provider type advertises.
+
+    Kept in one place so the domain resource state, the built provider and
+    the capability-model consumers all agree on what a provider can do.
+    """
+    defaults: dict[str, dict] = {
+        "manual": {"dynamic_ip": True, "full_zone": True, "wildcard": True, "txt": True, "caa": True},
+        "cloudflare": {"dynamic_ip": True, "full_zone": True, "wildcard": True, "txt": True, "caa": True},
+        "desec": {"dynamic_ip": True, "full_zone": True, "wildcard": True, "txt": True, "caa": True},
+        "duckdns": {"dynamic_ip": True, "full_zone": False, "wildcard": False, "txt": True, "caa": False},
+        "dynu": {"dynamic_ip": True, "full_zone": False, "wildcard": False, "txt": False, "caa": False},
+    }
+    if provider_type not in defaults:
+        raise ValueError(f"unknown DNS provider {provider_type!r}")
+    return DnsProviderCapabilities(**defaults[provider_type])
+
+
+def build_provider(resource: DnsProviderResource, state_dir: Path) -> Any:
     """Instantiate a provider from its resource declaration.
 
-    ``credential`` is resolved by the provider itself (via the ``secret:``
-    reference and the credential broker) so operators/agents never see tokens.
+    Returns a full-zone provider (``capabilities.full_zone``) or a
+    dynamic-IP-only provider (``push_records``) depending on ``resource.type``;
+    consumers branch on ``provider.capabilities``.
     """
     from .manual import ManualProvider
 
@@ -61,6 +85,30 @@ def build_provider(resource: DnsProviderResource, state_dir: Path) -> DnsProvide
         from .cloudflare import CloudflareProvider
 
         return CloudflareProvider(
+            credential=resource.credential,
+            zone=resource.zone or "",
+            state_dir=state_dir,
+        )
+    if resource.type == "duckdns":
+        from .duckdns import DuckDnsProvider
+
+        return DuckDnsProvider(
+            credential=resource.credential,
+            zone=resource.zone or "",
+            state_dir=state_dir,
+        )
+    if resource.type == "dynu":
+        from .dynu import DynuProvider
+
+        return DynuProvider(
+            credential=resource.credential,
+            zone=resource.zone or "",
+            state_dir=state_dir,
+        )
+    if resource.type == "desec":
+        from .desec import DesecProvider
+
+        return DesecProvider(
             credential=resource.credential,
             zone=resource.zone or "",
             state_dir=state_dir,

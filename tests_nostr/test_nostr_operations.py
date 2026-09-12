@@ -60,6 +60,7 @@ def test_registry_has_the_safe_tools():
         "dns.apply",
         "dns.plan",
         "dns.verify",
+        "dns.watch",
         "domain.add",
         "domain.inspect",
         "domain.list",
@@ -86,7 +87,7 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("dns.plan").require_approval is False
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "network.public_ip", "credential.list"):
+        if name not in ("package.plan", "domain.list", "domain.inspect", "dns.plan", "dns.verify", "dns.watch", "network.public_ip", "credential.list"):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is None
 

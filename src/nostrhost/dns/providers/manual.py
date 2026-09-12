@@ -36,12 +36,17 @@ class ManualProvider:
         return ownership.owned_records(self.state_dir, zone)
 
     def create_record(self, record: DnsRecord) -> str:
-        record_id = ownership.create_record_entry(self.state_dir, record)
+        # Idempotent by diff key: keyed by the current fingerprint so a
+        # re-created record never accumulates a stale sibling.
+        ownership.replace_record_by_diff_key(self.state_dir, record.zone, record)
         ownership.set_zone_provider(self.state_dir, record.zone, "manual")
-        return record_id
+        return record.fingerprint()
 
     def update_record(self, provider_id: str, record: DnsRecord) -> None:
-        ownership.update_record_entry(self.state_dir, provider_id, record)
+        # The manual mirror is content-addressed by fingerprint, so a value
+        # change replaces every entry with the same diff key (re-keying to
+        # the record's current fingerprint) rather than leaving a stale one.
+        ownership.replace_record_by_diff_key(self.state_dir, record.zone or self.zone, record)
 
     def delete_record(self, provider_id: str) -> None:
         ownership.delete_record_entry(self.state_dir, self.zone, provider_id)

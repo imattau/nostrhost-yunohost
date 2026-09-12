@@ -90,6 +90,24 @@ def update_record_entry(state_dir: Path, record_id: str, record: DnsRecord) -> N
     save_zone_state(state_dir, record.zone, state)
 
 
+def replace_record_by_provider_id(state_dir: Path, zone: str, provider_id: str, record: DnsRecord) -> None:
+    """Replace a mirror entry identified by a provider record id.
+
+    Providers whose record id differs from the fingerprint (Cloudflare,
+    deSEC) must use this on update: it drops any entry already carrying the
+    provider id (so a value change, e.g. a DDNS IP flip, never leaves a
+    stale fingerprint entry behind) and writes the record under its current
+    fingerprint.
+    """
+    state = load_zone_state(state_dir, zone)
+    records = state.get("records", {})
+    for record_id, raw in list(records.items()):
+        if isinstance(raw, dict) and raw.get("provider_id") == provider_id:
+            del records[record_id]
+    records[record.fingerprint()] = record_entry(record)
+    save_zone_state(state_dir, zone, state)
+
+
 def delete_record_entry(state_dir: Path, zone: str, record_id: str) -> bool:
     state = load_zone_state(state_dir, zone)
     records = state.get("records", {})
@@ -111,6 +129,24 @@ def delete_record_by_provider_id(state_dir: Path, zone: str, provider_id: str) -
             save_zone_state(state_dir, zone, state)
             return True
     return False
+
+
+def replace_record_by_diff_key(state_dir: Path, zone: str, record: DnsRecord) -> None:
+    """Replace every entry with ``record``'s diff key by ``record``.
+
+    Used by the manual provider (whose mirror is content-addressed by
+    fingerprint) on create/update: a record is keyed by its current
+    fingerprint, so a value change (e.g. a DDNS IP flip) never leaves a
+    stale fingerprint entry behind.
+    """
+    state = load_zone_state(state_dir, zone)
+    records = state.get("records", {})
+    diff_key = record.diff_key()
+    for record_id, raw in list(records.items()):
+        if isinstance(raw, dict) and (raw.get("zone"), raw.get("name"), raw.get("type")) == diff_key:
+            del records[record_id]
+    records[record.fingerprint()] = record_entry(record)
+    save_zone_state(state_dir, zone, state)
 
 
 def owned_record_ids(state_dir: Path, zone: str) -> set[str]:

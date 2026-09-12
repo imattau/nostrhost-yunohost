@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""nostr-ddnswatchd — DDNS IP watcher daemon (W4 Phase C).
+
+Polls the public IPv4/IPv6 address and reconciles dynamic-IP domains on
+change (DuckDNS/Dynu via point-to-point push, manual/cloudflare/deSEC via
+the normal reconcile). Run as root. Config via /etc/nostrhost/ddns.toml or
+NOSTRHOST_DDNS_INTERVAL / NOSTRHOST_DDNS_CONFIG env vars.
+"""
+from __future__ import annotations
+
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+# Prefer the bundled runtime venv: the runtime's wheels (coincurve, ...) are
+# only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
+# for nodes where the runtime has not been installed yet. The venv's python
+# binary is a symlink to the system interpreter, so detect it via sys.prefix
+# rather than the executable path.
+_VENV = _Path("/opt/nostrhost/venv")
+if (_VENV / "bin/python3").is_file() and _Path(_sys.prefix) != _VENV:
+    _os.execv(str(_VENV / "bin/python3"), [str(_VENV / "bin/python3"), _sys.argv[0]] + _sys.argv[1:])
+
+import sys
+from yunohost.nostr_ddnswatch import run
+
+if __name__ == "__main__":
+    sys.exit(run())

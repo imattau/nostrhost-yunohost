@@ -247,7 +247,7 @@ class CloudflareProvider:
         zone = record.zone or self.zone
         entry = self._record_to_entry(record)
         api.update_record(zone, provider_id, record.fqdn(), entry["type"], entry["content"], record.ttl)
-        ownership.update_record_entry(self.state_dir, record.fingerprint(), record.copy(update={"provider_id": provider_id, "zone": zone}))
+        ownership.replace_record_by_provider_id(self.state_dir, zone, provider_id, record.copy(update={"provider_id": provider_id, "zone": zone}))
 
     def delete_record(self, provider_id: str) -> None:
         api = self._get_api()

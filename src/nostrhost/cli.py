@@ -65,6 +65,7 @@ from yunohost.nostr_operations import (
     _safe_dns_apply,
     _safe_dns_plan,
     _safe_dns_verify,
+    _safe_dns_watch,
     _safe_domain_add,
     _safe_domain_inspect,
     _safe_domain_list,
@@ -111,6 +112,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "dns.plan": _safe_dns_plan,
     "dns.apply": _safe_dns_apply,
     "dns.verify": _safe_dns_verify,
+    "dns.watch": _safe_dns_watch,
     "network.public_ip": _safe_network_public_ip,
     "credential.set": _safe_credential_set,
     "credential.remove": _safe_credential_remove,
@@ -356,6 +358,7 @@ POSTINSTALL_UNITS = [
     "nostr-identityd",
     "nostr-operationsd",
     "nostr-securityd",
+    "nostr-ddnswatchd",
     "nostr-api",
     "nostr-portal-api",
     "nostrhost-certd.timer",
@@ -1026,6 +1029,11 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     ) -> None:
         """Verify a domain's DNS records resolve."""
         _guard(lambda: _run_tool("dns.verify", {"domain": name}), output_as)
+
+    @dns.command("watch")
+    def dns_watch(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """DDNS watcher status: last-seen public IPs and dynamic domains."""
+        _guard(lambda: _run_tool("dns.watch", {}), output_as)
 
     # -- network ------------------------------------------------------------
 

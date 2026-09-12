@@ -129,7 +129,8 @@ def test_manual_provider_roundtrip(tmp_path):
     assert provider.list_records("w4.test") == [record]
     provider.update_record(record_id, _a(value="5.6.7.8"))
     assert provider.list_records("w4.test")[0].value == "5.6.7.8"
-    provider.delete_record(record_id)
+    # the manual mirror is keyed by fingerprint, so delete by the current one
+    provider.delete_record(provider.list_records("w4.test")[0].fingerprint())
     assert provider.list_records("w4.test") == []
 
 

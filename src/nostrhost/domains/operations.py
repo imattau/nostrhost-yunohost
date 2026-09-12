@@ -49,12 +49,13 @@ def _safe_domain_add(
 ) -> dict[str, Any]:
     if args or not domain:
         raise NostrHostError("domain.add requires a domain name")
-    from ..dns.models import DnsProviderResource, DnsProviderCapabilities
+    from ..dns.models import DnsProviderResource
+    from ..dns.providers import provider_capabilities
     from .models import DomainExposure, DomainNostr, DomainTls
 
-    if provider_type == "cloudflare" and not credential:
-        raise NostrHostError("domain.add with the cloudflare provider requires a --credential secret:dns/cloudflare/<name> reference")
-    if provider_type == "cloudflare":
+    if provider_type != "manual" and not credential:
+        raise NostrHostError(f"domain.add with the {provider_type} provider requires a --credential secret:dns/{provider_type}/<name> reference")
+    if provider_type != "manual":
         from ..credentials import resolve as resolve_credential
 
         resolve_credential(credential or "")  # fails fast on a missing/typo'd ref
@@ -63,7 +64,7 @@ def _safe_domain_add(
         resource = DomainResource(
             name=domain,
             primary=primary,
-            provider=DnsProviderResource(type=provider_type, zone=provider_zone, credential=credential, capabilities=DnsProviderCapabilities()),
+            provider=DnsProviderResource(type=provider_type, zone=provider_zone, credential=credential, capabilities=provider_capabilities(provider_type)),
             exposure=DomainExposure(ipv4=ipv4, ipv6=ipv6, wildcard=wildcard),
             tls=DomainTls(caa=list(tls_caa or [])),
             nostr=DomainNostr(nip05=nip05),
@@ -107,6 +108,24 @@ def _safe_dns_verify(domain: str = "", **args: Any) -> dict[str, Any]:
         return _service().dns_verify(domain)
     except DomainError as exc:
         raise NostrHostError(str(exc)) from exc
+
+
+def _safe_dns_watch(**args: Any) -> dict[str, Any]:
+    """DDNS watcher status: last-seen public addresses, last update and the
+    dynamic-IP domains the watcher would reconcile."""
+    if args:
+        raise NostrHostError("dns.watch takes no arguments")
+    from ..network.ddns import WatchState
+
+    service = _service()
+    state = WatchState(state_dir=service.state_dir)
+    return {
+        "ipv4": state.last_ipv4,
+        "ipv6": state.last_ipv6,
+        "last_update": state.last_update,
+        "dynamic_domains": service.dynamic_domains(),
+        "state": str(state.path),
+    }
 
 
 def _safe_network_public_ip(**args: Any) -> dict[str, Any]:

@@ -138,16 +138,26 @@ class DomainService:
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain)
-        actual = provider.list_records(zone)
-        plan = reconciler.build_plan(desired, actual)
+        full_zone = self._full_zone(provider)
+        if full_zone:
+            actual = provider.list_records(zone)
+            plan = reconciler.build_plan(desired, actual)
+            drift = self._drift_report(plan)
+            plan_out: dict[str, Any] = {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]}
+            actual_out: list[dict[str, Any]] = [r.dict() for r in actual]
+        else:
+            plan_out = {"mode": "push", "records": [r.dict() for r in self._address_records(desired)]}
+            actual_out = []
+            drift = {"in_sync": None, "note": "dynamic-IP only provider; records are pushed point-to-point, not enumerated"}
         return {
             "domain": domain.dict(),
             "zone": zone,
-            "provider": {"type": domain.provider.type, "zone": zone, "credential": domain.provider.credential},
+            "provider": {"type": domain.provider.type, "zone": zone, "credential": domain.provider.credential, "capabilities": self._caps(provider)},
+            "mode": "full_zone" if full_zone else "dynamic",
             "desired": [r.dict() for r in desired],
-            "actual": [r.dict() for r in actual],
-            "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
-            "drift": self._drift_report(plan),
+            "actual": actual_out,
+            "plan": plan_out,
+            "drift": drift,
             "state": str(domain_state_path(self.state_dir, name)),
         }
 
@@ -161,12 +171,19 @@ class DomainService:
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain)
-        actual = provider.list_records(zone)
-        plan = reconciler.build_plan(desired, actual)
+        full_zone = self._full_zone(provider)
 
         applied: list[dict[str, Any]] = []
+        plan_out: dict[str, Any] = {"mode": "skip"}
         if apply_dns:
-            applied = reconciler.apply_plan(plan, provider)
+            if full_zone:
+                actual = provider.list_records(zone)
+                plan = reconciler.build_plan(desired, actual)
+                applied = reconciler.apply_plan(plan, provider)
+                plan_out = {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]}
+            else:
+                applied = provider.push_records(desired)
+                plan_out = {"mode": "push", "records": [r.dict() for r in self._address_records(desired)]}
 
         routes: dict[str, Any] = {"domain_site": self._ensure_domain_site(domain.name)}
         if domain.nostr.nip05:
@@ -177,14 +194,16 @@ class DomainService:
 
         verification: list[dict[str, Any]] = []
         if verify and apply_dns:
-            verification = reconciler.verify_plan(desired, provider)
+            verify_records = desired if full_zone else self._address_records(desired)
+            verification = reconciler.verify_plan(verify_records, provider)
 
         return {
             "action": "domain.add",
             "domain": domain.name,
             "zone": zone,
             "provider": domain.provider.type,
-            "dns_plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
+            "mode": "full_zone" if full_zone else "dynamic",
+            "dns_plan": plan_out,
             "applied": applied,
             "routes": routes,
             "verify": verification,
@@ -202,11 +221,14 @@ class DomainService:
 
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
-        owned = [r for r in provider.list_records(zone) if r.is_on_domain(domain.name) and _owned(r)]
         deleted: list[dict[str, Any]] = []
-        for record in owned:
-            provider.delete_record(record.fingerprint())
-            deleted.append({"action": "delete", "record": record.fingerprint(), "type": record.type, "name": record.fqdn()})
+        if self._full_zone(provider):
+            owned = [r for r in provider.list_records(zone) if r.is_on_domain(domain.name) and _owned(r)]
+            for record in owned:
+                provider.delete_record(record.provider_id or record.fingerprint())
+                deleted.append({"action": "delete", "record": record.fingerprint(), "type": record.type, "name": record.fqdn()})
+        else:
+            deleted.append({"action": "note", "record": "dynamic-IP only provider; the hostname's address record stays at the provider (external cleanup required)"})
 
         if self.caddy is not None:
             self.caddy.remove_domain_site(domain.name)
@@ -237,13 +259,23 @@ class DomainService:
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain)
-        actual = provider.list_records(zone)
-        plan = reconciler.build_plan(desired, actual)
+        if self._full_zone(provider):
+            actual = provider.list_records(zone)
+            plan = reconciler.build_plan(desired, actual)
+            return {
+                "domain": name,
+                "zone": zone,
+                "mode": "full_zone",
+                "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
+                "drift": self._drift_report(plan),
+            }
+        address = self._address_records(desired)
         return {
             "domain": name,
             "zone": zone,
-            "plan": {"summary": plan.summarize(), "changes": [c.dict() for c in plan.changes], "preserved": [r.dict() for r in plan.preserved]},
-            "drift": self._drift_report(plan),
+            "mode": "dynamic",
+            "plan": {"mode": "push", "records": [r.dict() for r in address]},
+            "drift": {"in_sync": None, "note": "dynamic-IP only provider; A/AAAA are pushed point-to-point on IP change"},
         }
 
     def _drift_report(self, plan: Any) -> dict[str, Any]:
@@ -261,10 +293,13 @@ class DomainService:
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain)
+        if not self._full_zone(provider):
+            pushed = provider.push_records(desired)
+            return {"domain": name, "zone": zone, "mode": "push", "pushed": pushed, "ok": True}
         actual = provider.list_records(zone)
         plan = reconciler.build_plan(desired, actual)
         applied = reconciler.apply_plan(plan, provider)
-        return {"domain": name, "zone": zone, "applied": applied, "ok": True}
+        return {"domain": name, "zone": zone, "mode": "full_zone", "applied": applied, "ok": True}
 
     def dns_reconcile_app(self, app_id: str, domain: str, *, exclude_app: bool = False) -> dict[str, Any]:
         """Reconcile a domain after an app's ``[dns.*]`` records changed.
@@ -285,10 +320,46 @@ class DomainService:
         zone = self._zone_for(domain)
         provider = self._provider(domain, zone)
         desired = self._desired(domain, exclude_app=exclude_app)
+        if not self._full_zone(provider):
+            pushed = provider.push_records(desired)
+            return {"domain": name, "zone": zone, "mode": "push", "pushed": pushed, "ok": True}
         actual = provider.list_records(zone)
         plan = reconciler.build_plan(desired, actual)
         applied = reconciler.apply_plan(plan, provider)
-        return {"domain": name, "zone": zone, "applied": applied, "ok": True}
+        return {"domain": name, "zone": zone, "mode": "full_zone", "applied": applied, "ok": True}
+
+    # -- DDNS: dynamic-IP domains + the watcher surface ---------------------- #
+
+    def dynamic_domains(self) -> list[str]:
+        """Registered domains whose provider advertises ``dynamic_ip``.
+
+        These are the domains the DDNS watcher reconciles on public-IP
+        change: full-zone providers through the normal plan/apply path,
+        dynamic-IP-only providers through their point-to-point push.
+        """
+        names: list[str] = []
+        for name in native_domain_names(self.state_dir):
+            try:
+                domain = self._require(name)
+                zone = self._zone_for(domain)
+                provider = self._provider(domain, zone)
+            except Exception:  # noqa: BLE001 - a broken provider must not block the watcher
+                continue
+            if self._dynamic_ok(provider):
+                names.append(name)
+        return names
+
+    def dns_update_dynamic(self, name: str | None = None) -> dict[str, Any]:
+        """Reconcile all dynamic-IP domains (or one, if ``name`` given)."""
+        targets = [name] if name else self.dynamic_domains()
+        updated: list[dict[str, Any]] = []
+        for dom in targets:
+            try:
+                result = self.dns_apply(dom)
+                updated.append({"domain": dom, "ok": True, "applied": result.get("applied") or result.get("pushed") or []})
+            except Exception as exc:  # noqa: BLE001 - one bad provider must not abort the sweep
+                updated.append({"domain": dom, "ok": False, "error": str(exc)})
+        return {"updated": updated}
 
     def dns_verify(self, name: str) -> dict[str, Any]:
         domain = self._require(name)
@@ -322,6 +393,32 @@ class DomainService:
         if getattr(provider, "zone", None) is not None:
             provider.zone = provider.zone or zone or domain.name
         return provider
+
+    @staticmethod
+    def _caps(provider: Any) -> dict[str, bool]:
+        caps = getattr(provider, "capabilities", None)
+        return {
+            "dynamic_ip": bool(getattr(caps, "dynamic_ip", False)),
+            "full_zone": bool(getattr(caps, "full_zone", True)),
+            "wildcard": bool(getattr(caps, "wildcard", True)),
+            "txt": bool(getattr(caps, "txt", True)),
+            "caa": bool(getattr(caps, "caa", True)),
+        }
+
+    @classmethod
+    def _full_zone(cls, provider: Any) -> bool:
+        caps = getattr(provider, "capabilities", None)
+        return bool(getattr(caps, "full_zone", True))
+
+    @classmethod
+    def _dynamic_ok(cls, provider: Any) -> bool:
+        caps = getattr(provider, "capabilities", None)
+        return bool(getattr(caps, "dynamic_ip", False))
+
+    @staticmethod
+    def _address_records(records: list[DnsRecord]) -> list[DnsRecord]:
+        """The apex A/AAAA records a dynamic-IP provider manages."""
+        return [r for r in records if r.type in ("A", "AAAA") and r.name == "@"]
 
     def _desired(self, domain: DomainResource, *, exclude_app: str | None = None) -> list[DnsRecord]:
         from .planner import desired_records

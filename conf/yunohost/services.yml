@@ -31,6 +31,8 @@ nostr-operationsd:
   category: admin
 nostr-securityd:
   category: security
+nostr-ddnswatchd:
+  category: network
 nostr-api:
   category: admin
 nostr-portal-api:

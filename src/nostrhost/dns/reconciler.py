@@ -30,7 +30,14 @@ class ProviderLike(Protocol):
 
 
 def _index(records: list[DnsRecord]) -> dict[tuple[str, str, str], DnsRecord]:
-    return {record.diff_key(): record for record in records}
+    """First-wins index by diff key (a duplicate diff-key is a stale entry
+    that the plan cleans up rather than lets shadow the current one)."""
+    index: dict[tuple[str, str, str], DnsRecord] = {}
+    for record in records:
+        key = record.diff_key()
+        if key not in index:
+            index[key] = record
+    return index
 
 
 def _owned(record: DnsRecord) -> bool:
@@ -43,6 +50,9 @@ def build_plan(desired: list[DnsRecord], actual: list[DnsRecord]) -> DnsPlan:
 
     Records absent from ``desired`` that NostrHost created (owned) are
     planned for deletion; foreign records are preserved and surfaced.
+    Multiple owned records sharing one diff key (a stale fingerprint entry
+    left behind by a value change) are collapsed to the current one and the
+    duplicates planned for deletion, keeping the ownership mirror honest.
 
     ``actual`` entries come from the provider's ``list_records``: providers
     tag the records NostrHost created with their ``owner`` (via the local
@@ -67,8 +77,17 @@ def build_plan(desired: list[DnsRecord], actual: list[DnsRecord]) -> DnsPlan:
         else:
             changes.append(DnsChange(action="keep", record=record, provider_id=current.provider_id or record.fingerprint()))
 
+    seen: set[tuple[str, str, str]] = set()
     for record in actual:
-        if record.diff_key() in desired_index:
+        key = record.diff_key()
+        if key in desired_index:
+            if key in seen:
+                # a stale duplicate of a record we still want: clean it up
+                if _owned(record):
+                    changes.append(DnsChange(action="delete", record=record, provider_id=record.provider_id or record.fingerprint(), note="stale duplicate of a desired record"))
+                else:
+                    preserved.append(record)
+            seen.add(key)
             continue
         if _owned(record):
             changes.append(DnsChange(action="delete", record=record, provider_id=record.provider_id or record.fingerprint(), note="no longer desired"))

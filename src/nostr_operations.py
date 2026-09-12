@@ -371,6 +371,12 @@ def _safe_dns_verify(domain: str = "", **args: Any) -> dict[str, Any]:
     return _impl(domain=domain, **args)
 
 
+def _safe_dns_watch(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_watch as _impl
+
+    return _impl(**args)
+
+
 def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
     from .nostrhost.domains.operations import _safe_network_public_ip as _impl
 
@@ -509,6 +515,13 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_DOMAINS_READ,
         require_approval=False,
         description="verify a domain's DNS records resolve",
+    ),
+    "dns.watch": ToolSpec(
+        name="dns.watch",
+        handler=_safe_dns_watch,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="DDNS watcher status: last-seen public IPs and dynamic-IP domains",
     ),
     "network.public_ip": ToolSpec(
         name="network.public_ip",

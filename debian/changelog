@@ -1,3 +1,35 @@
+yunohost (12.1.41.26) stable; urgency=low
+
+  * nostrhost: W4 Phase C — DDNS providers (DuckDNS/Dynu/deSEC) + IP watcher.
+    - DuckDnsProvider (dynamic-IP only): pushes the host's current A/AAAA to
+      www.duckdns.org/update (domains/token/ip/ipv6), token from the broker
+      as secret:dns/duckdns/<name>. full_zone=False, wildcard=False.
+    - DynuProvider (dynamic-IP only): pushes via api.dynu.com/nic/update;
+      credential is username:password (HTTP Basic auth) or a bare IP-update
+      password; maps good/nochg and surfaces badauth/nohost/notfqdn.
+    - DesecProvider (full-zone REST): RRset list/create/update/delete via
+      desec.io/api/v1 with Authorization: Token; TXT quoting and apex
+      (subname '') handled; ownership-bounded through the local mirror with
+      (subname,type) as the provider record id; dynamic_ip=True.
+    - DomainService capability branches: dynamic-IP-only providers route
+      dns.add/apply/plan/remove through point-to-point push (no zone
+      enumeration); full-zone providers keep the plan/apply reconcile.
+      Domain states now record the provider's real capabilities.
+    - DDNS IP watcher (nostr-ddnswatchd): polls the public IPv4/IPv6 and on
+      change reconciles every registered domain whose provider advertises
+      dynamic_ip (full-zone via plan/apply, DDNS via push); last-seen
+      addresses + last update persisted to state/ddns-watch.json (0600) so
+      restarts don't fire spurious updates. Interval via
+      /etc/nostrhost/ddns.toml [watch].interval or NOSTRHOST_DDNS_INTERVAL.
+    - New read-only op dns.watch (domains.read) + `nostrhost dns watch`
+      reporting last-seen IPs and the dynamic domains; domain.add now
+      requires a credential ref for every non-manual provider.
+    - Tests: tests_nostr/test_native_ddns_phase_c.py (20 tests: provider
+      request building, desec lifecycle + TXT/apex, service branches,
+      watcher poll/persist/restart, ops wiring). 436 fork tests pass.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 08:00:00 +0200
+
 yunohost (12.1.41.25) stable; urgency=low
 
   * nostrhost: W4 Phase B — provider credentials, Cloudflare, app [dns.*]
