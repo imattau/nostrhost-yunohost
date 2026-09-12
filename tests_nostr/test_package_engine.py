@@ -271,6 +271,21 @@ def test_reconciliation_skips_package_when_version_matches(tmp_path: Path):
     assert provider.inspect(desired)["exists"] is False
 
 
+def test_reapply_is_idempotent_when_dependency_resource_is_skipped(tmp_path: Path):
+    """A second reconcile whose provider-ensure op is already satisfied must
+    not deadlock: the skipped resource is seeded as satisfied, so dependent
+    pending operations (manifest, ...) proceed."""
+    plan = [
+        Operation("package.ensure", "example", {"id": "example", "version": "1"}),
+        Operation("package.manifest.ensure", "example", {"id": "example", "version": "1", "manifest": {"app": {"id": "example"}}}, depends_on=("example",)),
+    ]
+    executor = NativeOperationExecutor({"package": PackageProvider(state_dir=tmp_path)})
+    first = apply_reconciled_plan(plan, executor)
+    assert len(first) == 2
+    second = apply_reconciled_plan(plan, executor)
+    assert [row["operation"] for row in second] == ["package.manifest.ensure"]
+
+
 def test_reconciliation_detects_config_and_service_drift(tmp_path: Path):
     from nostrhost.native_providers import ConfigFileProvider, ServiceProvider
 

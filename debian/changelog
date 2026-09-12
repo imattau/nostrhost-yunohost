@@ -1,3 +1,12 @@
+yunohost (12.1.41.20) stable; urgency=low
+
+  * nostrhost: apply_reconciled_plan seeds already-satisfied (skipped)
+    resources into the dependency resolver — a re-apply where the
+    provider-ensure op is satisfied but a dependent op still runs deadlocked
+    with "operation plan contains an unknown dependency or cycle".
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 01:00:00 +0200
+
 yunohost (12.1.41.19) stable; urgency=low
 
   * nostrhost: postinstall's policy.toml must quote dotted section keys

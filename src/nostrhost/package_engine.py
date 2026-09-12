@@ -722,14 +722,18 @@ def operation_from_dict(value: dict[str, Any]) -> Operation:
     )
 
 
-def apply_operation_plan(plan: list[Operation], executor: Any) -> list[Any]:
-    """Apply a validated plan in dependency order through one executor."""
+def apply_operation_plan(plan: list[Operation], executor: Any, *, initial_completed: set[str] | None = None) -> list[Any]:
+    """Apply a validated plan in dependency order through one executor.
+
+    ``initial_completed`` seeds the satisfied-resource set — reconcilers pass
+    the already-satisfied (skipped) resources so pending operations depending
+    on them are not mistaken for a cycle."""
     if hasattr(executor, "can_execute"):
         unsupported = [operation.name for operation in plan if not executor.can_execute(operation)]
         if unsupported:
             raise PackageError("native providers are unavailable for: " + ", ".join(unsupported))
     pending = list(plan)
-    completed: set[str] = set()
+    completed: set[str] = set(initial_completed or ())
     results: list[Any] = []
     while pending:
         ready = next((operation for operation in pending if set(operation.depends_on) <= completed), None)
@@ -857,7 +861,10 @@ def apply_reconciled_plan(plan: list[Operation], executor: Any) -> list[Any]:
                   operation.risk, operation.reversible, operation.reverse, operation.summary)
         for operation in pending
     ]
-    return apply_operation_plan(pending, executor)
+    # Skipped resources are already satisfied; seed the dependency resolver
+    # with them so a pending operation that depends on an already-satisfied
+    # resource is not mistaken for a cycle.
+    return apply_operation_plan(pending, executor, initial_completed=set(skipped))
 
 
 def load_package(path: Path) -> PackageManifest:
