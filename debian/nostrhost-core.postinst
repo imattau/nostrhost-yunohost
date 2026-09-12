@@ -135,7 +135,10 @@ do_configure() {
         fi
     else
         echo "Regenerating configuration, this might take a while..."
-        nostrhost system regen-conf --output-as none
+        # Best-effort: the CLI lives in python3-nostrhost which may still be
+        # the previous version when nostrhost-core is configured first in a
+        # cyclic upgrade; a stale or absent CLI must never fail the install.
+        nostrhost system regen-conf --output-as none || true
     fi
 }
 

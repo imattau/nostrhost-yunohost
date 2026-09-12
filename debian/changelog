@@ -1,3 +1,11 @@
+yunohost (12.1.41.13) stable; urgency=low
+
+  * nostrhost-core.postinst: regen-conf is best-effort (|| true) — in a
+    cyclic nostrhost-core/python3-nostrhost upgrade apt may configure the
+    core first, and a stale CLI must not fail the install.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 20:30:00 +0200
+
 yunohost (12.1.41.12) stable; urgency=low
 
   * nostrhost: `system regen-conf` must init headless mode first — the
