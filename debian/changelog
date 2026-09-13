@@ -1,3 +1,14 @@
+yunohost (12.1.41.33) stable; urgency=low
+
+  * nostrhost: fresh-install bootstrap fixes (alpha acceptance loop).
+    - Caddy domain snippet renders `tls internal` so .test/local domains are
+      served over HTTPS with Caddy's internal CA instead of failing ACME.
+    - `postinstall --new` provisions a default local Restic repo + config
+      (`/etc/nostrhost/restic.toml`), and `nostrhost-core` now Depends on
+      `restic`, so the policy backup gate is satisfiable out of the box.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 15:05:00 +1000
+
 yunohost (12.1.41.32) stable; urgency=low
 
   * nostrhost: link the Restic snapshot id into the native plan result.

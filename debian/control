@@ -25,9 +25,10 @@ Depends: python3-all (>= 3.11),
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
  , openssl, ca-certificates, ssl-cert, netcat-openbsd, iproute2
- , dnsmasq, resolvconf, libnss-myhostname
- , acl
- , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
+, dnsmasq, resolvconf, libnss-myhostname
+  , acl
+  , restic
+  , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
  , lsb-release, haveged, fake-hwclock, lsof, whois
  , xz-utils, zstd
 Recommends: yunohost-admin (>= 12.1), yunohost-portal (>= 12.1)

@@ -114,3 +114,46 @@ def test_catalogue_env_lists_publisher(tmp_path: Path, monkeypatch, boot):
     _set_render_paths(tmp_path, monkeypatch)
     path = _render_catalogue_env(boot["publisher_pubkey"])
     assert f"NOSTRHOST_CATALOG_PUBLISHERS={boot['publisher_pubkey']}" in path.read_text()
+
+
+# --------------------------------------------------------------------------- #
+# restic provisioning (backup gate on a fresh node)
+
+def test_provision_restic_writes_config_and_inits_repo(tmp_path: Path, monkeypatch):
+    from nostrhost.cli import _provision_restic
+
+    conf = tmp_path / "restic.toml"
+    repo = tmp_path / "restic-repo"
+    monkeypatch.setattr(cli_module, "RESTIC_CONFIG", str(conf))
+    monkeypatch.setattr(cli_module, "RESTIC_REPO", str(repo))
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        (repo / "config").write_text("version: 2\n")
+        return None
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    path = _provision_restic()
+    assert path == conf
+    assert stat.S_IMODE(os.stat(conf).st_mode) == 0o600
+    data = tomllib.loads(conf.read_text())
+    assert data["repo"] == str(repo)
+    assert len(data["password"]) >= 32
+    assert data["paths"] == ["/etc", "/var/www", "/var/lib/nostrhost/state"]
+    assert calls == [["restic", "-r", str(repo), "init"]]
+
+
+def test_provision_restic_is_idempotent(tmp_path: Path, monkeypatch):
+    from nostrhost.cli import _provision_restic
+
+    conf = tmp_path / "restic.toml"
+    repo = tmp_path / "restic-repo"
+    monkeypatch.setattr(cli_module, "RESTIC_CONFIG", str(conf))
+    monkeypatch.setattr(cli_module, "RESTIC_REPO", str(repo))
+    conf.write_text('repo = "x"\npassword = "y"\npaths = ["/etc"]\n')
+
+    ran = []
+    monkeypatch.setattr(cli_module.subprocess, "run", lambda *a, **k: ran.append(a))
+    assert _provision_restic() == conf
+    assert ran == []  # existing config is never re-initialised

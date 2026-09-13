@@ -786,6 +786,49 @@ def _load_keys_file(keys_file: Path) -> dict[str, str]:
     return {k: _normalize_sk(str(keys[k])) for k in required}
 
 
+RESTIC_CONFIG = os.environ.get("NOSTRHOST_RESTIC_CONFIG", "/etc/nostrhost/restic.toml")
+RESTIC_REPO = "/var/lib/nostrhost/restic-repo"
+
+
+def _provision_restic() -> Path:
+    """Provision a default local Restic repo + config so the policy backup
+    gate is satisfiable on a fresh node.
+
+    Writes ``/etc/nostrhost/restic.toml`` (0600) pointing at a local repo
+    under ``/var/lib/nostrhost/restic-repo`` with a freshly generated
+    password, and initialises the repo if it does not exist yet. Operators
+    may later point this at an external/remote repo; the local default keeps
+    ``app install`` / ``app upgrade`` (which require a recent backup) working
+    out of the box.
+    """
+    import secrets
+
+    conf = Path(RESTIC_CONFIG)
+    if conf.exists():
+        return conf
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    repo = Path(RESTIC_REPO)
+    repo.mkdir(parents=True, exist_ok=True)
+    password = secrets.token_urlsafe(32)
+    conf.write_text(
+        f'repo = "{repo}"\n'
+        f'password = "{password}"\n'
+        'paths = ["/etc", "/var/www", "/var/lib/nostrhost/state"]\n'
+        'binary = "restic"\n'
+        f'host = "{socket.gethostname()}"\n'
+        'tag = "nostrhost"\n'
+    )
+    os.chmod(conf, 0o600)
+    if not (repo / "config").exists():
+        subprocess.run(
+            ["restic", "-r", str(repo), "init"],
+            input=f"{password}\n".encode(),
+            capture_output=True,
+            check=True,
+        )
+    return conf
+
+
 def _systemctl(*args: str) -> None:
     subprocess.run(["systemctl", *args], check=False, capture_output=True, text=True)
 
@@ -857,6 +900,12 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
     _render_notify_config(boot["notifier_sk"], boot["control_relay"])
     _render_catalogue_env(boot["publisher_pubkey"])
     recovery_path = _render_keys_recovery(boot)
+    try:
+        _provision_restic()
+    except Exception as exc:  # noqa: BLE001 - non-fatal; surfaced in the summary
+        restic_error = str(exc)
+    else:
+        restic_error = ""
 
     failed = _enable_postinstall_daemons()
     grant = _publish_initial_capability(boot["operator_pubkey"])
@@ -897,6 +946,7 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         "relay_config": RELAY_CONFIG,
         "notify_config": NOTIFY_CONFIG,
         "catalogue_env": CATALOGUE_ENV,
+        "restic_config": RESTIC_CONFIG if not restic_error else f"error: {restic_error}",
         "keys_recovery": str(recovery_path),
         "recovery": _recovery_bundle(boot),
         "state_announcement": announce,
@@ -1294,6 +1344,9 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
             package_data = _load_package_data(source, resolved)
             _verify_package(package_data, resolved)
+            from nostrhost.app_management import carry_forward_compatible_settings
+
+            package_data = carry_forward_compatible_settings(installed, package_data)
             envelope = _plan_envelope(package_data, resolved)
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
