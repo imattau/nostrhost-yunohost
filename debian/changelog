@@ -1,10 +1,18 @@
-yunohost (12.1.41.38) stable; urgency=low
+yunohost (12.1.41.39) stable; urgency=low
 
-  * nostrhost: portal logout route (fixes 404 on Sign out).
-    - The portal-api now serves GET /nostrhost/portalapi/logout, which
-      invalidates the portal session (deletes the session file + the
-      nostrhost.portal cookie) so the SSO Sign out and the admin console's
-      Sign out both actually sign the user out.
+  * nostrhost: native API contract fixes for the admin console.
+    - service.status accepts a names list (route now passes it through) so the
+      Service Control screen works.
+    - identity dicts use the Identity dataclass's 'username' field (not the
+      removed 'ynh_username').
+    - identity/list and identity/resolve wrap their lists in an object
+      ({identities: [...]}) because Bottle's json plugin cannot serialise a
+      top-level list.
+    - responses are sanitised (datetimes -> ISO strings, sets -> sorted lists)
+      so service.status's last_state_change serialises.
+    - add /package/agent/{status,init,enable,disable} routes (the admin
+      Agent screen needs them).
+    - catalog/list wraps the bare CLI list in {entries: [...]}.
 
- -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 19:05:54 
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 20:19:53 
 

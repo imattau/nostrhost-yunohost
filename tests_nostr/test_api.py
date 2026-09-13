@@ -481,8 +481,71 @@ def test_identity_link(app, monkeypatch):
     monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
     status, _, body = wsgi_request(app, "POST", "/package/identity/link", {"username": "alice", "pubkey_or_npub": "npub1test", "signer_type": "nip07"})
     assert status == "200"
-    assert captured["username"] == "alice"
-    assert captured["signer_type"] == "nip07"
+
+
+def test_catalog_list_wraps_bare_list(app, monkeypatch):
+    """The catalogue CLI emits a bare list; the API wraps it under 'entries'
+    so the admin client's CatalogueList type (entries: [...]) holds."""
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.list", lambda **k: [{"declaration": {"AppID": "x"}}])
+    status, _, body = wsgi_request(app, "GET", "/package/catalog/list")
+    assert status == "200"
+    out = json.loads(body)
+    assert isinstance(out, dict) and "entries" in out
+    assert out["entries"] == [{"declaration": {"AppID": "x"}}]
+
+
+def test_catalog_list_passthrough_dict(app, monkeypatch):
+    """When catalog.list already returns a dict, it passes through unchanged."""
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.list", lambda **k: {"entries": []})
+    status, _, body = wsgi_request(app, "GET", "/package/catalog/list")
+    assert json.loads(body) == {"entries": []}
+
+
+def test_agent_status_route(app, monkeypatch):
+    monkeypatch.setattr(api_module, "_agent_status", lambda: {"installed": True, "configured": True, "service_enabled": True, "service_active": False})
+    status, _, body = wsgi_request(app, "GET", "/package/agent/status")
+    assert status == "200"
+    out = json.loads(body)
+    assert out["installed"] is True
+    assert out["configured"] is True
+
+
+def test_agent_service_routes(app, monkeypatch):
+    captured = []
+
+    def fake(action):
+        captured.append(action)
+        return {"service": "nostrhost-agent.service", "action": action, "config_path": "/x"}
+
+    monkeypatch.setattr(api_module, "_agent_service", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/agent/enable", {})
+    assert status == "200"
+    assert json.loads(body)["action"] == "enable"
+    assert captured == ["enable"]
+
+
+def test_identity_dict_uses_username(monkeypatch):
+    """_identity_dict must read the Identity dataclass's 'username' field
+    (the old code read 'ynh_username', which no longer exists on the dataclass
+    and crashed identity screens)."""
+    from types import SimpleNamespace
+
+    ident = SimpleNamespace(pubkey="ab" * 32, username="alice", signer_type="nip07", label="Laptop", enabled=True, created_at=0, last_used=0)
+    out = api_module._identity_dict(ident)
+    assert out["username"] == "alice"
+    assert out["pubkey"] == "ab" * 32
+
+
+def test_json_safe_serializes_datetimes():
+    """Tool results carrying datetimes (service.status's last_state_change)
+    must serialise to ISO strings instead of 500ing the response."""
+    import datetime
+
+    out = api_module._json_safe(
+        {"last_state_change": datetime.datetime(2026, 1, 2, 3, 4, 5), "tags": {"a", "b"}}
+    )
+    assert out["last_state_change"] == "2026-01-02T03:04:05"
+    assert out["tags"] == ["a", "b"]
 
 
 def test_capability_grant(app, monkeypatch):

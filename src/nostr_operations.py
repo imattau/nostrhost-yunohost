@@ -412,17 +412,23 @@ def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[st
     return {"app": app, "purge": bool(purge)}
 
 
-def _safe_service_status(name: str = "", **args: Any) -> dict[str, Any]:
-    """Read all managed services or one explicitly named service."""
-    name = str(name or "").strip()
+def _safe_service_status(names: str | list[str] | None = None, name: str = "", **args: Any) -> dict[str, Any]:
+    """Read all managed services or a subset (a single name or a list)."""
     if args:
         raise OperationError(f"service.status does not accept extra args: {sorted(args)}")
     from yunohost.service import _get_services, service_status
 
-    if name:
-        if name not in _get_services():
-            raise OperationError(f"unknown service {name!r}")
-        return service_status(name)
+    if isinstance(names, str):
+        names = [names]
+    if not names and name:
+        names = [name]
+    if names:
+        unknown = [n for n in names if n not in _get_services()]
+        if unknown:
+            raise OperationError(f"unknown service(s) {', '.join(unknown)!r}")
+        # service_status() accepts a single name or a list; keep a single name
+        # as a bare string for compatibility with its own signature.
+        return service_status(names[0] if len(names) == 1 else names)
     return service_status()
 
 

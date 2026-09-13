@@ -23,7 +23,14 @@ from typing import Any, Callable
 
 from bottle import Bottle, HTTPResponse, request
 
-from .cli import _TOOL_HANDLERS, _State, _run_lifecycle
+from .cli import (
+    _agent_init,
+    _agent_service,
+    _agent_status,
+    _TOOL_HANDLERS,
+    _State,
+    _run_lifecycle,
+)
 from .core import NostrHostError
 from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
 from .package_engine import PackageError
@@ -65,6 +72,23 @@ def _json_error(status: int, code: str, message: str) -> HTTPResponse:
         status=status,
         headers={"Content-Type": "application/json"},
     )
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively convert values Bottle's default JSON encoder can't handle
+    (datetimes, sets) to JSON-safe primitives — e.g. service.status returns
+    ``last_state_change`` as a datetime, which otherwise 500s every response."""
+    import datetime
+
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, set):
+        return sorted(value, key=str)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _run_tool(name: str, args: dict[str, Any]) -> Any:
@@ -206,7 +230,12 @@ class _AuthErrorsPlugin:
                 except ApiError as exc:
                     return _json_error(exc.status, exc.code, exc.message)
             try:
-                return callback(*args, **kwargs)
+                result = callback(*args, **kwargs)
+                if isinstance(result, HTTPResponse):
+                    return result
+                # Sanitise datetimes/sets so Bottle's default encoder can
+                # serialise tool results (e.g. service.status's datetimes).
+                return _json_safe(result)
             except ApiError as exc:
                 return _json_error(exc.status, exc.code, exc.message)
             except (NostrHostError, OperationError, IdentityError) as exc:
@@ -326,11 +355,34 @@ def build_app(
         body = _json_body()
         return _run_tool("service.control", {"name": body.get("name", ""), "action": body.get("action", "")})
 
+    # -- agent ----------------------------------------------------------------
+
+    @app.get("/package/agent/status")
+    def agent_status() -> Any:
+        return _agent_status()
+
+    @app.post("/package/agent/init")
+    def agent_init() -> Any:
+        return _agent_init()
+
+    @app.post("/package/agent/enable")
+    def agent_enable() -> Any:
+        return _agent_service("enable")
+
+    @app.post("/package/agent/disable")
+    def agent_disable() -> Any:
+        return _agent_service("disable")
+
     # -- catalog --------------------------------------------------------------
 
     @app.get("/package/catalog/list")
     def catalog_list() -> Any:
-        return _run_tool("catalog.list", {})
+        result = _run_tool("catalog.list", {})
+        # The catalogue CLI emits a bare list; the admin client expects the
+        # trusted entries under an "entries" key.
+        if isinstance(result, list):
+            return {"entries": result}
+        return result
 
     @app.get("/package/catalog/get/<app_id>")
     def catalog_get(app_id: str) -> Any:
@@ -542,15 +594,19 @@ def build_app(
     def identity_list() -> Any:
         username = request.query.get("username")
         if username:
-            return [_identity_dict(i) for i in list_identities_for_username(username)]
-        return [_identity_dict(i) for i in list_identities()]
+            identities = [_identity_dict(i) for i in list_identities_for_username(username)]
+        else:
+            identities = [_identity_dict(i) for i in list_identities()]
+        # Bottle's json plugin cannot serialise a top-level list; wrap it.
+        return {"identities": identities}
 
     @app.get("/package/identity/resolve/<value>")
     def identity_resolve(value: str) -> Any:
         if value.startswith("npub1") or (len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)):
             identity = resolve_pubkey(_parse_pubkey(value))
             return _identity_dict(identity) if identity else None
-        return [_identity_dict(i) for i in resolve_username(value)]
+        identities = [_identity_dict(i) for i in resolve_username(value)]
+        return {"identities": identities}
 
     @app.post("/package/identity/link")
     def identity_link() -> Any:
@@ -670,7 +726,7 @@ def _identity_pubkeys_from_config() -> tuple[tuple[str, ...], str | None]:
 def _identity_dict(identity: Any) -> dict[str, Any]:
     return {
         "pubkey": identity.pubkey,
-        "username": identity.ynh_username,
+        "username": identity.username,
         "signer_type": identity.signer_type,
         "label": identity.label,
         "enabled": identity.enabled,
