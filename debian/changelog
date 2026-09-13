@@ -1,17 +1,11 @@
-yunohost (12.1.41.34) stable; urgency=low
+yunohost (12.1.41.35) stable; urgency=low
 
-  * nostrhost: rename the native admin/SSO/API web surface from /yunohost/*
-    to /nostrhost/* and fix SPA asset serving.
-    - build_portal_routes() now serves the admin and portal SPAs with Caddy
-      try_files semantics (real files first, index.html fallback) instead of an
-      unconditional rewrite, which returned the HTML shell for every asset and
-      rendered the admin SPA blank.
-    - /yunohost/api|portalapi|sso|admin routes, the conf.d template, the nuxt
-      portal baseURL/customassets, and the crowdsec login-path scenarios all
-      now use /nostrhost/* (the /package/* native-API path is unchanged).
-    - admin SPA base path is now /nostrhost/admin/ (VITE_BASE_URL + packaging
-      base_path); the nostrhost.admin / nostrhost.portal session cookies and
-      the nostrhost-login/nostrhost-link challenge actions match.
+  * nostrhost: portal boot routes + bare-prefix redirects (browser fixes).
+    - Bare /nostrhost/admin and /nostrhost/sso 301 to the trailing-slash form
+      so they reach the SPAs instead of the domain root responder.
+    - The portal-api now serves /public (portal boot settings) and /me (the
+      signed-in user), which the retired moulinette portal.py used to provide;
+      the nuxt portal SPA boots from these and previously got a 404.
 
- -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 16:19:01 
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 16:54:08 
 

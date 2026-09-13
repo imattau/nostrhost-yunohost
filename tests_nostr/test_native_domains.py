@@ -281,7 +281,11 @@ def test_portal_routes_host_and_path_anded():
     routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
     # YunoHost and native API endpoints are unconditional reverse proxies
     assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/nostrhost/api/*"]}]
-    assert routes["nostrhost-portalapi:w4.test"]["handle"][0]["handler"] == "reverse_proxy"
+    # api/portalapi strip their /nostrhost/... prefix before proxying (the
+    # handle_path equivalent), so the reverse_proxy comes after the rewrite
+    portalapi = routes["nostrhost-portalapi:w4.test"]
+    assert portalapi["handle"][-1]["handler"] == "reverse_proxy"
+    assert portalapi["handle"][0] == {"handler": "rewrite", "strip_path_prefix": "/nostrhost/portalapi"}
     native_api = routes["nostrhost-native-api:w4.test"]
     assert native_api["match"] == [{"host": ["w4.test"], "path": ["/package/*"]}]
     assert native_api["handle"][0]["upstreams"] == [{"dial": "127.0.0.1:8190"}]
@@ -302,6 +306,23 @@ def test_portal_admin_route_uses_nostrhost_prefix(monkeypatch):
     routes = {r["@id"]: r for r in caddy_admin.build_portal_routes("w4.test")}
     admin = routes["nostrhost-admin:w4.test"]
     assert admin["match"] == [{"host": ["w4.test"], "path": ["/nostrhost/admin/*"]}]
+
+
+def test_portal_bare_prefixes_redirect_to_trailing_slash(monkeypatch):
+    """A bare /nostrhost/admin or /nostrhost/sso must 301 to the trailing-slash
+    form so it reaches the SPA instead of the domain root responder (nginx's
+    ``rewrite ^/yunohost/admin$ /yunohost/admin/ permanent;``)."""
+    from nostrhost import caddy_admin
+
+    monkeypatch.setattr(caddy_admin.os.path, "isdir", lambda _root: True)
+    routes = {r["@id"]: r for r in caddy_admin.build_portal_routes("w4.test")}
+    for tag, path in (("admin", "/nostrhost/admin"), ("sso", "/nostrhost/sso")):
+        route = routes[f"nostrhost-{tag}-redir:w4.test"]
+        assert route["match"] == [{"host": ["w4.test"], "path": [path]}]
+        handle = route["handle"][0]
+        assert handle["handler"] == "static_response"
+        assert handle["status_code"] == 301
+        assert handle["headers"]["Location"] == [f"{path}/"]
 
 
 def test_web_route_root_excludes_reserved_paths():
@@ -342,6 +363,39 @@ def test_nip05_endpoint_wired():
 
     app = build_app()
     assert any(route.rule == "/.well-known/nostr.json" for route in app.routes)
+
+
+def test_portal_public_and_me_routes_wired():
+    """The portal SPA boots from /public (settings) and reads the session via
+    /me; both must be served by the portal-api (previously only in the retired
+    moulinette portal.py)."""
+    from nostrhost.portal_api import build_app
+
+    app = build_app()
+    rules = {route.rule for route in app.routes}
+    assert "/public" in rules
+    assert "/me" in rules
+
+
+def test_portal_public_returns_settings(monkeypatch):
+    import bottle
+
+    from yunohost.nostrhost import portal_settings as ps
+
+    class _FakeHeader:
+        def get(self, key, default=None):
+            return "w4.test" if key == "host" else default
+
+    class _FakeRequest:
+        get_header = _FakeHeader().get
+
+    monkeypatch.setattr(bottle, "request", _FakeRequest())
+    # no portal settings dir content, no session -> defaults with empty apps
+    monkeypatch.setattr(ps, "PORTAL_SETTINGS_DIR", "/nonexistent")
+    monkeypatch.setattr("yunohost.nostr_account._session_username", lambda: None)
+    out = ps.portal_public_route()
+    assert out["domain"] == "w4.test"
+    assert out["apps"] == {}
 
 
 def test_nip05_body_builder(monkeypatch, tmp_path):

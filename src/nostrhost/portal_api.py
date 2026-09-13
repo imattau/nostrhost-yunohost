@@ -30,9 +30,12 @@ def build_app() -> Bottle:
     )
     from yunohost.nostr_login import auth_request_route, challenge_route, login_route
     from yunohost.nostr_oidc import authorize, discovery, jwks, token, userinfo
+    from yunohost.nostrhost.portal_settings import portal_me_route, portal_public_route
 
     app = Bottle()
 
+    app.get("/public", callback=portal_public_route)
+    app.get("/me", callback=portal_me_route)
     app.get("/nostr/challenge", callback=challenge_route)
     app.post("/nostr/login", callback=login_route)
     app.get("/nostr/auth-request", callback=auth_request_route)

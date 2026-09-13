@@ -132,6 +132,28 @@ def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str
     }
 
 
+def _spa_redirect_route(domain: str, tag: str, path: str) -> dict[str, Any]:
+    """301 the bare prefix to the trailing-slash form, so ``/nostrhost/admin``
+    reaches the SPA instead of falling through to the domain root responder.
+
+    Mirrors upstream nginx's ``rewrite ^/yunohost/admin$ /yunohost/admin/
+    permanent;`` (a bare ``location /yunohost/admin/`` would 404/fall through
+    for the no-slash form, and client-side routing needs the canonical path).
+    """
+    return {
+        "@id": f"nostrhost-{tag}-redir:{domain}",
+        "match": [{"host": [domain], "path": [path]}],
+        "handle": [
+            {
+                "handler": "static_response",
+                "status_code": 301,
+                "headers": {"Location": [f"{path}/"]},
+            }
+        ],
+        "terminal": True,
+    }
+
+
 def _spa_route_handle(root: str, prefix: str) -> list[dict[str, Any]]:
     """Caddy JSON for a SPA route that serves real files and falls back to
     index.html for client-side routes.
@@ -221,6 +243,7 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
         ("/usr/share/nostrhost/admin", "admin", "/nostrhost/admin"),
     ):
         if os.path.isdir(root):
+            routes.append(_spa_redirect_route(domain, tag, prefix))
             routes.append(
                 {
                     "@id": f"nostrhost-{tag}:{domain}",
