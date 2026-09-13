@@ -77,6 +77,27 @@ FIELDS_FOR_IMPORT = {
 ADMIN_ALIASES = ["root", "admin", "admins", "webmaster", "postmaster", "abuse"]
 
 
+def _regen_native_permissions_projection() -> None:
+    """Refresh the authd's native permission projection (roadmap §25).
+
+    ``app_ssowatconf()`` regenerates the legacy ``/etc/ssowat/conf.json``;
+    SSOwat itself is retired, but ``nostr_login``'s authd still falls back to
+    that file when the native ``/etc/nostrhost/permissions.json`` hasn't been
+    (re)written yet. Every user-CRUD call site that regenerates the legacy
+    conf must also refresh the native one -- otherwise a routine user
+    create/delete/update leaves the file Caddy's ``forward_auth`` actually
+    reads stale, silently falling back to the legacy path. Best-effort: a
+    permission-projection hiccup must not fail an otherwise-successful user
+    operation.
+    """
+    try:
+        from nostrhost.permissions import write_permissions_projection
+
+        write_permissions_projection()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning(f"failed to refresh native permission projection: {exc}")
+
+
 def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
     from .utils.ldap import _get_ldap_interface
 
@@ -318,6 +339,7 @@ def user_create(
         user_group_update(groupname="admins", add=username, sync_perm=False)
     user_group_update(groupname="all_users", add=username, force=True, sync_perm=True)
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     # Trigger post_user_create hooks
     env_dict = {
@@ -397,6 +419,7 @@ def user_delete(
 
     _sync_permissions_with_ldap()
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     PortalAuth.invalidate_all_sessions_for_user(username)
     AdminAuth.invalidate_all_sessions_for_user(username)
@@ -617,6 +640,7 @@ def user_update(
 
     if not from_import:
         app_ssowatconf()
+        _regen_native_permissions_projection()
         logger.success(tr("user_updated"))
         return user_info(username)
 
@@ -1021,6 +1045,7 @@ def user_import(
 
     _sync_permissions_with_ldap()
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     if result["errors"]:
         msg = tr("user_import_partial_failed")
@@ -1579,6 +1604,7 @@ def user_permission_update(
     )
 
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     logger.success(tr("permission_updated", permission=permission))
 
