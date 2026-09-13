@@ -5,11 +5,7 @@
 	dh ${@} --with python3
 
 override_dh_auto_build:
-	# Generate bash completion file
-	mkdir -p doc/bash_completion.d
-	python3 doc/generate_bash_completion.py -o doc/bash_completion.d/yunohost
-	# Generate zsh completion file
-	mkdir -p doc/zsh_completion.d
-	python3 doc/generate_zsh_completion.py -o doc/zsh_completion.d/_yunohost
-	# Generate man pages
-	python3 doc/generate_manpages.py --gzip --output doc/yunohost.8.gz
+	# NostrHost replaces the YunoHost action-map CLI. The upstream completion
+	# and man-page generators depend on share/actionsmap.yml, which is
+	# intentionally removed from this fork and is not installed by its packages.
+	@true
