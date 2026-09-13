@@ -976,6 +976,58 @@ def build_app(
             state=_State(),
         )
 
+    # -- power ----------------------------------------------------------------
+
+    @app.post("/package/system/reboot")
+    def system_reboot() -> Any:
+        """Reboot the host. High-risk, irreversible-ish: routed through the
+        signed operation chain (owner co-signature), not _run_tool."""
+        return _run_lifecycle("system.reboot", {}, state=_State())
+
+    @app.post("/package/system/shutdown")
+    def system_shutdown() -> Any:
+        """Power off the host. High-risk, requires out-of-band power-on to
+        recover: routed through the signed operation chain (owner
+        co-signature), not _run_tool."""
+        return _run_lifecycle("system.shutdown", {}, state=_State())
+
+    # -- settings -------------------------------------------------------------
+
+    @app.get("/package/settings/list")
+    def settings_list() -> Any:
+        full = request.query.get("full", "").lower() == "true"
+        return _run_tool("settings.list", {"full": full})
+
+    @app.get("/package/settings/get/<key>")
+    def settings_get(key: str) -> Any:
+        return _run_tool("settings.get", {"key": key})
+
+    @app.post("/package/settings/set")
+    def settings_set() -> Any:
+        """Set a global YunoHost setting. Medium-risk: routed through the
+        signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "settings.set",
+            {"key": body.get("key", ""), "value": body.get("value")},
+            state=_State(),
+        )
+
+    @app.post("/package/settings/reset")
+    def settings_reset() -> Any:
+        """Reset a global YunoHost setting to its default. Medium-risk:
+        routed through the signed operation chain (owner co-signature), not
+        _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("settings.reset", {"key": body.get("key", "")}, state=_State())
+
+    @app.post("/package/settings/reset_all")
+    def settings_reset_all() -> Any:
+        """Reset all global YunoHost settings to their defaults. High-risk:
+        routed through the signed operation chain (owner co-signature), not
+        _run_tool."""
+        return _run_lifecycle("settings.reset_all", {}, state=_State())
+
     # -- package ------------------------------------------------------------
 
     @app.post("/package/plan")

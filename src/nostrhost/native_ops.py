@@ -56,6 +56,9 @@ from yunohost.nostr_operations import (
     SCOPE_DOMAINS_READ,
     SCOPE_DOMAINS_WRITE,
     SCOPE_SERVICES_READ,
+    SCOPE_SYSTEM_POWER,
+    SCOPE_SETTINGS_READ,
+    SCOPE_SETTINGS_WRITE,
     KIND_CAPABILITY,
     ToolSpec,
     _Strict,
@@ -222,6 +225,37 @@ class SystemMigrateArgs(_Strict):
     force_rerun: bool = False
     accept_disclaimer: bool = False
     skip_postmigrations: bool = False
+
+
+class SystemRebootArgs(_Strict):
+    pass
+
+
+class SystemShutdownArgs(_Strict):
+    pass
+
+
+class SettingsListArgs(_Strict):
+    full: bool = False
+
+
+class SettingsGetArgs(_Strict):
+    key: str
+    full: bool = False
+    export: bool = False
+
+
+class SettingsSetArgs(_Strict):
+    key: str
+    value: Any = None
+
+
+class SettingsResetArgs(_Strict):
+    key: str
+
+
+class SettingsResetAllArgs(_Strict):
+    pass
 
 
 class ServiceHistoryArgs(_Strict):
@@ -762,6 +796,83 @@ def _safe_system_migrate(
         skip_postmigrations=bool(skip_postmigrations),
     )
     return {"targets": targets, "state": tools_migrations_state().get("migrations", {})}
+
+
+def _safe_system_reboot(**extra: Any) -> dict[str, Any]:
+    """Reboot the host. Always forced: the owner co-signature on this
+    operation's signed chain is the confirmation, replacing the interactive
+    CLI prompt tools_reboot() would otherwise show."""
+    if extra:
+        raise OperationError(f"system.reboot does not accept extra args: {sorted(extra)}")
+    from yunohost.tools import tools_reboot
+
+    tools_reboot(force=True)
+    return {"rebooting": True}
+
+
+def _safe_system_shutdown(**extra: Any) -> dict[str, Any]:
+    """Power off the host. Always forced, for the same reason as
+    system.reboot above."""
+    if extra:
+        raise OperationError(f"system.shutdown does not accept extra args: {sorted(extra)}")
+    from yunohost.tools import tools_shutdown
+
+    tools_shutdown(force=True)
+    return {"shutting_down": True}
+
+
+def _safe_settings_list(full: bool = False, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"settings.list does not accept extra args: {sorted(extra)}")
+    from yunohost.settings import settings_list
+
+    return {"settings": settings_list(full=bool(full))}
+
+
+def _safe_settings_get(key: str = "", full: bool = False, export: bool = False, **extra: Any) -> dict[str, Any]:
+    key = str(key or "").strip()
+    if extra:
+        raise OperationError(f"settings.get does not accept extra args: {sorted(extra)}")
+    if not key:
+        raise OperationError("settings.get requires a non-empty 'key'")
+    if full and export:
+        raise OperationError("settings.get 'full' and 'export' are mutually exclusive")
+    from yunohost.settings import settings_get
+
+    return {"key": key, "value": settings_get(key=key, full=bool(full), export=bool(export))}
+
+
+def _safe_settings_set(key: str = "", value: Any = None, **extra: Any) -> dict[str, Any]:
+    key = str(key or "").strip()
+    if extra:
+        raise OperationError(f"settings.set does not accept extra args: {sorted(extra)}")
+    if not key:
+        raise OperationError("settings.set requires a non-empty 'key'")
+    from yunohost.settings import settings_set
+
+    settings_set(key=key, value=value)
+    return {"key": key, "value": value}
+
+
+def _safe_settings_reset(key: str = "", **extra: Any) -> dict[str, Any]:
+    key = str(key or "").strip()
+    if extra:
+        raise OperationError(f"settings.reset does not accept extra args: {sorted(extra)}")
+    if not key:
+        raise OperationError("settings.reset requires a non-empty 'key'")
+    from yunohost.settings import settings_get, settings_reset
+
+    settings_reset(key=key)
+    return {"key": key, "value": settings_get(key=key)}
+
+
+def _safe_settings_reset_all(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"settings.reset_all does not accept extra args: {sorted(extra)}")
+    from yunohost.settings import settings_list, settings_reset_all
+
+    settings_reset_all()
+    return {"settings": settings_list()}
 
 
 # --------------------------------------------------------------------------- #
@@ -1772,5 +1883,40 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="audit.get", handler=_safe_audit_get, scope=SCOPE_AUDIT_READ,
         input_model=AuditGetArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
         description="fetch one audit entry by request id (the kind-2200 id) or event id (owner co-signature per call)",
+    ),
+    "system.reboot": ToolSpec(
+        name="system.reboot", handler=_safe_system_reboot, scope=SCOPE_SYSTEM_POWER,
+        input_model=SystemRebootArgs, risk=RISK_HIGH, reversibility=REVERSIBLE_WITH_PLAN,
+        description="reboot the host (admin + owner co-signature)",
+    ),
+    "system.shutdown": ToolSpec(
+        name="system.shutdown", handler=_safe_system_shutdown, scope=SCOPE_SYSTEM_POWER,
+        input_model=SystemShutdownArgs, risk=RISK_HIGH, reversibility=IRREVERSIBLE,
+        description="power off the host; requires an out-of-band power-on to recover (admin + owner co-signature)",
+    ),
+    "settings.list": ToolSpec(
+        name="settings.list", handler=_safe_settings_list, scope=SCOPE_SETTINGS_READ,
+        require_approval=False, input_model=SettingsListArgs,
+        description="list global YunoHost settings and their current values",
+    ),
+    "settings.get": ToolSpec(
+        name="settings.get", handler=_safe_settings_get, scope=SCOPE_SETTINGS_READ,
+        require_approval=False, input_model=SettingsGetArgs,
+        description="get one global YunoHost setting by key",
+    ),
+    "settings.set": ToolSpec(
+        name="settings.set", handler=_safe_settings_set, scope=SCOPE_SETTINGS_WRITE,
+        input_model=SettingsSetArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="set one global YunoHost setting (admin + owner co-signature)",
+    ),
+    "settings.reset": ToolSpec(
+        name="settings.reset", handler=_safe_settings_reset, scope=SCOPE_SETTINGS_WRITE,
+        input_model=SettingsResetArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="reset one global YunoHost setting to its default (admin + owner co-signature)",
+    ),
+    "settings.reset_all": ToolSpec(
+        name="settings.reset_all", handler=_safe_settings_reset_all, scope=SCOPE_SETTINGS_WRITE,
+        input_model=SettingsResetAllArgs, risk=RISK_HIGH, reversibility=REVERSIBLE_WITH_PLAN,
+        description="reset all global YunoHost settings to their defaults (admin + owner co-signature)",
     ),
 }
