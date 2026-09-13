@@ -702,6 +702,70 @@ def test_post_backup_delete_uses_signed_chain(app, monkeypatch):
     assert calls == [("backup.delete", {"name": "before-upgrade"})]
 
 
+def test_post_diagnosis_run(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"reports": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "diagnosis.run", fake)
+    body = {"categories": ["dnsrecords"], "force": True, "full": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/diagnosis/run", body)
+    assert status == "200"
+    assert captured == {"categories": ["dnsrecords"], "force": True, "full": True}
+    assert json.loads(resp) == {"reports": []}
+
+
+def test_post_diagnosis_run_defaults(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"reports": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "diagnosis.run", fake)
+    status, _, resp = wsgi_request(app, "POST", "/package/diagnosis/run", {})
+    assert status == "200"
+    assert captured == {"categories": [], "force": False, "full": False}
+
+
+def test_get_diagnosis_ignored(app, monkeypatch):
+    monkeypatch.setitem(
+        api_module._TOOL_HANDLERS, "diagnosis.ignored", lambda **k: {"ignore_filters": {}}
+    )
+    status, _, body = wsgi_request(app, "GET", "/package/diagnosis/ignored")
+    assert status == "200"
+    assert json.loads(body) == {"ignore_filters": {}}
+
+
+def test_post_diagnosis_ignore_uses_signed_chain(app, monkeypatch):
+    """diagnosis.ignore mutates admin config: it must go through
+    _run_lifecycle (signed chain + owner co-signature), never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"filter": ["dnsrecords", "domain=yolo.test"]}
+    status, _, resp = wsgi_request(app, "POST", "/package/diagnosis/ignore", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("diagnosis.ignore", {"filter": ["dnsrecords", "domain=yolo.test"]})]
+
+
+def test_post_diagnosis_unignore_uses_signed_chain(app, monkeypatch):
+    """diagnosis.unignore must go through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"filter": ["dnsrecords", "domain=yolo.test"]}
+    status, _, resp = wsgi_request(app, "POST", "/package/diagnosis/unignore", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("diagnosis.unignore", {"filter": ["dnsrecords", "domain=yolo.test"]})]
+
+
 def test_post_service_restart(app, monkeypatch):
     captured = {}
 
