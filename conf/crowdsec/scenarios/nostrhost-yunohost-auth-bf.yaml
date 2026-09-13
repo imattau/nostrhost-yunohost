@@ -3,7 +3,7 @@
 # P1).
 #
 # The retired fail2ban filter matched a single line:
-#   ^<HOST> -.*"POST /yunohost/api/login HTTP/\d.\d" 401
+#   ^<HOST> -.*"POST /nostrhost/api/login HTTP/\d.\d" 401
 #
 # crowdsecurity/caddy-logs (s01) + crowdsecurity/http-logs (s02) turn a Caddy
 # access entry into evt.Meta.http_path / http_status / http_verb, so the
@@ -23,11 +23,11 @@
 # per-IP counting.
 type: leaky
 name: nostrhost/yunohost-auth-bf
-description: "Detect brute force against the YunoHost web API login (POST /yunohost/api/login)"
+description: "Detect brute force against the YunoHost web API login (POST /nostrhost/api/login)"
 filter: |
   evt.Meta.log_type == 'http_access-log'
   && evt.Meta.http_verb == 'POST'
-  && evt.Meta.http_path == '/yunohost/api/login'
+  && evt.Meta.http_path == '/nostrhost/api/login'
   && evt.Meta.http_status == '401'
 groupby: evt.Meta.source_ip
 capacity: 10

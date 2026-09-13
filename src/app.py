@@ -2002,9 +2002,9 @@ def app_ssowatconf() -> None:
             "users": [],
             "auth_header": False,
             "public": True,
-            "uris": [domain + "/yunohost/admin" for domain in domains]
-            + [domain + "/yunohost/api" for domain in domains]
-            + [domain + "/yunohost/portalapi" for domain in domains]
+            "uris": [domain + "/nostrhost/admin" for domain in domains]
+            + [domain + "/nostrhost/api" for domain in domains]
+            + [domain + "/nostrhost/portalapi" for domain in domains]
             + [
                 r"re:^[^/]*/502\.html$",
                 r"re:^[^/]*/\.well-known/ynh-diagnosis/.*$",
@@ -2145,7 +2145,7 @@ def app_ssowatconf() -> None:
             or apps_catalog.get(app_base_id, {}).get("logo_hash")
         )
         if logo_hash:
-            app_portal_info["logo"] = f"/yunohost/sso/applogos/{logo_hash}.png"
+            app_portal_info["logo"] = f"/nostrhost/sso/applogos/{logo_hash}.png"
 
         portal_domains_apps[app_portal_domain][perm_name] = app_portal_info
 

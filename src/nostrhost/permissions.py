@@ -58,8 +58,8 @@ def build_permissions_projection() -> dict[str, Any]:
             "public": True,
             "uris": [
                 *(f"{domain}/admin" for domain in domains),
-                *(f"{domain}/yunohost/api" for domain in domains),
-                *(f"{domain}/yunohost/portalapi" for domain in domains),
+                *(f"{domain}/nostrhost/api" for domain in domains),
+                *(f"{domain}/nostrhost/portalapi" for domain in domains),
                 *WELL_KNOWN_PUBLIC_URIS,
             ],
         }

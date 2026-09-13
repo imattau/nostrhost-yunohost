@@ -280,7 +280,7 @@ def test_portal_routes_host_and_path_anded():
 
     routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
     # YunoHost and native API endpoints are unconditional reverse proxies
-    assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/yunohost/api/*"]}]
+    assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/nostrhost/api/*"]}]
     assert routes["nostrhost-portalapi:w4.test"]["handle"][0]["handler"] == "reverse_proxy"
     native_api = routes["nostrhost-native-api:w4.test"]
     assert native_api["match"] == [{"host": ["w4.test"], "path": ["/package/*"]}]
@@ -292,8 +292,8 @@ def test_portal_routes_host_and_path_anded():
         assert route["terminal"] is True
 
 
-def test_portal_admin_route_uses_yunohost_prefix(monkeypatch):
-    """The admin SPA route must live under /yunohost/admin, matching
+def test_portal_admin_route_uses_nostrhost_prefix(monkeypatch):
+    """The admin SPA route must live under /nostrhost/admin, matching
     conf/caddy/caddy_domain.conf, so it falls under the reserved-path
     exclusion build_web_route() enforces for root-claimed apps."""
     from nostrhost import caddy_admin
@@ -301,7 +301,7 @@ def test_portal_admin_route_uses_yunohost_prefix(monkeypatch):
     monkeypatch.setattr(caddy_admin.os.path, "isdir", lambda _root: True)
     routes = {r["@id"]: r for r in caddy_admin.build_portal_routes("w4.test")}
     admin = routes["nostrhost-admin:w4.test"]
-    assert admin["match"] == [{"host": ["w4.test"], "path": ["/yunohost/admin/*"]}]
+    assert admin["match"] == [{"host": ["w4.test"], "path": ["/nostrhost/admin/*"]}]
 
 
 def test_web_route_root_excludes_reserved_paths():
@@ -329,7 +329,7 @@ def test_web_route_normal_path_unaffected():
     assert route["match"] == [{"host": ["w4.test"], "path": ["/blog/*"]}]
 
 
-@pytest.mark.parametrize("path", ["/yunohost/admin", "/yunohost/sso", "/package", "/package/foo"])
+@pytest.mark.parametrize("path", ["/nostrhost/admin", "/nostrhost/sso", "/package", "/package/foo"])
 def test_web_route_rejects_reserved_paths(path):
     from nostrhost.caddy_admin import CaddyError, build_web_route
 

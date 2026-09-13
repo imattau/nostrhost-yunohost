@@ -1151,8 +1151,8 @@ def _get_conflicting_apps(
 
     conflicts = []
 
-    # A path under /yunohost/* or /package/* (or the NIP-05 well-known route)
-    # is never available to apps: it's always served by YunoHost's own
+    # A path under /nostrhost/* or /package/* (or the NIP-05 well-known route)
+    # is never available to apps: it's always served by NostrHost's own
     # admin/SSO/API surface (see build_portal_routes/build_nip05_route in
     # nostrhost.caddy_admin), which isn't a YunoHost "app" and so wouldn't
     # otherwise show up in app_map(). A root ("/") claim is allowed through

@@ -78,11 +78,11 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         infos["id"] = short_hash(infos["user"]) + random_ascii(20)
 
         response.set_cookie(
-            "yunohost.admin",
+            "nostrhost.admin",
             jwt.encode(infos, SESSION_SECRET(), algorithm="HS256"),
             secure=True,
             httponly=True,
-            path="/yunohost/api",
+            path="/nostrhost/api",
             samesite="strict",
         )
 
@@ -96,7 +96,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         from bottle import request, response
 
         try:
-            token = request.get_cookie("yunohost.admin", default="").encode()
+            token = request.get_cookie("nostrhost.admin", default="").encode()
             infos = jwt.decode(
                 token,
                 SESSION_SECRET(),
@@ -116,7 +116,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         self.purge_expired_session_files()
         session_file = SESSION_FOLDER / infos["id"]
         if not session_file.exists():
-            response.delete_cookie("yunohost.admin", path="/yunohost/api")
+            response.delete_cookie("nostrhost.admin", path="/nostrhost/api")
             raise YunohostAuthenticationError("session_expired")
 
         # Otherwise, we 'touch' the file to extend the validity
@@ -136,7 +136,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
                 f"User logged out, but failed to properly invalidate the session : {e}"
             )
 
-        response.delete_cookie("yunohost.admin", path="/yunohost/api")
+        response.delete_cookie("nostrhost.admin", path="/nostrhost/api")
 
     def purge_expired_session_files(self) -> None:
         for session_file in SESSION_FOLDER.iterdir():

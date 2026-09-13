@@ -103,7 +103,7 @@ def login(session, logged_as, logged_on=None):
     if not logged_on:
         logged_on = maindomain
 
-    login_endpoint = f"https://{logged_on}/yunohost/portalapi/login"
+    login_endpoint = f"https://{logged_on}/nostrhost/portalapi/login"
     r = session.post(
         login_endpoint,
         data={"credentials": f"{logged_as}:{dummy_password}"},
@@ -117,7 +117,7 @@ def login(session, logged_as, logged_on=None):
 
 
 def logout(session):
-    logout_endpoint = f"https://{maindomain}/yunohost/portalapi/logout"
+    logout_endpoint = f"https://{maindomain}/nostrhost/portalapi/logout"
     r = session.get(
         logout_endpoint,
         headers={
@@ -163,12 +163,12 @@ def request(webpath, logged_as=None, session=None, inject_auth=None, logged_on=N
 def test_api_public_as_anonymous():
     # FIXME : should list apps only if the domain option is enabled
 
-    r = request(f"https://{maindomain}/yunohost/portalapi/public")
+    r = request(f"https://{maindomain}/nostrhost/portalapi/public")
     assert r.status_code == 200 and "apps" in r.json()
 
 
 def test_api_me_as_anonymous():
-    r = request(f"https://{maindomain}/yunohost/portalapi/me")
+    r = request(f"https://{maindomain}/nostrhost/portalapi/me")
     assert r.status_code == 401
 
 
@@ -194,9 +194,9 @@ def test_api_login_nonexistinguser():
 
 
 def test_api_public_and_me_logged_in():
-    r = request(f"https://{maindomain}/yunohost/portalapi/public", logged_as="alice")
+    r = request(f"https://{maindomain}/nostrhost/portalapi/public", logged_as="alice")
     assert r.status_code == 200 and "apps" in r.json()
-    r = request(f"https://{maindomain}/yunohost/portalapi/me", logged_as="alice")
+    r = request(f"https://{maindomain}/nostrhost/portalapi/me", logged_as="alice")
     assert r.status_code == 200 and r.json()["username"] == "alice"
 
     assert number_of_active_session_for_user("alice") == 2
@@ -209,19 +209,19 @@ def test_api_session_expired():
         assert "yunohost.portal" in session.cookies
         assert r.status_code == 200
 
-        r = request(f"https://{maindomain}/yunohost/portalapi/me", session=session)
+        r = request(f"https://{maindomain}/nostrhost/portalapi/me", session=session)
         assert r.status_code == 200 and r.json()["username"] == "alice"
 
         for file in SESSION_FOLDER.glob(f"{short_hash('alice')}*"):
             os.utime(str(file), (0, 0))
 
-        r = request(f"https://{maindomain}/yunohost/portalapi/me", session=session)
+        r = request(f"https://{maindomain}/nostrhost/portalapi/me", session=session)
         assert number_of_active_session_for_user("alice") == 0
         assert r.status_code == 401
 
 
 def test_public_routes_not_blocked_by_ssowat():
-    r = request(f"https://{maindomain}/yunohost/api/whatever")
+    r = request(f"https://{maindomain}/nostrhost/api/whatever")
     # Getting code 405, Method not allowed, which means the API does answer,
     # meaning it's not blocked by ssowat
     # Or : on the CI, the yunohost-api is likely to be down (to save resources)
@@ -257,7 +257,7 @@ def test_permission_propagation_on_ssowat():
     # Visitors now get redirected to portal
     r = request(f"https://{maindomain}/")
     assert r.status_code == 302
-    assert r.headers["Location"].startswith(f"https://{maindomain}/yunohost/sso?r=")
+    assert r.headers["Location"].startswith(f"https://{maindomain}/nostrhost/sso?r=")
 
     # Alice can still access the app fine
     r = request(f"https://{maindomain}/", logged_as="alice")

@@ -26,7 +26,7 @@ from .nostr_login import CLOCK_SKEW, LoginError, _challenges
 
 logger = logging.getLogger("nostrhost-account")
 
-LINK_ACTION = "yunohost-link"
+LINK_ACTION = "nostrhost-link"
 IDENTITY_SOCKET = "/run/nostrhost/identity.sock"
 PORTAL_CONFIG = "/etc/nostrhost/portal.toml"
 CLIENT_TIMEOUT = 10.0  # seconds the socket client waits for identityd

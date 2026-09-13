@@ -34,11 +34,11 @@ DEFAULT_SERVER = "srv0"
 AUTHD_ADDR = "127.0.0.1:6788"
 AUTHD_PATH = "/nostr/auth-request"
 
-# Prefixes/paths build_portal_routes() reserves for YunoHost's own admin,
+# Prefixes/paths build_portal_routes() reserves for NostrHost's own admin,
 # SSO, and API surface (plus the NIP-05 well-known route). No [web] resource
 # may claim these, and a root-path ("/") resource's catch-all matcher must
 # exclude them explicitly — see build_web_route().
-RESERVED_PATH_PREFIXES = ("/yunohost", "/package")
+RESERVED_PATH_PREFIXES = ("/nostrhost", "/package")
 RESERVED_EXACT_PATHS = ("/.well-known/nostr.json",)
 IDENTITY_HEADERS = (
     "X-Remote-User",
@@ -132,11 +132,58 @@ def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str
     }
 
 
+def _spa_route_handle(root: str, prefix: str) -> list[dict[str, Any]]:
+    """Caddy JSON for a SPA route that serves real files and falls back to
+    index.html for client-side routes.
+
+    Mirrors what the Caddyfile ``handle_path <prefix>/* { root * <root>;
+    try_files {path} {path}/ /index.html; file_server }`` block adapts to:
+    strip the path prefix, resolve the file (``{http.matchers.file.relative}``)
+    or fall back to ``/index.html``, then serve from ``root``. An unconditional
+    ``rewrite /index.html`` would return the HTML shell for asset requests too
+    (the browser then fails to load the SPA's JS/CSS and renders a blank page).
+    """
+    return [
+        {
+            "handler": "subroute",
+            "routes": [
+                {
+                    "handle": [
+                        {
+                            "handler": "subroute",
+                            "routes": [
+                                {"handle": [{"handler": "rewrite", "strip_path_prefix": prefix}]},
+                                {"handle": [{"handler": "vars", "root": root}]},
+                                {
+                                    "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
+                                    "match": [
+                                        {
+                                            "file": {
+                                                "try_files": [
+                                                    "{http.request.uri.path}",
+                                                    "{http.request.uri.path}/",
+                                                    "/index.html",
+                                                ]
+                                            }
+                                        }
+                                    ],
+                                },
+                                {"handle": [{"handler": "file_server"}]},
+                            ],
+                        }
+                    ],
+                    "match": [{"path": [f"{prefix}/*"]}],
+                }
+            ],
+        }
+    ]
+
+
 def build_portal_routes(domain: str) -> list[dict[str, Any]]:
     """The per-domain portal/SSO surface an auth-required app needs.
 
     The authd ``forward_auth`` 302s unauthenticated requests to
-    ``/yunohost/sso/``; without routes serving the portal (and the API /
+    ``/nostrhost/sso/``; without routes serving the portal (and the API /
     portal-api / admin paths a browser needs), the redirect lands on a 404
     and an auth app's health check fails even though its backend is up.
     Mirrors the per-domain Caddyfile handlers the testbed writes by hand.
@@ -144,14 +191,22 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = [
         {
             "@id": f"nostrhost-api:{domain}",
-            "match": [{"host": [domain], "path": ["/yunohost/api/*"]}],
-            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6787"}]}],
+            "match": [{"host": [domain], "path": ["/nostrhost/api/*"]}],
+            # handle_path-equivalent: strip the prefix so the backend sees
+            # /... instead of /nostrhost/api/... (nginx trailing-slash proxy_pass).
+            "handle": [
+                {"handler": "rewrite", "strip_path_prefix": "/nostrhost/api"},
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6787"}]},
+            ],
             "terminal": True,
         },
         {
             "@id": f"nostrhost-portalapi:{domain}",
-            "match": [{"host": [domain], "path": ["/yunohost/portalapi/*"]}],
-            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6788"}]}],
+            "match": [{"host": [domain], "path": ["/nostrhost/portalapi/*"]}],
+            "handle": [
+                {"handler": "rewrite", "strip_path_prefix": "/nostrhost/portalapi"},
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6788"}]},
+            ],
             "terminal": True,
         },
         {
@@ -162,19 +217,15 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
         },
     ]
     for root, tag, prefix in (
-        ("/usr/share/nostrhost/portal", "sso", "/yunohost/sso"),
-        ("/usr/share/nostrhost/admin", "admin", "/yunohost/admin"),
+        ("/usr/share/nostrhost/portal", "sso", "/nostrhost/sso"),
+        ("/usr/share/nostrhost/admin", "admin", "/nostrhost/admin"),
     ):
         if os.path.isdir(root):
-            path = f"{prefix}/*"
             routes.append(
                 {
                     "@id": f"nostrhost-{tag}:{domain}",
-                    "match": [{"host": [domain], "path": [path]}],
-                    "handle": [
-                        {"handler": "rewrite", "uri": "/index.html"},
-                        {"handler": "file_server", "root": root},
-                    ],
+                    "match": [{"host": [domain], "path": [f"{prefix}/*"]}],
+                    "handle": _spa_route_handle(root, prefix),
                     "terminal": True,
                 }
             )
@@ -219,7 +270,7 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
         # terminal match wins) and insert_route() always inserts new routes
         # at index 0, so a root app installed after the portal/admin/API
         # routes would otherwise land ahead of them and swallow
-        # /yunohost/*, /package/*, and the NIP-05 well-known route. Excluding
+        # /nostrhost/*, /package/*, and the NIP-05 well-known route. Excluding
         # them here makes the root app safe regardless of insertion order.
         matcher["not"] = [
             {"path": [f"{prefix}/*" for prefix in RESERVED_PATH_PREFIXES] + list(RESERVED_EXACT_PATHS)}

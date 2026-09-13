@@ -59,7 +59,7 @@ def main():
         },
         "servers": [
             {
-                "url": "https://{domain}/yunohost/api",
+                "url": "https://{domain}/nostrhost/api",
                 "variables": {
                     "domain": {
                         "default": "demo.yunohost.org",

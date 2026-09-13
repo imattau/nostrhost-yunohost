@@ -220,7 +220,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         is_dev = Path("/etc/yunohost/.portal-api-allowed-cors-origins").exists()
 
         response.set_cookie(
-            "yunohost.portal",
+            "nostrhost.portal",
             jwt.encode(infos, SESSION_SECRET(), algorithm="HS256"),
             secure=True,
             httponly=True,
@@ -239,7 +239,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         from bottle import request, response
 
         try:
-            token = request.get_cookie("yunohost.portal", default="").encode()
+            token = request.get_cookie("nostrhost.portal", default="").encode()
             infos = jwt.decode(
                 token,
                 SESSION_SECRET(),
@@ -261,7 +261,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         self.purge_expired_session_files()
         session_file = SESSION_FOLDER / infos["id"]
         if not session_file.exists():
-            response.delete_cookie("yunohost.portal", path="/")
+            response.delete_cookie("nostrhost.portal", path="/")
             raise YunohostAuthenticationError("session_expired")
 
         # Otherwise, we 'touch' the file to extend the validity
@@ -271,9 +271,9 @@ class Authenticator(BaseAuthenticator):  # type: ignore
 
         # We also re-set the cookie such that validity is also extended on browser side
         response.set_cookie(
-            "yunohost.portal",
+            "nostrhost.portal",
             request.get_cookie(
-                "yunohost.portal"
+                "nostrhost.portal"
             ),  # Reuse the same token to avoid recomputing stuff (saves a bit of CPU / delay I suppose?)
             secure=True,
             httponly=True,
@@ -301,7 +301,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
                 f"User logged out, but failed to properly invalidate the session : {e}"
             )
 
-        response.delete_cookie("yunohost.portal", path="/")
+        response.delete_cookie("nostrhost.portal", path="/")
 
     def purge_expired_session_files(self) -> None:
         for session_file in SESSION_FOLDER.iterdir():

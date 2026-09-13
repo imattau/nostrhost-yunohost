@@ -2,7 +2,7 @@
 
 The Caddy ``forward_auth`` front ends for native ``web.route`` resources point
 at ``/nostr/auth-request`` on this server, and the portal proxies
-``/yunohost/portalapi/*`` here for the Nostr sign-in + identity routes (the
+``/nostrhost/portalapi/*`` here for the Nostr sign-in + identity routes (the
 routes the legacy moulinette ``portalapi`` entry point used to serve before
 the framework was retired).  The OIDC compatibility endpoints ride along.
 

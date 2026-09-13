@@ -3,7 +3,7 @@
 # docs/CROWDSEC-MIGRATION.md P1).
 #
 # The retired fail2ban filter matched a single line:
-#   ^<HOST> -.*"POST /yunohost/portalapi/login HTTP/\d.\d" 401
+#   ^<HOST> -.*"POST /nostrhost/portalapi/login HTTP/\d.\d" 401
 #
 # Same approach as nostrhost/yunohost-auth-bf: reproduce the fail2ban path
 # match directly on the metas set by crowdsecurity/caddy-logs + http-logs,
@@ -20,11 +20,11 @@
 # API jail (10), mirroring the original fail2ban overrides.
 type: leaky
 name: nostrhost/yunohost-portal-auth-bf
-description: "Detect brute force against the YunoHost SSO portal login (POST /yunohost/portalapi/login)"
+description: "Detect brute force against the YunoHost SSO portal login (POST /nostrhost/portalapi/login)"
 filter: |
   evt.Meta.log_type == 'http_access-log'
   && evt.Meta.http_verb == 'POST'
-  && evt.Meta.http_path == '/yunohost/portalapi/login'
+  && evt.Meta.http_path == '/nostrhost/portalapi/login'
   && evt.Meta.http_status == '401'
 groupby: evt.Meta.source_ip
 capacity: 20

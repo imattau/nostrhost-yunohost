@@ -4,13 +4,13 @@ The portal keeps its normal LDAP/SSO session cookie, but users may sign in
 passwordlessly by proving control of a pubkey that is linked (kind 31102) to
 their YunoHost account. Flow:
 
-    portal  --GET  /yunohost/portalapi/nostr/challenge-->  challenge nonce
+    portal  --GET  /nostrhost/portalapi/nostr/challenge-->  challenge nonce
     browser --sign a kind-22242 challenge event (NIP-07 / NIP-46 / passkey)
               with tags challenge / domain / action-->
-    portal  --POST /yunohost/portalapi/nostr/login--> consume the challenge,
+    portal  --POST /nostrhost/portalapi/nostr/login--> consume the challenge,
               verify signature + binding (nostrhost_auth), resolve the pubkey
               to an account via the identity store, then
-              create_portal_session() (mints the yunohost.portal cookie)
+              create_portal_session() (mints the nostrhost.portal cookie)
     relay   <-- kind-2206 login notice, signed by the server key
 
 Challenge state, session tokens and CSRF handling stay in the local HTTP
@@ -33,7 +33,7 @@ from .nostr_identity import _is_hex64
 
 logger = logging.getLogger("nostrhost-login")
 
-LOGIN_ACTION = "yunohost-login"
+LOGIN_ACTION = "nostrhost-login"
 NOTICE_KIND = 2206  # nostrhost auth/login notice
 CHALLENGE_TTL = 90  # seconds a challenge stays valid (auth-lib default range)
 CLOCK_SKEW = 60  # seconds of created_at tolerance
@@ -77,7 +77,7 @@ def _user_infos_for_session(username: str) -> dict:
 
 
 def create_portal_session(username: str, *, domain: str | None = None) -> None:
-    """Mint a passwordless ``yunohost.portal`` session cookie for ``username``.
+    """Mint a passwordless ``nostrhost.portal`` session cookie for ``username``.
 
     The session's ``pwd`` claim is an unbreakable sentinel: the user proved
     control of their key instead of a password, so the stored password cipher
@@ -307,7 +307,7 @@ def _match_permission(permissions: dict, full_url: str):
 
 def _portal_redirect(proto: str, host: str, uri: str, *, logged_in: bool) -> str:
     """Redirect location matching ssowat access.lua: login callback or deny."""
-    portal = f"{proto}://{host}/yunohost/sso/"
+    portal = f"{proto}://{host}/nostrhost/sso/"
     if logged_in:
         return f"{portal}?msg=access_denied"
     back = base64.urlsafe_b64encode(f"{proto}://{host}{uri}".encode()).decode()
