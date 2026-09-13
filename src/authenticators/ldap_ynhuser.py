@@ -29,16 +29,12 @@ from pathlib import Path
 from typing import Any
 
 import jwt
-import ldap
-import ldap.filter
-import ldap.sasl
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from nostrhost.i18n import tr
 from nostrhost.auth.authenticator import BaseAuthenticator
 
-from ..utils.error import YunohostAuthenticationError, YunohostError
+from ..utils.error import YunohostAuthenticationError
 from ..utils.file_utils import read_json
 from ..utils.ldap import _get_ldap_interface
 from ..utils.misc import random_ascii
@@ -75,9 +71,6 @@ def SESSION_SECRET() -> str:
     # miserably fail to start
     return SESSION_SECRET_PATH.read_text().strip()
 
-
-URI = "ldap://localhost:389"
-USERDN = "uid={username},ou=users,dc=yunohost,dc=org"
 
 # Cache on-disk settings to RAM for faster access
 DOMAIN_USER_ACL_DICT: dict[str, dict[str, Any]] = {}
@@ -203,72 +196,16 @@ def short_hash(data: str) -> str:
 
 
 class Authenticator(BaseAuthenticator):  # type: ignore
+    """Portal session-cookie management (moulinette's ``api: ldap_ynhuser``
+    credential check is retired along with moulinette itself -- see
+    ``docs/LDAP-RETIREMENT.md``; sessions are established via
+    ``nostr_login.create_portal_session`` after a Nostr challenge/response,
+    not a password bind, so this class no longer overrides
+    ``_authenticate_credentials`` and inherits the base class's
+    NotImplementedError instead).
+    """
+
     name = "ldap_ynhuser"
-
-    def _authenticate_credentials(
-        self, credentials: str | None = None
-    ) -> dict[str, str]:
-        from bottle import request
-
-        if credentials is None:
-            raise YunohostError("invalid_credentials")
-
-        try:
-            username, password = credentials.split(":", 1)
-        except ValueError:
-            raise YunohostError("invalid_credentials")
-
-        username = ldap.filter.escape_filter_chars(username)
-        # Search username, if user give a mail instead
-        if "@" in username:
-            user = _get_ldap_interface().search("ou=users", f"mail={username}", ["uid"])
-            if len(user) != 0:
-                username = user[0]["uid"][0]
-
-        def _reconnect() -> ldap.ldapobject.SimpleLDAPObject:
-            con = ldap.ldapobject.ReconnectLDAPObject(URI, retry_max=2, retry_delay=0.5)
-            con.simple_bind_s(USERDN.format(username=username), password)
-            return con
-
-        try:
-            con = _reconnect()
-        except ldap.INVALID_CREDENTIALS:
-            # FIXME FIXME FIXME : this should be properly logged and caught by Fail2ban ! !  ! ! ! ! !
-            raise YunohostError("invalid_password")
-        except ldap.SERVER_DOWN:
-            logger.warning(tr("ldap_server_down"))
-
-        # Check that we are indeed logged in with the expected identity
-        try:
-            # whoami_s return dn:..., then delete these 3 characters
-            who = con.whoami_s()[3:]
-        except Exception as e:
-            logger.warning("Error during ldap authentication process: %s", e)
-            raise
-        else:
-            if who != USERDN.format(username=username):
-                raise YunohostError(
-                    "Not logged with the appropriate identity ?!",
-                    raw_msg=True,
-                )
-        finally:
-            # Free the connection, we don't really need it to keep it open as the point is only to check authentication...
-            if con:
-                con.unbind_s()
-
-            ldap_user_infos = _get_ldap_interface().search(
-                "ou=users", f"uid={username}", attrs=["cn", "mail"]
-            )[0]
-
-        if not user_is_allowed_on_domain(username, _host_domain(request.get_header("host"))):
-            raise YunohostAuthenticationError("unable_authenticate")
-
-        return {
-            "user": username,
-            "pwd": encrypt(password),
-            "email": ldap_user_infos["mail"][0],
-            "fullname": ldap_user_infos["cn"][0],
-        }
 
     def set_session_cookie(self, infos: dict[str, Any]) -> None:
         from bottle import request, response
