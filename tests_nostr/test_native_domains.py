@@ -292,6 +292,51 @@ def test_portal_routes_host_and_path_anded():
         assert route["terminal"] is True
 
 
+def test_portal_admin_route_uses_yunohost_prefix(monkeypatch):
+    """The admin SPA route must live under /yunohost/admin, matching
+    conf/caddy/caddy_domain.conf, so it falls under the reserved-path
+    exclusion build_web_route() enforces for root-claimed apps."""
+    from nostrhost import caddy_admin
+
+    monkeypatch.setattr(caddy_admin.os.path, "isdir", lambda _root: True)
+    routes = {r["@id"]: r for r in caddy_admin.build_portal_routes("w4.test")}
+    admin = routes["nostrhost-admin:w4.test"]
+    assert admin["match"] == [{"host": ["w4.test"], "path": ["/yunohost/admin/*"]}]
+
+
+def test_web_route_root_excludes_reserved_paths():
+    """A [web] resource claiming path "/" gets a host-only catch-all matcher
+    (no `path` key). insert_route() always inserts new routes at index 0, so
+    without an explicit exclusion this route would shadow the portal/admin/
+    API routes whenever it happens to land ahead of them. It must instead
+    exclude the reserved prefixes so it's safe regardless of route order."""
+    from nostrhost.caddy_admin import RESERVED_EXACT_PATHS, RESERVED_PATH_PREFIXES, build_web_route
+
+    route = build_web_route({"domain": "w4.test", "upstream": "127.0.0.1:9000", "path": "/"})
+    assert route["match"] == [
+        {
+            "host": ["w4.test"],
+            "not": [{"path": [f"{p}/*" for p in RESERVED_PATH_PREFIXES] + list(RESERVED_EXACT_PATHS)}],
+        }
+    ]
+    assert route["terminal"] is True
+
+
+def test_web_route_normal_path_unaffected():
+    from nostrhost.caddy_admin import build_web_route
+
+    route = build_web_route({"domain": "w4.test", "upstream": "127.0.0.1:9000", "path": "/blog"})
+    assert route["match"] == [{"host": ["w4.test"], "path": ["/blog/*"]}]
+
+
+@pytest.mark.parametrize("path", ["/yunohost/admin", "/yunohost/sso", "/package", "/package/foo"])
+def test_web_route_rejects_reserved_paths(path):
+    from nostrhost.caddy_admin import CaddyError, build_web_route
+
+    with pytest.raises(CaddyError):
+        build_web_route({"domain": "w4.test", "upstream": "127.0.0.1:9000", "path": path})
+
+
 def test_nip05_endpoint_wired():
     from nostrhost.portal_api import build_app
 

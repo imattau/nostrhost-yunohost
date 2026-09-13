@@ -1140,6 +1140,7 @@ def _get_conflicting_apps(
 
     from ..app import app_map
     from ..domain import _assert_domain_exists
+    from ..nostrhost.caddy_admin import RESERVED_EXACT_PATHS, RESERVED_PATH_PREFIXES
     from .form import DomainOption, WebPathOption
 
     domain = DomainOption.normalize(domain)
@@ -1148,11 +1149,25 @@ def _get_conflicting_apps(
     # Abort if domain is unknown
     _assert_domain_exists(domain)
 
+    conflicts = []
+
+    # A path under /yunohost/* or /package/* (or the NIP-05 well-known route)
+    # is never available to apps: it's always served by YunoHost's own
+    # admin/SSO/API surface (see build_portal_routes/build_nip05_route in
+    # nostrhost.caddy_admin), which isn't a YunoHost "app" and so wouldn't
+    # otherwise show up in app_map(). A root ("/") claim is allowed through
+    # here — build_web_route() makes it safe by excluding these reserved
+    # paths from its catch-all matcher — but an app can't claim the reserved
+    # paths themselves.
+    if path in RESERVED_EXACT_PATHS or any(
+        path == prefix or path.startswith(f"{prefix}/") for prefix in RESERVED_PATH_PREFIXES
+    ):
+        conflicts.append((path, "yunohost", "YunoHost admin/SSO/API"))
+
     # Fetch apps map
     apps_map = app_map(raw=True)
 
     # Loop through all apps to check if path is taken by one of them
-    conflicts = []
     if domain in apps_map:
         # Loop through apps
         for p, a in apps_map[domain].items():

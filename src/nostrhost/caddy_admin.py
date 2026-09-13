@@ -33,6 +33,13 @@ DEFAULT_ADMIN = "http://127.0.0.1:2019"
 DEFAULT_SERVER = "srv0"
 AUTHD_ADDR = "127.0.0.1:6788"
 AUTHD_PATH = "/nostr/auth-request"
+
+# Prefixes/paths build_portal_routes() reserves for YunoHost's own admin,
+# SSO, and API surface (plus the NIP-05 well-known route). No [web] resource
+# may claim these, and a root-path ("/") resource's catch-all matcher must
+# exclude them explicitly — see build_web_route().
+RESERVED_PATH_PREFIXES = ("/yunohost", "/package")
+RESERVED_EXACT_PATHS = ("/.well-known/nostr.json",)
 IDENTITY_HEADERS = (
     "X-Remote-User",
     "X-Remote-Email",
@@ -78,6 +85,14 @@ def _forward_auth_handler() -> dict[str, Any]:
         "upstreams": [{"dial": AUTHD_ADDR}],
         "handle_response": [{"match": {"status_code": [2]}, "routes": header_routes}],
     }
+
+
+def _is_reserved_path(path: str) -> bool:
+    """Whether `path` (normalized, leading slash, no trailing slash) falls
+    under a path YunoHost's own admin/SSO/API surface owns."""
+    if path in RESERVED_EXACT_PATHS:
+        return True
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in RESERVED_PATH_PREFIXES)
 
 
 def _route_id(desired: dict[str, Any]) -> str:
@@ -148,7 +163,7 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
     ]
     for root, tag, prefix in (
         ("/usr/share/nostrhost/portal", "sso", "/yunohost/sso"),
-        ("/usr/share/nostrhost/admin", "admin", "/admin"),
+        ("/usr/share/nostrhost/admin", "admin", "/yunohost/admin"),
     ):
         if os.path.isdir(root):
             path = f"{prefix}/*"
@@ -181,6 +196,12 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     domain = desired.get("domain")
     path = (desired.get("path") or "/").rstrip("/")
 
+    if path and _is_reserved_path(path):
+        raise CaddyError(
+            f"path {path!r} is reserved for YunoHost's own admin/SSO/API routes "
+            f"({', '.join(RESERVED_PATH_PREFIXES)}, {RESERVED_EXACT_PATHS[0]})"
+        )
+
     route: dict[str, Any] = {"@id": _route_id(desired), "terminal": True}
 
     match: list[dict[str, Any]] = []
@@ -192,6 +213,17 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
         matcher["host"] = [domain]
     if path:
         matcher["path"] = [f"{path}/*"]
+    else:
+        # Root claim: no `path` matcher means this route matches EVERY path
+        # on the host. Caddy's route array is order-dependent (first
+        # terminal match wins) and insert_route() always inserts new routes
+        # at index 0, so a root app installed after the portal/admin/API
+        # routes would otherwise land ahead of them and swallow
+        # /yunohost/*, /package/*, and the NIP-05 well-known route. Excluding
+        # them here makes the root app safe regardless of insertion order.
+        matcher["not"] = [
+            {"path": [f"{prefix}/*" for prefix in RESERVED_PATH_PREFIXES] + list(RESERVED_EXACT_PATHS)}
+        ]
     if matcher:
         match.append(matcher)
     if match:
