@@ -458,6 +458,8 @@ def _set_agent_relay_writer(pubkey: str, *, allowed: bool) -> bool:
     if allowed and pubkey not in updated:
         updated.append(pubkey)
     elif not allowed:
+        if pubkey not in updated:
+            return False
         updated = [key for key in updated if key != pubkey]
     else:
         return False

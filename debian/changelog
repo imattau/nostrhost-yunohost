@@ -1,3 +1,14 @@
+yunohost (12.1.41.31) stable; urgency=low
+
+  * nostrhost: integrate the optional resident agent lifecycle.
+    - Add root-only Observe-mode agent provisioning and explicit service
+      enable/disable commands; keep agent setup out of package postinst and
+      default postinstall bootstrap.
+    - Reconcile configured agent writer keys in the local relay allowlist;
+      keep operation capability grants as a separate operator action.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 13:37:41 +1000
+
 yunohost (12.1.41.30) stable; urgency=low
 
   * nostrhost: LDAP fully retired (roadmap §25, Phases 3-5).
