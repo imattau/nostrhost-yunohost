@@ -128,6 +128,33 @@ def groups() -> dict[str, dict[str, Any]]:
     return store.get("groups", {})
 
 
+def ensure_base_groups() -> None:
+    """Ensure the special groups (all_users/admins/visitors) exist in both the
+    real /etc/group and the native store, so user/group operations that
+    reference them (file ACLs, admin membership, permission defaults) work
+    without an LDAP-era bootstrap.
+
+    Idempotent; safe to call on every group read path.
+    """
+    _native = groups()
+    changed = False
+    for name, gid in (("all_users", "2000"), ("admins", "2001"), ("visitors", "2002")):
+        if not real_group_exists(name):
+            try:
+                create_real_group(name, gid)
+            except subprocess.CalledProcessError:
+                pass  # raced with another create; group likely exists now
+        if name not in _native:
+            try:
+                members = grp.getgrnam(name).gr_mem
+            except KeyError:
+                members = []
+            _native[name] = {"gid": gid, "members": list(members)}
+            changed = True
+    if changed:
+        save_groups(_native)
+
+
 def save_groups(new_groups: dict[str, dict[str, Any]]) -> None:
     store = _load_store(ACCOUNTS_STORE)
     store["groups"] = new_groups
@@ -172,7 +199,15 @@ def create_real_user(
     home: str = "/home/",
     password_hash: str | None = None,
 ) -> None:
-    """Create a real /etc/passwd account (replaces LDAP add + libnss-ldapd)."""
+    """Create a real /etc/passwd account (replaces LDAP add + libnss-ldapd).
+
+    The primary group is created first (matching the group's gid) because
+    ``useradd -g`` requires the group to exist; with LDAP gone there is no
+    posixGroup entry to resolve. ``-U`` would create a group with a different
+    gid numbering, so we create the named group at the requested gid first.
+    """
+    if not real_group_exists(username):
+        create_real_group(username, gid)
     subprocess.check_call(
         [
             "useradd",
@@ -184,6 +219,12 @@ def create_real_user(
             username,
         ]
     )
+    # Record the primary group in the native store (membership is a
+    # self-reference: the user's primary group always contains just them).
+    _native = groups()
+    if username not in _native:
+        _native[username] = {"gid": gid, "members": [username]}
+        save_groups(_native)
     if password_hash:
         subprocess.run(
             ["chpasswd", "-e"], input=f"{username}:{password_hash}\n", check=True, text=True

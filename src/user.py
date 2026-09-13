@@ -105,6 +105,12 @@ def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
         return values[0] if len(values) == 1 else values
 
     display: dict[str, Callable[[list[str], dict[str, list[str]]], Any]] = {
+        "username": lambda values, _: display_default(values, _),
+        "fullname": lambda values, _: display_default(values, _),
+        "firstname": lambda values, _: display_default(values, _),
+        "lastname": lambda values, _: display_default(values, _),
+        "mailbox-quota": lambda values, _: display_default(values, _),
+        "home-path": lambda values, _: display_default(values, _),
         "password": lambda values, user: "",
         "mail": lambda values, user: display_default(values[:1], user),
         "mail-alias": lambda values, _: values[1:],
@@ -423,19 +429,21 @@ def user_delete(
                 force=force,
             )
 
-    # Delete primary group if it exists (why wouldnt it exists ?  because some
-    # epic bug happened somewhere else and only a partial removal was
-    # performed...)
-    if username in user_group_list()["groups"].keys():
-        user_group_delete(username, force=True, sync_perm=True)
-
-    # Remove the real Unix account (replaces LDAP remove)
+    # Remove the real Unix account (replaces LDAP remove). In the native model
+    # the user's primary group is a real /etc/group entry, so the user must be
+    # removed before groupdel can delete it.
     from .nostrhost.accounts import delete_real_user, save_users, users as native_users
 
     try:
         delete_real_user(username, purge=purge)
     except Exception as e:
         raise YunohostError("user_deletion_failed", user=username, error=e)
+
+    # Delete primary group if it exists (why wouldnt it exists ?  because some
+    # epic bug happened somewhere else and only a partial removal was
+    # performed...)
+    if username in user_group_list()["groups"].keys():
+        user_group_delete(username, force=True, sync_perm=True)
 
     _native = native_users()
     _native.pop(username, None)
@@ -1115,7 +1123,9 @@ def user_group_list(
 
     # Fetch relevant informations (native store, no LDAP)
 
-    from .nostrhost.accounts import groups as native_groups
+    from .nostrhost.accounts import ensure_base_groups, groups as native_groups
+
+    ensure_base_groups()
 
     groups_infos = [
         {"cn": [name], "member": list(ginfos.get("members", []))}
@@ -1173,8 +1183,12 @@ def user_group_create(
     )
     from .permission import _sync_permissions_with_ldap
 
-    # Validate uniqueness of groupname in native store
+    # Validate uniqueness of groupname in native store. The primary group of
+    # a user is created as part of user_create (create_real_user) so it may
+    # already exist here for that path; that is expected, not an error.
     if groupname in native_groups():
+        if primary_group:
+            return {"name": groupname}
         raise YunohostValidationError("group_already_exist", group=groupname)
 
     # Validate uniqueness of groupname in system group
@@ -1295,6 +1309,7 @@ def user_group_update(
     from .hook import hook_callback
     from .nostrhost.accounts import (
         add_real_user_to_group,
+        ensure_base_groups,
         groups as native_groups,
         remove_real_user_from_group,
         save_groups,
@@ -1302,6 +1317,7 @@ def user_group_update(
     from .permission import _sync_permissions_with_ldap
 
     existing_users = list(user_list()["users"].keys())
+    ensure_base_groups()
 
     # Refuse to edit a primary group of a user (e.g. group 'sam' related to user 'sam')
     # Those kind of group should only ever contain the user (e.g. sam) and only this one.
@@ -1503,7 +1519,9 @@ def user_group_info(groupname: str) -> dict[str, Any]:
 
     """
 
-    from .nostrhost.accounts import groups as native_groups
+    from .nostrhost.accounts import ensure_base_groups, groups as native_groups
+
+    ensure_base_groups()
 
     group = native_groups().get(groupname)
     if group is None:

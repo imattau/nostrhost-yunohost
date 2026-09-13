@@ -306,6 +306,7 @@ def bootstrap_node(
                 f'server_pubkey = "{server_pk}"',
                 f'notice_pubkey = "{notice_pk}"',
                 f'publisher_pubkey = "{publisher_pk}"',
+                "agent_pubkeys = []",
                 "allowlist_mode = true",
                 "require_auth_kinds = []",
                 "allowed_kinds = [" + ", ".join(str(k) for k in CONTROL_KINDS) + "]",

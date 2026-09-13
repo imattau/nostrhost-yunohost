@@ -30,7 +30,7 @@ def _invoke(app, argv):
 def test_help_lists_native_groups(app):
     result = _invoke(app, ["--help"])
     assert result.exit_code == 0
-    for group in ("system", "service", "app", "package", "rollback", "state", "identity", "capability", "postinstall", "backup"):
+    for group in ("system", "service", "app", "package", "rollback", "state", "identity", "capability", "agent", "postinstall", "backup"):
         assert group in result.stdout
 
 
@@ -42,6 +42,7 @@ def test_group_help_lists_commands(app):
         "package": ["plan", "reconcile"],
         "identity": ["link", "revoke", "list", "resolve"],
         "capability": ["grant", "delegate", "revoke"],
+        "agent": ["init", "status", "enable", "disable"],
         "backup": ["create", "list"],
     }.items():
         result = _invoke(app, [group, "--help"])

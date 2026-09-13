@@ -15,6 +15,7 @@ Command groups:
     state       apply a reconciliation plan
     identity    npub-based user identities (link / revoke / list / resolve)
     capability  grant / delegate / revoke capabilities to an npub
+    agent       optional local agent lifecycle (init / status / enable / disable)
     postinstall first-run bootstrap / restore (new / restore / status)
 
 The CLI runs as the authorized admin: read tools execute directly, and write
@@ -32,9 +33,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -48,6 +51,8 @@ from yunohost.nostr_identity import (
     _is_hex64,
     _npub,
     _parse_pubkey,
+    _pubkey,
+    _read_operator_config,
     link_identity,
     list_identities,
     list_identities_for_username,
@@ -426,6 +431,196 @@ NOTIFY_CONFIG = os.environ.get("NOSTRHOST_NOTIFY_CONFIG", "/etc/nostrhost/notify
 CATALOGUE_ENV = os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env")
 KEYS_RECOVERY = os.environ.get("NOSTRHOST_KEYS_RECOVERY", "/etc/nostrhost/keys.recovery")
 NOTIFY_STATE_DIR = os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", "/var/lib/nostrhost/state/notifications")
+AGENT_CONFIG = os.environ.get("NOSTRHOST_AGENT_CONFIG", "/etc/nostrhost-agent/config.json")
+AGENT_STATE_DIR = os.environ.get("NOSTRHOST_AGENT_STATE_DIR", "/var/lib/nostrhost-agent")
+AGENT_BINARY = "/usr/bin/nostrhost-agent"
+AGENT_SERVICE = "nostrhost-agent.service"
+
+
+def _set_agent_relay_writer(pubkey: str, *, allowed: bool) -> bool:
+    """Update the root-owned static relay writer list for the optional agent.
+
+    The relay reconciles entries tagged ``agent`` on restart. Writer access
+    permits event submission only; operation capabilities remain separate.
+    """
+    relay_path = Path(RELAY_CONFIG)
+    if relay_path.is_symlink() or not relay_path.is_file():
+        raise NostrHostError(f"control relay config is missing or unsafe: {relay_path}")
+    raw = relay_path.read_text(encoding="utf-8")
+    try:
+        parsed = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as exc:
+        raise NostrHostError(f"control relay config is invalid TOML: {exc}") from exc
+    keys = parsed.get("agent_pubkeys", [])
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
+        raise NostrHostError("control relay agent_pubkeys must be an array of public-key strings")
+    updated = list(dict.fromkeys(keys))
+    if allowed and pubkey not in updated:
+        updated.append(pubkey)
+    elif not allowed:
+        updated = [key for key in updated if key != pubkey]
+    else:
+        return False
+    replacement = "agent_pubkeys = " + json.dumps(updated, separators=(",", ":"))
+    lines = raw.splitlines()
+    section_start = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
+    key_line = next((i for i, line in enumerate(lines[:section_start]) if line.startswith("agent_pubkeys =")), None)
+    if key_line is not None:
+        lines[key_line] = replacement
+    else:
+        lines.insert(section_start, replacement)
+    candidate = "\n".join(lines).rstrip() + "\n"
+    try:
+        tomllib.loads(candidate)
+    except tomllib.TOMLDecodeError as exc:
+        raise NostrHostError(f"updated control relay config is invalid TOML: {exc}") from exc
+    mode = relay_path.stat().st_mode & 0o777
+    temp_path = relay_path.with_name(relay_path.name + f".{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(candidate)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, relay_path)
+        os.chmod(relay_path, mode)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return True
+
+
+def _agent_init() -> dict[str, Any]:
+    """Write a dedicated Observe-mode agent config without enabling it or
+    granting relay capabilities. Provisioning is explicitly operator initiated."""
+    if os.geteuid() != 0:
+        raise NostrHostError("agent init must be run as root")
+    if not Path(INSTALLED_MARKER).exists():
+        raise NostrHostError("NostrHost is not postinstalled; run `nostrhost postinstall new` first")
+    config_path = Path(AGENT_CONFIG)
+    if config_path.exists() or config_path.is_symlink():
+        raise NostrHostError(f"{config_path} already exists; refusing to replace agent identity or policy")
+    node = _read_operator_config()
+    operator_sk = node.get("operator_sk")
+    server_sk = node.get("server_sk") or operator_sk
+    relay = node.get("control_relay") or os.environ.get("NOSTRHOST_CONTROL_RELAY") or "ws://127.0.0.1:4848"
+    if not operator_sk or not server_sk:
+        raise NostrHostError("NostrHost operator/server keys are missing from the root-only operator config")
+    if not Path(AGENT_BINARY).exists():
+        raise NostrHostError("nostrhost-agent is not installed; install the optional nostrhost-agent package first")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(config_path.parent, 0o750)
+    agent_secret = secrets.token_hex(32)
+    agent_pubkey = _pubkey(agent_secret)
+    config = {
+        "relay": {
+            "relay_url": relay,
+            "agent_secret_key": agent_secret,
+            "trusted_server_key": _pubkey(server_sk),
+            "result_timeout": "2m",
+        },
+        "policy": {
+            "level": "observe",
+            "capabilities": {"system.read": True},
+        },
+        # service.status is implemented by both the agent registry and the
+        # current NostrHost control-plane ToolSpec registry.
+        "observation_queries": [{"operation": "service.status"}],
+        "audit_path": str(Path(AGENT_STATE_DIR) / "audit.jsonl"),
+        "interval": "6h",
+        "run_immediately": True,
+        "listen_for_events": True,
+        "event_lookback": "5m",
+    }
+    temp_path = config_path.with_name(config_path.name + f".{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(config, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, config_path)
+        os.chmod(config_path, 0o600)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return {
+        "configured": True,
+        "service_enabled": False,
+        "policy": "observe",
+        "config_path": str(config_path),
+        "agent_pubkey": agent_pubkey,
+        "agent_npub": _npub(agent_pubkey),
+        "relay_scopes": ["services.read"],
+        "next": (
+            f"Review this agent identity; grant its read scope with `nostrhost capability grant {agent_pubkey} services.read --type agent`, "
+            "then explicitly run `nostrhost agent enable`."
+        ),
+    }
+
+
+def _agent_service(action: str) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise NostrHostError(f"agent {action} must be run as root")
+    config_path = Path(AGENT_CONFIG)
+    if action == "enable":
+        if config_path.is_symlink() or not config_path.is_file():
+            raise NostrHostError("agent config is missing or is not a regular file; run `nostrhost agent init` first")
+        mode = config_path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise NostrHostError("agent config must not be accessible to group or other users")
+        validator = AGENT_BINARY
+        if not Path(validator).exists():
+            raise NostrHostError("nostrhost-agent is not installed")
+        checked = subprocess.run(
+            [validator, "--check-config", "--config", str(config_path)],
+            capture_output=True, text=True, check=False,
+        )
+        if checked.returncode != 0:
+            raise NostrHostError(checked.stderr.strip() or "agent configuration validation failed")
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            agent_pubkey = _pubkey(config["relay"]["agent_secret_key"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise NostrHostError("agent config does not contain a valid relay identity") from exc
+        if _set_agent_relay_writer(agent_pubkey, allowed=True):
+            subprocess.run(["systemctl", "restart", "nostrhost-control.service"], check=True)
+        subprocess.run(["systemctl", "enable", "--now", AGENT_SERVICE], check=True)
+    elif action == "disable":
+        subprocess.run(["systemctl", "disable", "--now", AGENT_SERVICE], check=True)
+        if config_path.is_file() and not config_path.is_symlink():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                agent_pubkey = _pubkey(config["relay"]["agent_secret_key"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise NostrHostError("agent config does not contain a valid relay identity") from exc
+            if _set_agent_relay_writer(agent_pubkey, allowed=False):
+                subprocess.run(["systemctl", "restart", "nostrhost-control.service"], check=True)
+    return {"service": AGENT_SERVICE, "action": action, "config_path": str(config_path)}
+
+
+def _agent_status() -> dict[str, Any]:
+    config_path = Path(AGENT_CONFIG)
+    enabled = subprocess.run(
+        ["systemctl", "is-enabled", AGENT_SERVICE], capture_output=True, text=True, check=False,
+    )
+    active = subprocess.run(
+        ["systemctl", "is-active", AGENT_SERVICE], capture_output=True, text=True, check=False,
+    )
+    return {
+        "installed": Path(AGENT_BINARY).exists(),
+        "configured": config_path.is_file() and not config_path.is_symlink(),
+        "service_enabled": enabled.returncode == 0,
+        "service_active": active.returncode == 0,
+    }
 
 
 def _write_policy_toml(operator_npub: str) -> Path:
@@ -691,7 +886,9 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
         "daemons_failed": failed or "none",
         "note": "operator_npub is the owner identity; log in via the portal and link it. "
-        "The recovery bundle above is shown ONCE - back it up offline (nsec1 keys).",
+        "The recovery bundle above is shown ONCE - back it up offline (nsec1 keys). "
+        "The optional agent remains unconfigured; install it separately, then run `nostrhost agent init`.",
+        "agent": "optional agent not configured; no agent identity or relay grant was created",
     }
 
 
@@ -860,6 +1057,7 @@ def _postinstall_restore(
         "state_announcement": announce,
         "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
         "daemons_failed": failed or "none",
+        "agent": "optional agent not configured; no agent identity or relay grant was created",
     }
 
 
@@ -1916,6 +2114,33 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             )
         _guard(run, output_as)
 
+    # -- optional local agent ------------------------------------------------
+
+    agent = typer.Typer(name="agent", help="optional resident agent lifecycle", no_args_is_help=True)
+
+    @agent.command("init")
+    def agent_init(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Create a separate Observe-mode agent identity and private config.
+
+        Does not grant relay capabilities or enable/start the service.
+        """
+        _guard(_agent_init, output_as)
+
+    @agent.command("status")
+    def agent_status(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Show whether the optional agent is installed, configured and running."""
+        _guard(_agent_status, output_as)
+
+    @agent.command("enable")
+    def agent_enable(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Validate the private config and explicitly enable/start the agent."""
+        _guard(lambda: _agent_service("enable"), output_as)
+
+    @agent.command("disable")
+    def agent_disable(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Stop and disable the optional agent service."""
+        _guard(lambda: _agent_service("disable"), output_as)
+
     @capability.command("delegate")
     def capability_delegate(
         pubkey: str = typer.Argument(..., help="delegate pubkey (64-hex)"),
@@ -2027,7 +2252,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app
