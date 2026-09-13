@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from bottle import Bottle, HTTPResponse, request
 
-from .cli import _TOOL_HANDLERS
+from .cli import _TOOL_HANDLERS, _agent_init, _agent_service, _agent_status
 from .core import NostrHostError
 from yunohost.nostr_identity import (
     IdentityError,
@@ -331,6 +331,28 @@ def build_app(
             delegator_sk=_config_operator_sk(),
             control_relay=_config_control_relay(),
         )
+
+    # -- agent (optional resident nostrhost-agent) ---------------------------
+    # Thin wrappers around the CLI's `nostrhost agent ...` lifecycle so the
+    # admin UI can drive the same root-owned config/service instead of a
+    # second implementation. Errors (missing binary, bad ownership, service
+    # failures) surface as ApiError via NostrHostError -> 400 mapping below.
+
+    @app.get("/agent/status")
+    def agent_status() -> Any:
+        return _agent_status()
+
+    @app.post("/agent/init")
+    def agent_init() -> Any:
+        return _agent_init()
+
+    @app.post("/agent/enable")
+    def agent_enable() -> Any:
+        return _agent_service("enable")
+
+    @app.post("/agent/disable")
+    def agent_disable() -> Any:
+        return _agent_service("disable")
 
     return app
 

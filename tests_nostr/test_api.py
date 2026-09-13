@@ -18,6 +18,7 @@ import pytest
 
 from nostrhost import api as api_module
 from nostrhost.api import ApiError, build_app
+from nostrhost.core import NostrHostError
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +318,56 @@ def test_capability_grant(app, monkeypatch):
     status, _, body = wsgi_request(app, "POST", "/capability/grant", {"pubkey": "abcd", "scopes": ["apps.read"], "type": "agent"})
     assert status == "200"
     assert captured["scopes"] == ["apps.read"]
+
+
+def test_agent_status(app, monkeypatch):
+    monkeypatch.setattr(api_module, "_agent_status", lambda: {"installed": False, "configured": False, "service_enabled": False, "service_active": False})
+    status, _, body = wsgi_request(app, "GET", "/agent/status")
+    assert status == "200"
+    assert json.loads(body)["installed"] is False
+
+
+def test_agent_init(app, monkeypatch):
+    monkeypatch.setattr(api_module, "_agent_init", lambda: {"configured": True, "agent_pubkey": "abcd"})
+    status, _, body = wsgi_request(app, "POST", "/agent/init")
+    assert status == "200"
+    assert json.loads(body)["agent_pubkey"] == "abcd"
+
+
+def test_agent_enable(app, monkeypatch):
+    captured = {}
+
+    def fake(action):
+        captured["action"] = action
+        return {"service": "nostrhost-agent.service", "action": action}
+
+    monkeypatch.setattr(api_module, "_agent_service", fake)
+    status, _, body = wsgi_request(app, "POST", "/agent/enable")
+    assert status == "200"
+    assert captured["action"] == "enable"
+
+
+def test_agent_disable(app, monkeypatch):
+    captured = {}
+
+    def fake(action):
+        captured["action"] = action
+        return {"service": "nostrhost-agent.service", "action": action}
+
+    monkeypatch.setattr(api_module, "_agent_service", fake)
+    status, _, body = wsgi_request(app, "POST", "/agent/disable")
+    assert status == "200"
+    assert captured["action"] == "disable"
+
+
+def test_agent_init_error_maps_to_400(app, monkeypatch):
+    def boom():
+        raise NostrHostError("nostrhost-agent is not installed")
+
+    monkeypatch.setattr(api_module, "_agent_init", boom)
+    status, _, body = wsgi_request(app, "POST", "/agent/init")
+    assert status == "400"
+    assert json.loads(body)["code"] == "operation_failed"
 
 
 def test_handler_error_maps_to_400(app, monkeypatch):

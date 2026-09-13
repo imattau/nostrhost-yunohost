@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/nostrhost-agent /var/lib/nostrhost-agent
 
 [Install]
 WantedBy=multi-user.target
