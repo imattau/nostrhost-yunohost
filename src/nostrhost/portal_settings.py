@@ -136,6 +136,7 @@ def portal_me_route():
         "mail": (record.get("mail") or [None])[0],
         "mailalias": list(record.get("mail", []))[1:],
         "mailforward": [],
+        "admin": bool(record.get("admin", False)),
         "groups": groups,
         "apps": apps,
     }

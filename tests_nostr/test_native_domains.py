@@ -398,6 +398,32 @@ def test_portal_public_returns_settings(monkeypatch):
     assert out["apps"] == {}
 
 
+def test_portal_me_reports_admin_flag(monkeypatch):
+    """The /me route exposes whether the session user is an admin, so the
+    portal can gate the Administration footer link to admins only."""
+    import bottle
+
+    from yunohost.nostrhost import portal_settings as ps
+
+    class _FakeHeader:
+        def get(self, key, default=None):
+            return "w4.test" if key == "host" else default
+
+    class _FakeRequest:
+        get_header = _FakeHeader().get
+
+    monkeypatch.setattr(bottle, "request", _FakeRequest())
+    monkeypatch.setattr("yunohost.nostr_account._session_username", lambda: "alice")
+    monkeypatch.setattr(
+        "yunohost.nostrhost.accounts.user_get",
+        lambda username: {"fullname": "Alice", "mail": ["alice@w4.test"], "admin": True},
+    )
+    monkeypatch.setattr(ps, "PORTAL_SETTINGS_DIR", "/nonexistent")
+    out = ps.portal_me_route()
+    assert out["username"] == "alice"
+    assert out["admin"] is True
+
+
 def test_nip05_body_builder(monkeypatch, tmp_path):
     import bottle
 
