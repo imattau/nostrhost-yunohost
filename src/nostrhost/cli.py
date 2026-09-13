@@ -515,6 +515,11 @@ def _agent_init() -> dict[str, Any]:
         raise NostrHostError("nostrhost-agent is not installed; install the optional nostrhost-agent package first")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    parent_stat = config_path.parent.lstat()
+    if config_path.parent.is_symlink() or not config_path.parent.is_dir():
+        raise NostrHostError("agent config directory must be a real directory")
+    if parent_stat.st_uid != 0:
+        os.chown(config_path.parent, 0, 0)
     os.chmod(config_path.parent, 0o750)
     agent_secret = secrets.token_hex(32)
     agent_pubkey = _pubkey(agent_secret)
@@ -547,6 +552,8 @@ def _agent_init() -> dict[str, Any]:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp_path, config_path)
+        if config_path.stat().st_uid != 0:
+            os.chown(config_path, 0, 0)
         os.chmod(config_path, 0o600)
     except Exception:
         try:
@@ -576,6 +583,9 @@ def _agent_service(action: str) -> dict[str, Any]:
     if action == "enable":
         if config_path.is_symlink() or not config_path.is_file():
             raise NostrHostError("agent config is missing or is not a regular file; run `nostrhost agent init` first")
+        parent_stat = config_path.parent.stat()
+        if config_path.parent.is_symlink() or parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
+            raise NostrHostError("agent config directory must be root-owned and not group/world writable")
         config_stat = config_path.stat()
         mode = config_stat.st_mode & 0o777
         if config_stat.st_uid != 0:

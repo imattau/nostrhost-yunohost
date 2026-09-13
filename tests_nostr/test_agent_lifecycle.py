@@ -28,6 +28,7 @@ def test_agent_init_creates_private_observe_config_without_enable_or_grant(monke
     })
     monkeypatch.setattr(cli_module, "_pubkey", lambda _secret: "a" * 64)
     monkeypatch.setattr(cli_module, "_npub", lambda _pubkey: "npub1agent")
+    monkeypatch.setattr(cli_module.os, "chown", lambda *_args: None)
     monkeypatch.setattr(cli_module.subprocess, "run", lambda *args, **kwargs: pytest.fail("init must not start or grant"))
 
     result = CliRunner().invoke(cli_module.build_app(), ["agent", "init", "--output-as", "json"])
@@ -39,6 +40,7 @@ def test_agent_init_creates_private_observe_config_without_enable_or_grant(monke
     assert payload["policy"] == "observe"
     assert payload["agent_pubkey"] == "a" * 64
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config.parent.stat().st_mode) == 0o750
     written = json.loads(config.read_text())
     assert written["relay"]["agent_secret_key"] != "1" * 64
     assert written["relay"]["trusted_server_key"] == "a" * 64
@@ -79,7 +81,7 @@ def test_agent_enable_validates_adds_writer_and_starts_only_on_explicit_command(
 
     def fake_stat(path, *args, **kwargs):
         result = real_stat(path, *args, **kwargs)
-        if path == config:
+        if path in (config, config.parent):
             return SimpleNamespace(st_mode=result.st_mode, st_uid=0)
         return result
 
