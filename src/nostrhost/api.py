@@ -49,6 +49,7 @@ from yunohost.nostr_operations import (
     OperationError,
     delegate_capability,
     grant_capability,
+    list_capabilities,
     revoke_delegation,
 )
 from nostrhost_auth.auth.nostr_verify import parse_and_verify_event
@@ -1083,6 +1084,10 @@ def build_app(
         )
 
     # -- capability -----------------------------------------------------------
+
+    @app.get("/package/capability/list")
+    def capability_list() -> Any:
+        return {"grants": list_capabilities(admin_sk=_config_admin_sk(), control_relay=_config_control_relay())}
 
     @app.post("/package/capability/grant")
     def capability_grant() -> Any:
