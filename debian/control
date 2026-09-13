@@ -25,23 +25,23 @@ Depends: python3-all (>= 3.11),
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
  , openssl, ca-certificates, ssl-cert, netcat-openbsd, iproute2
-, dnsmasq, resolvconf, libnss-myhostname
-  , acl
-  , restic
-  , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
+ , dnsmasq, resolvconf, libnss-myhostname
+ , acl
+ , restic
+ , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
  , lsb-release, haveged, fake-hwclock, lsof, whois
  , xz-utils, zstd
 Recommends: yunohost-admin (>= 12.1), yunohost-portal (>= 12.1)
  , ntp, inetutils-ping | iputils-ping
  , bash-completion, rsyslog
-  , unattended-upgrades
+ , unattended-upgrades
 Conflicts: iptables-persistent
  , apache2
  , bind9
  , openresolv
  , systemd-resolved
  , openssl (>= 3.1)
-  , dovecot-core (>= 1:2.4)
+ , dovecot-core (>= 1:2.4)
  , nftables (>= 1.1)
  , yunohost (<< 12.1.41.28)
 Description: manageable and configured self-hosting server

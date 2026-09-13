@@ -14,5 +14,5 @@ yunohost (12.1.41.39) stable; urgency=low
       Agent screen needs them).
     - catalog/list wraps the bare CLI list in {entries: [...]}.
 
- -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 20:19:53 
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 20:19:53 +0000 
 
