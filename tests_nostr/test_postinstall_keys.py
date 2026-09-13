@@ -165,3 +165,56 @@ def test_trust_caddy_internal_ca_none_when_no_root():
     # No Caddy root provisioned (host or test env) -> None, no crash.
     result = _trust_caddy_internal_ca()
     assert result is None or Path("/var/lib/caddy/pki/authorities/local/root.crt").exists()
+
+
+def test_provision_portal_session_secret_writes_32_char_secret(tmp_path):
+    """The portal session secret must be 32 chars (AES-256 key) and 0600; it is
+    what makes the single sign-in (portal login -> admin console) work."""
+    from nostrhost.cli import _provision_portal_session_secret
+
+    secret_path = tmp_path / ".ssowat_cookie_secret"
+    _provision_portal_session_secret(secret_path)
+    assert secret_path.exists()
+    assert len(secret_path.read_text().strip()) == 32
+    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
+    # Idempotent: second call does not rewrite it.
+    before = secret_path.read_text()
+    _provision_portal_session_secret(secret_path)
+    assert secret_path.read_text() == before
+
+
+def test_bootstrap_operator_account_creates_and_links(monkeypatch):
+    """postinstall creates the default nostrhost admin account and links the
+    operator identity, so the operator can sign in at the portal."""
+    from nostrhost import cli as cli_module
+    from nostrhost.cli import _bootstrap_operator_account
+
+    calls = {"create": [], "link": []}
+    monkeypatch.setattr("yunohost.user.user_list", lambda: {"users": {}})
+    monkeypatch.setattr("yunohost.user.user_create", lambda **kw: calls["create"].append(kw))
+    monkeypatch.setattr(
+        cli_module, "link_identity", lambda *a, **kw: calls["link"].append((a, kw)) or {"id": "evt"}
+    )
+
+    result = _bootstrap_operator_account("example.test", "ab" * 32)
+    assert calls["create"] and calls["create"][0]["username"] == "nostrhost"
+    assert calls["create"][0]["admin"] is True
+    assert calls["link"] and calls["link"][0][0] == ("nostrhost", "ab" * 32)
+    assert calls["link"][0][1]["admin"] is True
+    assert result["username"] == "nostrhost"
+
+
+def test_bootstrap_operator_account_skips_existing(monkeypatch):
+    from nostrhost import cli as cli_module
+    from nostrhost.cli import _bootstrap_operator_account
+
+    calls = {"create": [], "link": []}
+    monkeypatch.setattr("yunohost.user.user_list", lambda: {"users": {"nostrhost": {}}})
+    monkeypatch.setattr("yunohost.user.user_create", lambda **kw: calls["create"].append(kw))
+    monkeypatch.setattr(
+        cli_module, "link_identity", lambda *a, **kw: calls["link"].append((a, kw)) or {"id": "evt"}
+    )
+
+    _bootstrap_operator_account("example.test", "ab" * 32)
+    assert calls["create"] == []  # account already exists
+    assert calls["link"]  # identity still (re)linked

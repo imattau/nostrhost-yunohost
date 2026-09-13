@@ -108,7 +108,7 @@ def test_control_link_publishes_identity_event(store, operator):
     assert event["kind"] == 31102
     assert event["tags"][0] == ["d", subject]
     assert json.loads(event["content"]) == {
-        "username": "matt", "signer_type": "nip46", "label": "phone", "enabled": True,
+        "username": "matt", "signer_type": "nip46", "label": "phone", "enabled": True, "admin": False,
     }
 
 

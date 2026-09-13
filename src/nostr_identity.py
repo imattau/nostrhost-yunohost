@@ -509,6 +509,7 @@ def link_identity(
     signer_type: str = "unknown",
     label: str | None = None,
     enabled: bool = True,
+    admin: bool = False,
     transport: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Author an identity-definition event linking `pubkey_or_npub` to a
@@ -518,7 +519,15 @@ def link_identity(
         raise IdentityError(f"signer_type must be one of {', '.join(VALID_SIGNER_TYPES)}")
     pubkey = _parse_pubkey(pubkey_or_npub)
     cfg = _operator_config(operator_sk, control_relay)
-    content = json.dumps({"username": username, "signer_type": signer_type, "label": label, "enabled": bool(enabled)})
+    content = json.dumps(
+        {
+            "username": username,
+            "signer_type": signer_type,
+            "label": label,
+            "enabled": bool(enabled),
+            "admin": bool(admin),
+        }
+    )
     event = _sign_event(cfg.operator_sk, cfg.operator_pubkey, IDENTITY_KIND, content, [["d", pubkey]])
     (transport or publish_to_relay)(cfg.control_relay, event)
     return event
@@ -619,8 +628,17 @@ def _build_identity_event(
     signer_type: str,
     label: str | None,
     enabled: bool,
+    admin: bool = False,
 ) -> dict[str, Any]:
     """Build (without publishing) an identity-definition event — used by the
     projector's tests to fabricate events authored by an admin for a subject."""
-    content = json.dumps({"username": username, "signer_type": signer_type, "label": label, "enabled": enabled})
+    content = json.dumps(
+        {
+            "username": username,
+            "signer_type": signer_type,
+            "label": label,
+            "enabled": enabled,
+            "admin": admin,
+        }
+    )
     return _sign_event(operator_sk, operator_pubkey, IDENTITY_KIND, content, [["d", subject_pubkey]])

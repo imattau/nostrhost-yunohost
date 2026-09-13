@@ -1,14 +1,21 @@
-yunohost (12.1.41.36) stable; urgency=low
+yunohost (12.1.41.37) stable; urgency=low
 
-  * nostrhost: unified single sign-in for the admin console (portal session).
-    - The native API authorizer now accepts the nostrhost.portal session
-      cookie as an alternative to NIP-98: the portal login authenticates the
-      admin console too. GET /package/session reports the session identity +
-      admin status so the SPA can decide to show the console or redirect.
-    - All native API routes now live under /package/* (matching the Caddy
-      /package/* route and the admin SPA's API base), so the console's data
-      calls actually reach the API instead of the domain root responder.
-    - /session and /healthz are the only public routes.
+  * nostrhost: postinstall creates the default operator account (single sign-in).
+    - postinstall --new now creates the ``nostrhost`` admin account and links
+      the operator identity to it, so the operator can sign in at the portal
+      with their nsec and the admin console recognises them out of the box.
+    - postinstall provisions the portal session secret
+      (/etc/yunohost/.ssowat_cookie_secret, 32-byte AES-256 key) which the
+      portal-api session cookie needs; without it the single sign-in flow
+      could not mint sessions.
+    - identity-definition events (kind 31102) can carry an ``admin`` flag so
+      the projector creates the account as a YunoHost admin.
+    - user_create no longer crashes on minimal installs: nscd invalidation
+      tolerates a missing nscd, and the password dictionary check treats a
+      missing file as not-listed.
+    - user_is_allowed_on_domain checks native admin before the per-domain
+      portal-settings file, so an admin can sign in before app_ssowatconf has
+      written that file.
 
- -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 17:44:05 
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 18:25:29 
 

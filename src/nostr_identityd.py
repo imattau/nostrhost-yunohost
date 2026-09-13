@@ -52,7 +52,7 @@ class AccountBackend:
     def user_exists(self, username: str) -> bool:  # pragma: no cover - interface
         raise NotImplementedError
 
-    def ensure_user(self, username: str) -> None:  # pragma: no cover - interface
+    def ensure_user(self, username: str, *, admin: bool = False) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
 
@@ -66,7 +66,7 @@ class YnhAccountBackend(AccountBackend):
 
         return username in user_list()["users"]
 
-    def ensure_user(self, username: str) -> None:
+    def ensure_user(self, username: str, *, admin: bool = False) -> None:
         import secrets as _secrets
 
         from yunohost.domain import _get_maindomain
@@ -78,7 +78,7 @@ class YnhAccountBackend(AccountBackend):
             domain=_get_maindomain(),
             password=password,
             fullname=username,
-            admin=False,
+            admin=bool(admin),
         )
 
 
@@ -116,6 +116,7 @@ def handle_identity_event(
     enabled = bool(body.get("enabled", True))
     signer_type = str(body.get("signer_type") or "unknown")
     label = body.get("label")
+    admin_flag = bool(body.get("admin", False))
     if enabled and not username:
         logger.warning("identity event with empty username ignored")
         return False
@@ -124,7 +125,7 @@ def handle_identity_event(
     if enabled:
         if accounts is not None and existing is None:
             if not accounts.user_exists(username):
-                accounts.ensure_user(username)
+                accounts.ensure_user(username, admin=admin_flag)
                 logger.info("created compatibility account %s", username)
         if existing is not None:
             store.set_identity_enabled(existing.identity_id, existing.ynh_username, True)

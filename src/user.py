@@ -204,6 +204,18 @@ def shellexists(shell: str) -> bool:
     return os.path.isfile(shell) and os.access(shell, os.X_OK)
 
 
+def _invalidate_nss(database: str) -> None:
+    """Invalidate the NSS cache after a user/group change.
+
+    ``nscd`` is optional (the LDAP-free/native setup uses nsswitch=files
+    without it); a missing binary must not abort user operations.
+    """
+    try:
+        subprocess.call(["nscd", "-i", database])
+    except FileNotFoundError:
+        pass
+
+
 @is_unit_operation([("username", "user")])
 def user_create(
     operation_logger: "OperationLogger",
@@ -340,8 +352,8 @@ def user_create(
     save_users(_native)
 
     # Invalidate passwd and group to take user and group creation into account
-    subprocess.call(["nscd", "-i", "passwd"])
-    subprocess.call(["nscd", "-i", "group"])
+    _invalidate_nss("passwd")
+    _invalidate_nss("group")
 
     try:
         # Attempt to create user home folder
@@ -457,7 +469,7 @@ def user_delete(
     AdminAuth.invalidate_all_sessions_for_user(username)
 
     # Invalidate passwd to take user deletion into account
-    subprocess.call(["nscd", "-i", "passwd"])
+    _invalidate_nss("passwd")
 
     if purge:
         subprocess.call(["rm", "-rf", f"/home/{username}"])
@@ -688,8 +700,8 @@ def user_update(
         PortalAuth.invalidate_all_sessions_for_user(username)
 
     # Invalidate passwd and group to update the loginShell
-    subprocess.call(["nscd", "-i", "passwd"])
-    subprocess.call(["nscd", "-i", "group"])
+    _invalidate_nss("passwd")
+    _invalidate_nss("group")
 
     # Trigger post_user_update hooks
     hook_callback("post_user_update", env=env_dict)

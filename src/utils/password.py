@@ -210,6 +210,12 @@ class PasswordValidator:
         if os.path.exists("%s.gz" % MOST_USED_PASSWORDS):
             os.system("gzip -fd %s.gz" % MOST_USED_PASSWORDS)
 
+        # The dictionary may be absent on minimal/locked-down installs (e.g.
+        # the identityd's read-only namespace); a missing list cannot prove
+        # the password is common, so treat it as not-listed rather than crash.
+        if not os.path.exists(MOST_USED_PASSWORDS):
+            return False
+
         # Grep the password in the file
         # We use '-f -' to feed the pattern (= the password) through
         # stdin to avoid it being shown in ps -ef --forest...

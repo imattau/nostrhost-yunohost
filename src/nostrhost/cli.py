@@ -878,6 +878,26 @@ def _prepare_node(domain: str, operator_npub: str) -> None:
     _write_policy_toml(operator_npub)
     _render_caddy_base(domain)
     Path("/etc/yunohost/current_host").write_text(domain + "\n")
+    _provision_portal_session_secret()
+
+
+def _provision_portal_session_secret(path: str | Path | None = None) -> Path:
+    """Ensure the portal session cookie secret exists.
+
+    The portal-api mints/validates the ``nostrhost.portal`` session cookie with
+    this AES-256 key; without it the single sign-in flow (portal login -> admin
+    console) cannot work. The legacy YunoHost postinstall wizard wrote it;
+    the native postinstall must too. 32 bytes exactly (AES-256-CBC key).
+    """
+    import secrets as _secrets
+
+    secret_path = Path(path or "/etc/yunohost/.ssowat_cookie_secret")
+    if secret_path.exists():
+        return secret_path
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text(_secrets.token_urlsafe(24)[:32])
+    secret_path.chmod(0o600)
+    return secret_path
 
 
 def _publish_initial_capability(operator_pubkey: str) -> dict[str, Any] | None:
@@ -887,6 +907,48 @@ def _publish_initial_capability(operator_pubkey: str) -> dict[str, Any] | None:
 
     try:
         return grant_capability(operator_pubkey, list(KNOWN_SCOPES), type_="admin")
+    except Exception as exc:  # noqa: BLE001 - surfaced in the summary
+        return {"error": str(exc)}
+
+
+def _bootstrap_operator_account(
+    domain: str,
+    operator_pubkey: str,
+    username: str = "nostrhost",
+) -> dict[str, Any]:
+    """Create the default ``nostrhost`` account and link the operator identity.
+
+    Runs during postinstall (full root privileges, outside the identityd's
+    locked-down namespace): creates the ``nostrhost`` YunoHost account
+    (generated password — never used for login, the portal is passwordless)
+    flagged as an admin, then publishes a kind-31102 identity event binding
+    the operator pubkey to it. ``nostr-identityd`` materialises just the link
+    (the account already exists). This is what makes the "sign in once" flow
+    work out of the box: the operator logs in at the portal with their nsec
+    and the admin console recognises them.
+    """
+    import secrets as _secrets
+
+    from yunohost.user import user_list, user_create
+
+    try:
+        if username not in user_list()["users"]:
+            password = _secrets.token_urlsafe(24) + "Aa1!"
+            user_create(
+                username=username,
+                domain=domain,
+                password=password,
+                fullname="NostrHost operator",
+                admin=True,
+            )
+        event = link_identity(
+            username,
+            operator_pubkey,
+            signer_type="nip07",
+            label="operator",
+            admin=True,
+        )
+        return {"username": username, "pubkey": operator_pubkey, "event": event.get("id")}
     except Exception as exc:  # noqa: BLE001 - surfaced in the summary
         return {"error": str(exc)}
 
@@ -932,6 +994,7 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
     failed = _enable_postinstall_daemons()
     _trust_caddy_internal_ca()
     grant = _publish_initial_capability(boot["operator_pubkey"])
+    operator_account = _bootstrap_operator_account(domain, boot["operator_pubkey"])
 
     repo = StateRepo(state_dir_from_env(), boot["server_pubkey"])
     tree = export_state(YunohostBackend())
@@ -974,9 +1037,13 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         "recovery": _recovery_bundle(boot),
         "state_announcement": announce,
         "capability_grant": "ok" if isinstance(grant, dict) and "error" not in grant else str(grant or ""),
+        "operator_account": operator_account.get("username", "error")
+        if "error" not in operator_account
+        else f"error: {operator_account['error']}",
         "daemons_failed": failed or "none",
-        "note": "operator_npub is the owner identity; log in via the portal and link it. "
-        "The recovery bundle above is shown ONCE - back it up offline (nsec1 keys). "
+        "note": "The operator key is linked to the default 'admin' account (portal "
+        "login with the operator nsec). The recovery bundle above is shown ONCE - "
+        "back it up offline (nsec1 keys). "
         "The optional agent remains unconfigured; install it separately, then run `nostrhost agent init`.",
         "agent": "optional agent not configured; no agent identity or relay grant was created",
     }

@@ -39,10 +39,10 @@ class FakeAccounts:
         self.ensured = []
 
     def user_exists(self, username):
-        return username in self.ensured
+        return username in [u for u, _ in self.ensured]
 
-    def ensure_user(self, username):
-        self.ensured.append(username)
+    def ensure_user(self, username, *, admin=False):
+        self.ensured.append((username, admin))
 
 
 class FakeTransport:
@@ -89,7 +89,7 @@ def test_link_identity_publishes_valid_event():
     assert ev["kind"] == 31102
     assert ev["pubkey"] == pk
     assert ev["tags"][0] == ["d", subject_pk]
-    assert json.loads(ev["content"]) == {"username": "matt", "signer_type": "nip46", "label": "phone", "enabled": True}
+    assert json.loads(ev["content"]) == {"username": "matt", "signer_type": "nip46", "label": "phone", "enabled": True, "admin": False}
 
     from nostr_sdk import Event as NsEvent
 
@@ -129,7 +129,22 @@ def test_projector_materializes_and_creates_account(tmp_path):
     assert identity is not None
     assert identity.username == "matt"
     assert identity.signer_type == "nip46"
-    assert accounts.ensured == ["matt"]
+    assert accounts.ensured == [("matt", False)]
+
+
+def test_projector_creates_admin_account_when_flagged(tmp_path):
+    admin_sk, admin_pk = new_key()
+    _, subject_pk = new_key()
+    store = _store(tmp_path / "i.db")
+    accounts = FakeAccounts()
+
+    event = _build_identity_event(admin_sk, admin_pk, subject_pk, "admin", "nip07", None, True, admin=True)
+    assert handle_identity_event(event, store=store, admin_pubkeys=[admin_pk], accounts=accounts) is True
+
+    identity = resolve_pubkey(subject_pk, db_path=tmp_path / "i.db")
+    assert identity is not None
+    assert identity.username == "admin"
+    assert accounts.ensured == [("admin", True)]
 
 
 def test_projector_ignores_non_admin(tmp_path):

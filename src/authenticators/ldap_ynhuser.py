@@ -84,6 +84,27 @@ PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
 def user_is_allowed_on_domain(user: str, domain: str) -> bool:
     assert "/" not in domain
 
+    # Native admin check (roadmap §25): no LDAP read, no portal-settings file
+    # needed. An admin (native account with an enabled Nostr identity whose
+    # pubkey is in the operator admin set, or an account store record flagged
+    # admin) can access every domain — even before app_ssowatconf has written
+    # the per-domain portal settings.
+    try:
+        from yunohost.nostr_identity import is_admin_user
+
+        if is_admin_user(user):
+            return True
+    except Exception as e:
+        logger.debug(f"native admin check unavailable: {e}")
+
+    try:
+        from yunohost.nostrhost.accounts import user_is_admin as native_admin
+
+        if native_admin(user):
+            return True
+    except Exception as e:
+        logger.debug(f"native account admin check unavailable: {e}")
+
     portal_settings_path = Path(PORTAL_SETTINGS_DIR) / f"{domain}.json"
 
     if not portal_settings_path.exists():
@@ -111,26 +132,6 @@ def user_is_allowed_on_domain(user: str, domain: str) -> bool:
     if user in DOMAIN_USER_ACL_DICT[domain]["users"]:
         # A user with explicit permission to an application is certainly welcome
         return True
-
-    # Native admin check (roadmap §25): no LDAP read. An admin (native
-    # account with an enabled Nostr identity whose pubkey is in the operator
-    # admin set, or an account store record flagged admin) can access every
-    # domain.
-    try:
-        from yunohost.nostr_identity import is_admin_user
-
-        if is_admin_user(user):
-            return True
-    except Exception as e:
-        logger.debug(f"native admin check unavailable: {e}")
-
-    try:
-        from yunohost.nostrhost.accounts import user_is_admin as native_admin
-
-        if native_admin(user):
-            return True
-    except Exception as e:
-        logger.debug(f"native account admin check unavailable: {e}")
 
     try:
         from yunohost.nostrhost.accounts import user_mail_domains
