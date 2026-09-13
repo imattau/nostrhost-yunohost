@@ -897,14 +897,14 @@ def test_user_list(app, monkeypatch):
     assert json.loads(body) == {"users": {"alice": {}}}
 
 
-def test_user_create(app, monkeypatch):
-    captured = {}
-
-    def fake(**kwargs):
-        captured.update(kwargs)
-        return {"username": kwargs["username"], "domain": kwargs["domain"], "admin": kwargs["admin"]}
-
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.create", fake)
+def test_user_create_uses_signed_chain(app, monkeypatch):
+    """user.create is require_approval=True in the registry: it must go
+    through _run_lifecycle (signed chain + owner co-signature), never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
     status, _, body = wsgi_request(
         app,
         "POST",
@@ -917,42 +917,171 @@ def test_user_create(app, monkeypatch):
         },
     )
     assert status == "200"
-    assert captured == {
-        "username": "alice",
-        "domain": "example.com",
-        "password": "hunter2",
-        "fullname": "Alice Example",
-        "mailbox_quota": "0",
-        "admin": False,
-    }
+    assert json.loads(body)["request_id"] == "r" * 64
+    assert calls == [
+        (
+            "user.create",
+            {
+                "username": "alice",
+                "domain": "example.com",
+                "password": "hunter2",
+                "fullname": "Alice Example",
+                "mailbox_quota": "0",
+                "admin": False,
+            },
+        )
+    ]
 
 
-def test_user_update(app, monkeypatch):
-    captured = {}
-
-    def fake(**kwargs):
-        captured.update(kwargs)
-        return {"username": kwargs["username"]}
-
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.update", fake)
+def test_user_update_uses_signed_chain(app, monkeypatch):
+    """user.update is require_approval=True in the registry: it must go
+    through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
     status, _, body = wsgi_request(app, "POST", "/package/user/update", {"username": "alice", "fullname": "Alice B"})
     assert status == "200"
-    assert captured["username"] == "alice"
-    assert captured["fullname"] == "Alice B"
-    assert captured["mail"] is None
+    assert json.loads(body)["request_id"] == "r" * 64
+    tool, args = calls[0]
+    assert tool == "user.update"
+    assert args["username"] == "alice"
+    assert args["fullname"] == "Alice B"
+    assert args["mail"] is None
 
 
-def test_user_delete(app, monkeypatch):
+def test_user_delete_uses_signed_chain(app, monkeypatch):
+    """user.delete is high-risk/irreversible: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, body = wsgi_request(app, "POST", "/package/user/delete", {"username": "alice", "purge": True})
+    assert status == "200"
+    assert json.loads(body)["request_id"] == "r" * 64
+    assert calls == [("user.delete", {"username": "alice", "purge": True, "force": False})]
+
+
+def test_get_user_group_list(app, monkeypatch):
+    monkeypatch.setitem(
+        api_module._TOOL_HANDLERS, "user.group.list", lambda **k: {"admins": {"members": []}}
+    )
+    status, _, body = wsgi_request(app, "GET", "/package/user/group/list")
+    assert status == "200"
+    assert json.loads(body) == {"admins": {"members": []}}
+
+
+def test_post_user_group_create_uses_signed_chain(app, monkeypatch):
+    """user.group.create is medium-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/user/group/create", {"groupname": "editors"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("user.group.create", {"groupname": "editors", "gid": None})]
+
+
+def test_post_user_group_update_uses_signed_chain(app, monkeypatch):
+    """user.group.update is medium-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"groupname": "editors", "add": ["alice"], "remove": ["bob"]}
+    status, _, resp = wsgi_request(app, "POST", "/package/user/group/update", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("user.group.update", {"groupname": "editors", "add": ["alice"], "remove": ["bob"]})]
+
+
+def test_post_user_group_delete_uses_signed_chain(app, monkeypatch):
+    """user.group.delete is high-risk/irreversible: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/user/group/delete", {"groupname": "editors"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("user.group.delete", {"groupname": "editors", "force": False})]
+
+
+def test_get_user_permission_list(app, monkeypatch):
     captured = {}
 
     def fake(**kwargs):
         captured.update(kwargs)
-        return {"username": kwargs["username"], "purge": kwargs["purge"]}
+        return {"permissions": {}}
 
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.delete", fake)
-    status, _, body = wsgi_request(app, "POST", "/package/user/delete", {"username": "alice", "purge": True})
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.permission.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/user/permission/list?full=true")
     assert status == "200"
-    assert captured == {"username": "alice", "purge": True, "force": False}
+    assert captured == {"full": True}
+    assert json.loads(body) == {"permissions": {}}
+
+
+def test_get_user_permission_info(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"label": "Nextcloud"}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.permission.info", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/user/permission/info/nextcloud.main")
+    assert status == "200"
+    assert captured == {"permission": "nextcloud.main"}
+    assert json.loads(body) == {"label": "Nextcloud"}
+
+
+def test_post_user_permission_add_uses_signed_chain(app, monkeypatch):
+    """user.permission.add is medium-risk: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"permission": "nextcloud.main", "names": ["editors"]}
+    status, _, resp = wsgi_request(app, "POST", "/package/user/permission/add", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("user.permission.add", {"permission": "nextcloud.main", "names": ["editors"]})]
+
+
+def test_post_user_permission_remove_uses_signed_chain(app, monkeypatch):
+    """user.permission.remove is medium-risk: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"permission": "nextcloud.main", "names": ["editors"]}
+    status, _, resp = wsgi_request(app, "POST", "/package/user/permission/remove", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("user.permission.remove", {"permission": "nextcloud.main", "names": ["editors"]})]
+
+
+def test_post_user_permission_update_uses_signed_chain(app, monkeypatch):
+    """user.permission.update is medium-risk: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"permission": "nextcloud.main", "label": "Cloud", "show_tile": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/user/permission/update", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [
+        ("user.permission.update", {"permission": "nextcloud.main", "label": "Cloud", "show_tile": True})
+    ]
 
 
 def test_catalog_list(app, monkeypatch):

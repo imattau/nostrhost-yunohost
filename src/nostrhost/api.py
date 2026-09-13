@@ -827,8 +827,11 @@ def build_app(
 
     @app.post("/package/user/create")
     def user_create() -> Any:
+        """Create a YunoHost user account/mailbox. Medium-risk: routed
+        through the signed operation chain (owner co-signature), not
+        _run_tool (user.create is require_approval=True in the registry)."""
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "user.create",
             {
                 "username": body.get("username", ""),
@@ -838,12 +841,16 @@ def build_app(
                 "mailbox_quota": body.get("mailbox_quota", "0"),
                 "admin": bool(body.get("admin", False)),
             },
+            state=_State(),
         )
 
     @app.post("/package/user/update")
     def user_update() -> Any:
+        """Update an existing user. Medium-risk: routed through the signed
+        operation chain (owner co-signature), not _run_tool (user.update is
+        require_approval=True in the registry)."""
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "user.update",
             {
                 "username": body.get("username", ""),
@@ -856,18 +863,117 @@ def build_app(
                 "mailbox_quota": body.get("mailbox_quota"),
                 "fullname": body.get("fullname"),
             },
+            state=_State(),
         )
 
     @app.post("/package/user/delete")
     def user_delete() -> Any:
+        """Delete a YunoHost user account. High-risk/irreversible: routed
+        through the signed operation chain (owner co-signature), not
+        _run_tool."""
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "user.delete",
             {
                 "username": body.get("username", ""),
                 "purge": bool(body.get("purge", False)),
                 "force": bool(body.get("force", False)),
             },
+            state=_State(),
+        )
+
+    # -- user group -------------------------------------------------------------
+
+    @app.get("/package/user/group/list")
+    def user_group_list() -> Any:
+        return _run_tool("user.group.list", {})
+
+    @app.post("/package/user/group/create")
+    def user_group_create() -> Any:
+        """Create a new user group. Medium-risk: routed through the signed
+        operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.group.create",
+            {"groupname": body.get("groupname", ""), "gid": body.get("gid")},
+            state=_State(),
+        )
+
+    @app.post("/package/user/group/update")
+    def user_group_update() -> Any:
+        """Add/remove usernames from a group. Medium-risk: routed through
+        the signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.group.update",
+            {
+                "groupname": body.get("groupname", ""),
+                "add": body.get("add"),
+                "remove": body.get("remove"),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/user/group/delete")
+    def user_group_delete() -> Any:
+        """Delete a user group. High-risk/irreversible: routed through the
+        signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.group.delete",
+            {"groupname": body.get("groupname", ""), "force": bool(body.get("force", False))},
+            state=_State(),
+        )
+
+    # -- user permission ----------------------------------------------------
+
+    @app.get("/package/user/permission/list")
+    def user_permission_list() -> Any:
+        full = request.query.get("full", "").lower() == "true"
+        return _run_tool("user.permission.list", {"full": full})
+
+    @app.get("/package/user/permission/info/<permission>")
+    def user_permission_info(permission: str) -> Any:
+        return _run_tool("user.permission.info", {"permission": permission})
+
+    @app.post("/package/user/permission/add")
+    def user_permission_add() -> Any:
+        """Grant users/groups access to a permission. Medium-risk: routed
+        through the signed operation chain (owner co-signature), not
+        _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.permission.add",
+            {"permission": body.get("permission", ""), "names": body.get("names", [])},
+            state=_State(),
+        )
+
+    @app.post("/package/user/permission/remove")
+    def user_permission_remove() -> Any:
+        """Revoke users/groups access to a permission. Medium-risk: routed
+        through the signed operation chain (owner co-signature), not
+        _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.permission.remove",
+            {"permission": body.get("permission", ""), "names": body.get("names", [])},
+            state=_State(),
+        )
+
+    @app.post("/package/user/permission/update")
+    def user_permission_update() -> Any:
+        """Update a permission's label/tile visibility, not membership.
+        Medium-risk: routed through the signed operation chain (owner
+        co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "user.permission.update",
+            {
+                "permission": body.get("permission", ""),
+                "label": body.get("label"),
+                "show_tile": body.get("show_tile"),
+            },
+            state=_State(),
         )
 
     # -- package ------------------------------------------------------------
