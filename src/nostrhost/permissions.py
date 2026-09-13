@@ -11,6 +11,11 @@ architecture as the old SSOwat conf, minus the SSOwat dependency.
 The ``PermissionProvider`` regenerates the projection after every native
 permission operation; the authd reads it with a fallback to the legacy
 ``/etc/ssowat/conf.json`` during the transition.
+
+Membership additionally merges in NIP-51 permission-list grants (see
+``nostrhost.nip51_permissions``, roadmap §25 Phase 2) -- additively, on top
+of the LDAP-sourced membership, never replacing it. See
+``docs/LDAP-RETIREMENT.md``.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ def build_permissions_projection() -> dict[str, Any]:
             "auth_header": False,
             "public": True,
             "uris": [
-                *(f"{domain}/yunohost/admin" for domain in domains),
+                *(f"{domain}/admin" for domain in domains),
                 *(f"{domain}/yunohost/api" for domain in domains),
                 *(f"{domain}/yunohost/portalapi" for domain in domains),
                 *WELL_KNOWN_PUBLIC_URIS,
@@ -88,7 +93,25 @@ def build_permissions_projection() -> dict[str, Any]:
             "uris": uris,
         }
 
+    _merge_nip51_grants(permissions)
+
     return {"permissions": permissions}
+
+
+def _merge_nip51_grants(permissions: dict[str, Any]) -> None:
+    """Best-effort merge of NIP-51 permission-list grants into ``permissions``.
+
+    Never raises: an unavailable identity store or permission-grant store
+    (e.g. before either has been initialised on a fresh install) must not
+    break the LDAP-sourced projection this function is called from.
+    """
+    try:
+        from nostrhost.nip51_permissions import PermissionStore, merge_projection
+        from yunohost.nostr_identity import resolve_pubkey
+
+        merge_projection(permissions, PermissionStore(), resolve_pubkey=resolve_pubkey)
+    except Exception as exc:  # noqa: BLE001 - additive projection must not break the build
+        logger.debug("skipping NIP-51 permission merge: %s", exc)
 
 
 def write_permissions_projection(

@@ -27,6 +27,8 @@ nostrhost-control:
   category: core
 nostr-identityd:
   category: admin
+nostr-permissiond:
+  category: admin
 nostr-operationsd:
   category: admin
 nostr-securityd:
