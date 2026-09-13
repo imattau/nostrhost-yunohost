@@ -27,7 +27,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
-from moulinette import Moulinette
+from nostrhost.core import Moulinette
 
 from debian import debian_support
 

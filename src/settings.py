@@ -23,7 +23,7 @@ import subprocess
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Callable, Union
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from .firewall import firewall_reload
 from .log import is_unit_operation
@@ -36,7 +36,7 @@ from .utils.mail import mail_stack_installed
 if TYPE_CHECKING:
     from typing import cast
 
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny
 
     from .log import OperationLogger
     from .utils.configpanel import (
@@ -185,18 +185,18 @@ class SettingsConfigPanel(ConfigPanel):
         # Script got manually interrupted ...
         # N.B. : KeyboardInterrupt does not inherit from Exception
         except (KeyboardInterrupt, EOFError):
-            error = m18n.n("operation_interrupted")
-            logger.error(m18n.n("config_apply_failed", error=error))
+            error = tr("operation_interrupted")
+            logger.error(tr("config_apply_failed", error=error))
             raise
         # Something wrong happened in Yunohost's code (most probably hook_exec)
         except Exception:
             import traceback
 
-            error = m18n.n("unexpected_error", error="\n" + traceback.format_exc())
-            logger.error(m18n.n("config_apply_failed", error=error))
+            error = tr("unexpected_error", error="\n" + traceback.format_exc())
+            logger.error(tr("config_apply_failed", error=error))
             raise
 
-        logger.success(m18n.n("global_settings_reset_success"))
+        logger.success(tr("global_settings_reset_success"))
 
         if operation_logger:
             operation_logger.success()
@@ -211,12 +211,9 @@ class SettingsConfigPanel(ConfigPanel):
 
         # Specific logic for virtual setting "passwordless_sudo"
         try:
-            from .utils.ldap import _get_ldap_interface
+            from .nostrhost.accounts import passwordless_sudo
 
-            ldap = _get_ldap_interface()
-            raw_settings["passwordless_sudo"] = "!authenticate" in ldap.search(
-                "ou=sudo", "cn=admins", ["sudoOption"]
-            )[0].get("sudoOption", [])
+            raw_settings["passwordless_sudo"] = passwordless_sudo()
         except Exception:
             raw_settings["passwordless_sudo"] = False
 
@@ -242,13 +239,9 @@ class SettingsConfigPanel(ConfigPanel):
             tools_rootpw(root_password, check_strength=True)
 
         if passwordless_sudo is not None:
-            from .utils.ldap import _get_ldap_interface
+            from .nostrhost.accounts import set_passwordless_sudo
 
-            ldap = _get_ldap_interface()
-            ldap.update(
-                "cn=admins,ou=sudo",
-                {"sudoOption": "!authenticate" if passwordless_sudo else []},
-            )
+            set_passwordless_sudo(bool(passwordless_sudo))
 
         # First save settings except virtual + default ones
         super()._apply(form, config, previous_settings, exclude=self.virtual_settings)

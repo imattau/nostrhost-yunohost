@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_operations import (
     KIND_CAPABILITY,
-    KIND_EXECUTION_RESULT,
-    KIND_EXECUTION_STARTED,
     KIND_OPERATION_APPROVAL,
     KIND_OPERATION_REJECTION,
     KIND_OPERATION_REQUEST,
@@ -36,7 +35,7 @@ from yunohost.nostr_operations import (
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 
@@ -52,28 +51,256 @@ class FakeTransport:
 
 def test_registry_has_the_safe_tools():
     assert known_tools() == [
+        "app.change_url",
+        "app.config.read",
+        "app.config.set",
+        "app.install",
         "app.list",
         "app.remove",
+        "app.upgrade",
+        "audit.get",
+        "audit.list",
+        "backup.create",
+        "backup.delete",
+        "backup.list",
+        "backup.restore",
+        "catalog.get",
+        "catalog.list",
+        "catalog.publish",
+        "catalog.verify",
+        "credential.list",
+        "credential.remove",
+        "credential.set",
+        "diagnosis.run",
+        "dns.apply",
+        "dns.plan",
+        "dns.subscribe",
+        "dns.subscriptions",
+        "dns.unsubscribe",
+        "dns.verify",
+        "dns.watch",
+        "domain.add",
+        "domain.cert.info",
+        "domain.cert.install",
+        "domain.inspect",
+        "domain.list",
+        "domain.remove",
+        "firewall.close",
+        "firewall.list",
+        "firewall.open",
+        "firewall.reload",
+        "logs.read",
+        "logs.web",
+        "network.public_ip",
         "package.plan",
         "package.reconcile",
         "rollback.apply",
         "service.control",
+        "service.history",
         "service.restart",
         "service.status",
         "state.reconcile",
+        "system.migrate",
+        "system.migrations",
+        "system.status",
+        "system.upgrade",
         "system.version",
+        "updates.check",
+        "updates.refresh",
+        "user.create",
+        "user.delete",
+        "user.group.create",
+        "user.group.delete",
+        "user.group.list",
+        "user.group.update",
+        "user.list",
+        "user.permission.add",
+        "user.permission.info",
+        "user.permission.list",
+        "user.permission.remove",
+        "user.permission.update",
+        "user.update",
     ]
     assert tool_spec("system.version").scope == "server.read"
+    assert tool_spec("system.version").require_approval is False
     assert tool_spec("app.list").scope == "apps.read"
+    assert tool_spec("app.list").require_approval is False
     assert tool_spec("service.status").scope == "services.read"
-    assert tool_spec("service.restart").scope == "services.write"
+    assert tool_spec("service.status").require_approval is False
+    assert tool_spec("service.restart").scope == "services.restart"
     assert tool_spec("rollback.apply").scope == "state.write"
     assert tool_spec("package.plan").require_approval is False
+    assert tool_spec("domain.list").scope == "domains.read"
+    assert tool_spec("domain.add").scope == "domains.write"
+    assert tool_spec("dns.apply").scope == "dns.write"
+    assert tool_spec("dns.plan").require_approval is False
+    # Broadened native surface (MCP transition Phase 0): granular scopes and
+    # the reference policy tiers.
+    assert tool_spec("app.remove").scope == "apps.remove"
+    assert tool_spec("app.install").scope == "apps.install"
+    assert tool_spec("app.upgrade").scope == "apps.upgrade"
+    assert tool_spec("backup.create").scope == "backups.create"
+    assert tool_spec("backup.restore").scope == "backups.restore"
+    assert tool_spec("user.create").scope == "users.write"
+    assert tool_spec("user.delete").scope == "users.delete"
+    assert tool_spec("system.upgrade").scope == "system.upgrade"
+    assert tool_spec("firewall.open").scope == "firewall.write"
+    assert tool_spec("diagnosis.run").scope == "diagnosis.read"
+    assert tool_spec("diagnosis.run").require_approval is False
+    # Phase 5 backlog surface: scopes, approval posture, and the gated reads.
+    assert tool_spec("updates.check").require_approval is False
+    assert tool_spec("updates.refresh").scope == "system.update"
+    assert tool_spec("system.migrations").scope == "system.update"
+    assert tool_spec("system.migrations").require_approval is False
+    assert tool_spec("system.migrate").scope == "system.migrate"
+    assert tool_spec("service.history").require_approval is False
+    assert tool_spec("logs.read").scope == "logs.read"
+    assert tool_spec("logs.read").require_approval is False
+    assert tool_spec("logs.web").scope == "logs.read"
+    assert tool_spec("backup.delete").scope == "backups.delete"
+    assert tool_spec("domain.cert.info").scope == "domains.read"
+    assert tool_spec("domain.cert.info").require_approval is False
+    assert tool_spec("domain.cert.install").scope == "domains.write"
+    assert tool_spec("user.update").scope == "users.write"
+    assert tool_spec("user.group.list").require_approval is False
+    assert tool_spec("user.group.delete").scope == "users.delete"
+    assert tool_spec("user.permission.list").require_approval is False
+    assert tool_spec("user.permission.info").scope == "users.read"
+    assert tool_spec("catalog.verify").scope == "catalog.verify"
+    assert tool_spec("catalog.verify").require_approval is False
+    assert tool_spec("audit.list").scope == "audit.read"
+    assert tool_spec("audit.get").scope == "audit.read"
     for name, spec in TOOLS.items():
         assert spec.handler is not None
-        if name != "package.plan":
+        if name not in (
+            "package.plan",
+            "domain.list",
+            "domain.inspect",
+            "dns.plan",
+            "dns.verify",
+            "dns.watch",
+            "dns.subscriptions",
+            "network.public_ip",
+            "credential.list",
+            "system.version",
+            "app.list",
+            "service.status",
+            "system.status",
+            "app.config.read",
+            "backup.list",
+            "user.list",
+            "firewall.list",
+            "diagnosis.run",
+            "catalog.list",
+            "catalog.get",
+            "updates.check",
+            "updates.refresh",
+            "system.migrations",
+            "service.history",
+            "logs.read",
+            "logs.web",
+            "domain.cert.info",
+            "user.group.list",
+            "user.permission.list",
+            "user.permission.info",
+            "catalog.verify",
+        ):
             assert spec.require_approval is True
-    assert tool_spec("app.upgrade") is None
+    assert tool_spec("app.upgrade") is not None
+
+
+def test_registry_schemas_and_catalog():
+    """Every new op exposes a JSON-Schema input model through the catalogue."""
+    from yunohost.nostr_operations import operation_catalog
+
+    catalog = operation_catalog()
+    by_name = {entry["name"]: entry for entry in catalog}
+    assert len(catalog) == len(known_tools())
+    for name, spec in TOOLS.items():
+        entry = by_name[name]
+        assert entry["scope"] == spec.scope
+        assert entry["require_approval"] == spec.require_approval
+        assert entry["risk"] in ("low", "medium", "high")
+        assert entry["reversibility"] in ("reversible", "partial", "irreversible")
+        assert entry["description"]
+    app_install = by_name["app.install"]
+    assert app_install["risk"] == "high"
+    assert app_install["input_schema"]["required"] == ["app"]
+    # extra="forbid" models surface as additionalProperties: false
+    assert app_install["input_schema"].get("additionalProperties") is False
+    # unknown tools carry no schema
+    assert operation_catalog()
+    import json
+
+    assert json.dumps(catalog)  # fully JSON-serialisable
+
+
+def test_every_write_tool_carries_an_input_model():
+    """Every approval-gated (mutation) op must expose a JSON-Schema input model
+    so generated MCP tools advertise their real arguments (Phase 3)."""
+    from yunohost.nostr_operations import TOOLS, operation_catalog
+
+    for name, spec in TOOLS.items():
+        if spec.require_approval:
+            assert spec.input_model is not None, f"write tool {name} is missing an input_model"
+    catalog = {entry["name"]: entry for entry in operation_catalog()}
+    for name in TOOLS:
+        if TOOLS[name].require_approval:
+            schema = catalog[name]["input_schema"]
+            assert schema and isinstance(schema.get("properties"), dict), f"write tool {name} has no schema properties"
+            assert schema.get("additionalProperties") is False, f"write tool {name} schema must forbid extra args"
+
+
+def test_service_status_accepts_the_planner_name_argument(monkeypatch):
+    import sys
+    from types import ModuleType
+    from yunohost.nostr_operations import _safe_service_status
+
+    calls = []
+
+    def fake_status(names=None):
+        calls.append(names)
+        if names is None:
+            return {"caddy": {"status": "running"}, "opendkim": {"status": "running"}}
+        return {names: {"status": "running"}}
+
+    service = ModuleType("yunohost.service")
+    service._get_services = lambda: {"caddy": {}, "opendkim": {}}
+    service.service_status = fake_status
+    monkeypatch.setitem(sys.modules, "yunohost.service", service)
+
+    assert _safe_service_status(name="opendkim") == {"opendkim": {"status": "running"}}
+    assert _safe_service_status() == {
+        "caddy": {"status": "running"},
+        "opendkim": {"status": "running"},
+    }
+    assert calls == ["opendkim", None]
+
+
+@pytest.mark.parametrize(
+    "legacy_apps",
+    [
+        [{"id": "legacy-app", "version": "1.2"}],
+        {"legacy-app": {"id": "legacy-app", "version": "1.2"}},
+    ],
+)
+def test_app_list_normalizes_legacy_registry_shapes(monkeypatch, legacy_apps):
+    import sys
+    from types import ModuleType
+
+    from yunohost.nostr_operations import _safe_app_list
+
+    legacy_app = ModuleType("yunohost.app")
+    legacy_app.app_list = lambda **_kwargs: {"apps": legacy_apps}
+    native_providers = ModuleType("nostrhost.native_providers")
+    native_providers.installed_package_manifest = lambda _app_id: None
+    monkeypatch.setitem(sys.modules, "yunohost.app", legacy_app)
+    monkeypatch.setitem(sys.modules, "nostrhost.native_providers", native_providers)
+    monkeypatch.setattr(Path, "glob", lambda _path, _pattern: [])
+
+    assert _safe_app_list() == {
+        "apps": {"legacy-app": {"id": "legacy-app", "version": "1.2"}}
+    }
 
 
 def test_request_event_shape():
@@ -125,7 +352,7 @@ def test_delegation_event_shape_and_revocation():
 def test_request_operation_publishes_via_transport():
     agent_sk, agent_pk = new_key()
     transport = FakeTransport()
-    ev = request_operation("system.version", {}, requester_sk=agent_sk, transport=transport)
+    request_operation("system.version", {}, requester_sk=agent_sk, transport=transport)
     assert len(transport.events) == 1
     assert transport.events[0]["kind"] == KIND_OPERATION_REQUEST
     assert transport.events[0]["pubkey"] == agent_pk
@@ -133,7 +360,7 @@ def test_request_operation_publishes_via_transport():
 
 def test_request_operation_rejects_unknown_tool():
     with pytest.raises(OperationError):
-        request_operation("app.upgrade", {}, transport=FakeTransport())
+        request_operation("app.bogus", {}, transport=FakeTransport())
 
 
 def test_approve_and_reject_publish_as_admin():

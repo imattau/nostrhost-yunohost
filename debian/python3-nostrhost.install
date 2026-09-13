@@ -1,0 +1,5 @@
+# python3-nostrhost — the native moulinette replacement: the nostrhost
+# framework package plus its CLI and API entry points.
+src/nostrhost /usr/lib/python3/dist-packages/
+bin/nostrhost /usr/bin/
+bin/nostr-api /usr/bin/

@@ -29,6 +29,8 @@ import os
 import re
 import time
 
+from .nostr_identity import _is_hex64
+
 logger = logging.getLogger("nostrhost-login")
 
 LOGIN_ACTION = "yunohost-login"
@@ -62,12 +64,16 @@ def issue_challenge(domain: str) -> str:
 # session minting + login
 
 def _user_infos_for_session(username: str) -> dict:
-    from .utils.ldap import _get_ldap_interface
+    from .nostrhost.accounts import user_get, user_mail
 
-    result = _get_ldap_interface().search("ou=users", f"uid={username}", ["cn", "mail"])
-    if not result:
+    record = user_get(username)
+    mails = user_mail(username)
+    if record is None or not mails:
         raise LoginError("no such user")
-    return {"cn": result[0]["cn"][0], "mail": result[0]["mail"][0]}
+    return {
+        "cn": str(record.get("fullname", username)),
+        "mail": mails[0],
+    }
 
 
 def create_portal_session(username: str, *, domain: str | None = None) -> None:
@@ -132,7 +138,7 @@ def _notice_config() -> dict | None:
 
 def _notice_signer() -> tuple[str, str] | None:
     """Return the portal's dedicated (sk, pubkey) notice key, or None."""
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     conf = _notice_config()
     if not conf:
@@ -140,12 +146,8 @@ def _notice_signer() -> tuple[str, str] | None:
     sk = conf.get("notice_sk")
     if not isinstance(sk, str) or not _is_hex64(sk):
         return None
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
-
-
-def _is_hex64(s: str) -> bool:
-    return len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s)
 
 
 def _publish_login_notice(pubkey: str, username: str) -> None:

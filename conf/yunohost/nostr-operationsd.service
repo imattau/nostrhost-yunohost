@@ -1,0 +1,24 @@
+[Unit]
+Description=NostrHost operation executor (2200-2204 chain)
+After=network-online.target nostrhost-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-operationsd
+Restart=on-failure
+RestartSec=5s
+User=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+# The executor is the single writer to the engine (roadmap §6); the broadened
+# native surface (firewall, backup, user, app lifecycle, diagnosis, system
+# upgrade) writes the yunohost state/log dirs, so they are explicit read-write
+# mounts alongside the NostrHost state dirs. Everything else stays read-only.
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt
+
+[Install]
+WantedBy=multi-user.target

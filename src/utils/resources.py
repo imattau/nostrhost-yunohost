@@ -27,7 +27,7 @@ import tempfile
 from logging import getLogger
 from typing import Any, Callable, Dict, List, Union
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from ..utils.error import YunohostError, YunohostValidationError
 from ..utils.system import debian_version, debian_version_id, system_arch
@@ -73,7 +73,7 @@ class AppResourceManager:
             except (KeyboardInterrupt, Exception) as e:
                 exception = e
                 if isinstance(e, KeyboardInterrupt):
-                    logger.error(m18n.n("operation_interrupted"))
+                    logger.error(tr("operation_interrupted"))
                 else:
                     logger.warning(f"Failed to {todo} {name} : {e}")
                 if rollback_and_raise_exception_if_failure:
@@ -101,14 +101,14 @@ class AppResourceManager:
                         old.provision_or_update(context=context)
                 except (KeyboardInterrupt, Exception) as e:
                     if isinstance(e, KeyboardInterrupt):
-                        logger.error(m18n.n("operation_interrupted"))
+                        logger.error(tr("operation_interrupted"))
                     else:
                         logger.error(f"Failed to rollback {name} : {e}")
 
         if exception:
             if rollback_and_raise_exception_if_failure:
                 logger.error(
-                    m18n.n("app_resource_failed", app=self.app, error=exception)
+                    tr("app_resource_failed", app=self.app, error=exception)
                 )
                 if operation_logger:
                     failure_message_with_debug_instructions = operation_logger.error(

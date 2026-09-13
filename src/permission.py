@@ -19,22 +19,19 @@
 #
 
 import copy
-import grp
 import os
-import random
 import re
 from logging import getLogger
 from typing import (
     TYPE_CHECKING,
     BinaryIO,
     Literal,
-    Mapping,
     NotRequired,
     TypedDict,
     cast,
 )
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from .utils.error import YunohostError, YunohostValidationError
 from .utils.file_utils import read_yaml, write_to_yaml
@@ -269,7 +266,7 @@ def user_permission_update(
                 raise YunohostValidationError("group_unknown", group=group)
             if group in current_allowed_groups:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "permission_already_allowed", permission=permission, group=group
                     )
                 )
@@ -281,7 +278,7 @@ def user_permission_update(
         for group in groups_to_remove:
             if group not in current_allowed_groups:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "permission_already_disallowed",
                         permission=permission,
                         group=group,
@@ -299,7 +296,7 @@ def user_permission_update(
     # though, but it's not fine to have ["all_users", "visitors", "volunteers"]
     if "all_users" in new_allowed_groups and len(new_allowed_groups) >= 2:
         if "visitors" not in new_allowed_groups or len(new_allowed_groups) >= 3:
-            logger.warning(m18n.n("permission_currently_allowed_for_all_users"))
+            logger.warning(tr("permission_currently_allowed_for_all_users"))
 
     if (
         existing_permission.get("url")
@@ -307,7 +304,7 @@ def user_permission_update(
         and show_tile
     ):
         logger.warning(
-            m18n.n(
+            tr(
                 "regex_incompatible_with_tile",
                 regex=existing_permission["url"],  # type: ignore
                 permission=permission,
@@ -336,9 +333,9 @@ def user_permission_update(
     # This is meant to reduce noise during resource update/provisioning
     # but display a "success" flash message when admins trigger this operation manually ?
     if log_success_as_debug:
-        logger.debug(m18n.n("permission_updated", permission=permission))
+        logger.debug(tr("permission_updated", permission=permission))
     else:
-        logger.success(m18n.n("permission_updated", permission=permission))
+        logger.success(tr("permission_updated", permission=permission))
 
     return user_permission_info(permission)
 
@@ -453,7 +450,7 @@ def permission_create(
         _sync_permissions_with_ldap()
         app_ssowatconf()
 
-    logger.debug(m18n.n("permission_created", permission=permission))
+    logger.debug(tr("permission_created", permission=permission))
     return user_permission_info(permission)
 
 
@@ -514,7 +511,7 @@ def permission_url(
         assert url
         if url.startswith("re:") and existing_permission.get("show_tile"):
             logger.warning(
-                m18n.n("regex_incompatible_with_tile", regex=url, permission=permission)
+                tr("regex_incompatible_with_tile", regex=url, permission=permission)
             )
             update_settings["show_tile"] = False
 
@@ -525,7 +522,7 @@ def permission_url(
         for ur in add_url:
             if ur in current_additional_urls:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "additional_urls_already_added", permission=permission, url=ur
                     )
                 )
@@ -537,7 +534,7 @@ def permission_url(
         for ur in remove_url:
             if ur not in current_additional_urls:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "additional_urls_already_removed", permission=permission, url=ur
                     )
                 )
@@ -574,7 +571,7 @@ def permission_url(
         # In the past, this was a call to _sync_permissions_with_ldap but nowadays these changes dont impact ldap, only the ssowat conf
         app_ssowatconf()
 
-    logger.debug(m18n.n("permission_updated", permission=permission))
+    logger.debug(tr("permission_updated", permission=permission))
     return user_permission_info(permission)
 
 
@@ -610,113 +607,33 @@ def permission_delete(
         _sync_permissions_with_ldap()
         app_ssowatconf()
 
-    logger.debug(m18n.n("permission_deleted", permission=permission))
+    logger.debug(tr("permission_deleted", permission=permission))
 
 
 def _sync_permissions_with_ldap() -> None:
     """
-    Sychronize the 'memberUid' / 'inheritPermission' attributes in the ldap permission object
-    according to the group members and permission "allowed" info from app settings (from user_permission_list)
+    Regenerate the native permission projection (roadmap §25).
+
+    Historically this wrote ``memberUid``/``inheritPermission`` into LDAP's
+    ``ou=permission`` objects so libnss-ldapd/libpam-ldapd could resolve
+    permission membership for the authd. With LDAP retired, the projection
+    the Caddy authd reads is ``/etc/nostrhost/permissions.json``, which is
+    derived from the same ``user_permission_list()`` data. This function
+    regenerates that projection after any membership change.
     """
 
     _garbarge_collect_permissions_for_nonexistent_users()
 
-    from .utils.ldap import _get_ldap_interface
+    try:
+        from .nostrhost.permissions import write_permissions_projection
 
-    ldap = _get_ldap_interface()
+        write_permissions_projection()
+    except Exception as e:  # noqa: BLE001 - projection regen is best-effort
+        logger.warning(f"failed to regenerate native permission projection: {e}")
 
-    permissions_wanted = {
-        perm: set(infos["corresponding_users"])
-        for perm, infos in user_permission_list(full=True)["permissions"].items()
-    }
-    permissions_current = {
-        entry["cn"][0]: set(entry.get("memberUid", []))
-        for entry in ldap.search(
-            "ou=permission", "(objectclass=permissionYnh)", ["cn", "memberUid"]
-        )
-    }
+    logger.debug("Permissions were resynchronized to the native projection")
 
-    # Compute the todolist by comparing the current state vs. the wanted state for each perm
-    todos_create: dict[str, set[str]] = {}
-    todos_delete: list[str] = []
-    todos_update: dict[str, set[str]] = {}
-
-    for perm in permissions_current.keys():
-        if perm not in permissions_wanted:
-            todos_delete.append(perm)
-    for perm, members_wanted in permissions_wanted.items():
-        if perm not in permissions_current:
-            todos_create[perm] = members_wanted
-        elif members_wanted != permissions_current[perm]:
-            todos_update[perm] = members_wanted
-
-    # Actually perform the delete / create / update operations
-
-    for perm in todos_delete:
-        logger.debug(f"Removing LDAP perm {perm}")
-        try:
-            ldap.remove(f"cn={perm},ou=permission")
-        except Exception as e:
-            raise YunohostError("permission_deletion_failed", permission=perm, error=e)
-
-    all_gids = {str(x.gr_gid) for x in grp.getgrall()}
-    for perm in todos_create:
-        logger.debug(f"Creating LDAP perm {perm}")
-        app = perm.split(".")[0]
-        if app in SYSTEM_PERMS:
-            gid = str(SYSTEM_PERMS[app]["gid"])
-        else:
-            while True:
-                gid = str(random.randint(200, 99999))
-                if gid not in all_gids:
-                    break
-
-        # Save the gid to the list of existing gid, to avoid picking the same gid twice in the unlikely case where we would be creating several perm at the same time
-        all_gids.add(gid)
-
-        attr_dict: Mapping[str, str | list[str]] = {
-            "objectClass": ["top", "permissionYnh", "posixGroup"],
-            "cn": perm,
-            "gidNumber": gid,
-            # NB: the "inheritPermission" and "memberUid" info is redundant
-            # but is needed because "memberUid" corresponds to the posixGroup object
-            # whereas inheritPermission automatically creates the symetric link
-            # from user to perm (cf the "permission" key on users)
-            # (cf the olcOverlay={2}memberof )
-            "inheritPermission": list(
-                sorted(
-                    f"uid={u},ou=users,dc=yunohost,dc=org"
-                    for u in permissions_wanted[perm]
-                )
-            ),
-            "memberUid": list(sorted(permissions_wanted[perm])),
-        }
-        try:
-            ldap.add(f"cn={perm},ou=permission", attr_dict)
-        except Exception as e:
-            raise YunohostError("permission_creation_failed", permission=perm, error=e)
-    for perm in todos_update:
-        logger.debug(f"Updating LDAP perm {perm}")
-        try:
-            # Same note about redundant memberUid vs inheritPermission as before
-            ldap.update(
-                f"cn={perm},ou=permission",
-                {
-                    "inheritPermission": list(
-                        sorted(
-                            f"uid={u},ou=users,dc=yunohost,dc=org"
-                            for u in permissions_wanted[perm]
-                        )
-                    ),
-                    "memberUid": list(sorted(permissions_wanted[perm])),
-                },
-            )
-        except Exception as e:
-            raise YunohostError("permission_update_failed", permission=perm, error=e)
-
-    logger.debug("Permissions were resynchronized to LDAP")
-
-    # Reload/invalidate unscd cache to full propagate the changes
+    # Reload/invalidate unscd cache to fully propagate the changes
     os.system("nscd --invalidate=passwd")
     os.system("nscd --invalidate=group")
 
@@ -785,7 +702,7 @@ def _update_app_permission_setting(
         if show_tile is True:
             if not existing_permission_url:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "show_tile_cant_be_enabled_for_url_not_defined",
                         permission=permission,
                     )
@@ -793,7 +710,7 @@ def _update_app_permission_setting(
                 update_settings["show_tile"] = False
             elif existing_permission_url.startswith("re:"):
                 logger.warning(
-                    m18n.n("show_tile_cant_be_enabled_for_regex", permission=permission)
+                    tr("show_tile_cant_be_enabled_for_regex", permission=permission)
                 )
                 update_settings["show_tile"] = False
 

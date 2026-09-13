@@ -1,3 +1,408 @@
+yunohost (12.1.41.31) stable; urgency=low
+
+  * nostrhost: integrate the optional resident agent lifecycle.
+    - Add root-only Observe-mode agent provisioning and explicit service
+      enable/disable commands; keep agent setup out of package postinst and
+      default postinstall bootstrap.
+    - Reconcile configured agent writer keys in the local relay allowlist;
+      keep operation capability grants as a separate operator action.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 13:37:41 +1000
+
+yunohost (12.1.41.30) stable; urgency=low
+
+  * nostrhost: LDAP fully retired (roadmap §25, Phases 3-5).
+    - Native account store (`nostrhost/accounts.py`): real Unix accounts via
+      useradd/userdel/groupadd/gpasswd (no libnss-ldapd/libpam-ldapd) plus a
+      root-owned JSON metadata store (fullname/mail/quota/groups) at
+      /etc/nostrhost/accounts.json; SSH keys at ssh-keys.json.
+    - user.py user/group CRUD, user_is_allowed_on_domain, nostr_login session
+      infos, ssh.py and settings.py passwordless_sudo all read the native
+      store instead of LDAP.
+    - _sync_permissions_with_ldap now regenerates the native permission
+      projection (/etc/nostrhost/permissions.json) the Caddy authd reads.
+    - Deleted slapd infra: python3-ldap/slapd/ldap-utils/sudo-ldap/
+      libnss-ldapd/unscd/libpam-ldapd dropped from debian/control;
+      conf/slapd, conf/nslcd, 06-slapd/09-nslcd hooks, 05-conf_ldap
+      backup/restore hooks, dovecot/postfix LDAP configs, slapd service
+      registration and certd restart removed; nsswitch.conf uses plain files.
+    - utils/ldap.py deleted; @Migration.ldap_migration is a no-op; migration
+      0033 reduced to a safe no-op.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 12:00:00 +0000
+
+yunohost (12.1.41.29) stable; urgency=low
+
+  * nostrhost: LDAP retirement §25 + Stage C ngit DR + cleanup.
+    - §25: dead moulinette LDAP-bind auth removed; NIP-51 permission-list
+      projection (`nostr_permissiond`, kind-30000 projector), CLI grant/clear
+      authoring, and a native admin check ahead of LDAP in
+      user_is_allowed_on_domain. The email-domain LDAP read, Admin (web) UI,
+      and actual LDAP cutover remain.
+    - Stage C: kind-30617 repository announcement + kind-2214 chunked,
+      gzip-compressed, server-signed git-bundle events replicate the state
+      repository outbound to control + external relays (`nostrhost-state
+      publish`; auto-publish on postinstall --new/--restore);
+      `clone_state_repository` reconstructs the repo from relays + identity
+      with no central forge.
+    - cleanup: removed dead modules (storage/disk/udisks2, portal) and
+      dead functions; consolidated duplicated nostr tag/hex helpers, kind
+      constants, and pydantic base; fixed unused imports.
+    - restored the native package-authoring CLI (schema/init/validate/plan/
+      explain) and the admin SPA route at /admin/ to match the packaging
+      contract.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 10:00:00 +0000
+
+yunohost (12.1.41.28) stable; urgency=low
+
+  * nostrhost: W4 Phase E — nostr-native free hostname (identity-backed Dynette).
+    - `nostrhost dns subscribe <label>.nohost.me` claims a free Dynette
+      hostname with the node's OWN Nostr identity instead of the legacy TOTP
+      dance: the operator key signs a kind-39910 ownership claim (persisted
+      root-0600 under state/free-hostnames/) and the TSIG secret goes into
+      the credential broker as secret:dns/dynette/<hostname>.
+    - DynetteProvider resolves that broker ref (no explicit credential, no
+      legacy key file); the domain.add gate accepts an identity-subscribed
+      host without a --credential. dns.subscribe/dns.unsubscribe
+      (dns.write), dns.subscriptions (domains.read).
+    - The ownership proof is the signature: the claim is NIP-01 signed by the
+      operator pubkey and verifiable offline.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 18:00:00 +0000
+
+yunohost (12.1.41.27) stable; urgency=low
+
+  * nostrhost: W4 Phase D — Dynette compat provider.
+    - DynetteProvider (dynamic-IP only): point-to-point A/AAAA updates for a
+      legacy yunohost.dyndns host (nohost.me / noho.st / ynh.fr) via an RFC
+      2136 TSIG hmac-sha512 update pushed to dyndns.yunohost.org, mirroring
+      the legacy `yunohost dyndns update` behavior.
+    - Compat-conditional credentials: an explicit secret:dns/dynette/<name>
+      reference, else the TSIG key file the legacy subscription wrote
+      (/etc/yunohost/dyndns/K<host>.+165+1234.key). domain.add lets such a
+      host be registered natively without re-entering its key; without the
+      key file a credential ref is still required.
+    - Wired into the native registry: capabilities (full_zone=False, dynamic)
+      route dynette domains through the point-to-point push path, so the DDNS
+      watcher reconciles them on public-IP change just like DuckDNS/Dynu.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 12:00:00 +0000
+
+yunohost (12.1.41.26) stable; urgency=low
+
+  * nostrhost: W4 Phase C — DDNS providers (DuckDNS/Dynu/deSEC) + IP watcher.
+    - DuckDnsProvider (dynamic-IP only): pushes the host's current A/AAAA to
+      www.duckdns.org/update (domains/token/ip/ipv6), token from the broker
+      as secret:dns/duckdns/<name>. full_zone=False, wildcard=False.
+    - DynuProvider (dynamic-IP only): pushes via api.dynu.com/nic/update;
+      credential is username:password (HTTP Basic auth) or a bare IP-update
+      password; maps good/nochg and surfaces badauth/nohost/notfqdn.
+    - DesecProvider (full-zone REST): RRset list/create/update/delete via
+      desec.io/api/v1 with Authorization: Token; TXT quoting and apex
+      (subname '') handled; ownership-bounded through the local mirror with
+      (subname,type) as the provider record id; dynamic_ip=True.
+    - DomainService capability branches: dynamic-IP-only providers route
+      dns.add/apply/plan/remove through point-to-point push (no zone
+      enumeration); full-zone providers keep the plan/apply reconcile.
+      Domain states now record the provider's real capabilities.
+    - DDNS IP watcher (nostr-ddnswatchd): polls the public IPv4/IPv6 and on
+      change reconciles every registered domain whose provider advertises
+      dynamic_ip (full-zone via plan/apply, DDNS via push); last-seen
+      addresses + last update persisted to state/ddns-watch.json (0600) so
+      restarts don't fire spurious updates. Interval via
+      /etc/nostrhost/ddns.toml [watch].interval or NOSTRHOST_DDNS_INTERVAL.
+    - New read-only op dns.watch (domains.read) + `nostrhost dns watch`
+      reporting last-seen IPs and the dynamic domains; domain.add now
+      requires a credential ref for every non-manual provider.
+    - Tests: tests_nostr/test_native_ddns_phase_c.py (20 tests: provider
+      request building, desec lifecycle + TXT/apex, service branches,
+      watcher poll/persist/restart, ops wiring). 436 fork tests pass.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 08:00:00 +0200
+
+yunohost (12.1.41.25) stable; urgency=low
+
+  * nostrhost: W4 Phase B — provider credentials, Cloudflare, app [dns.*]
+    records (enforce + own) and drift report-vs-reconcile.
+    - Credential broker: DNS provider tokens live in root mode-600 files
+      under /var/lib/nostrhost/credentials/dns/<provider>/<name>; resources
+      reference them as secret:dns/<provider>/<name> and providers resolve
+      the token internally (operators/agents never see it). New ops
+      credential.set/remove/list; new scopes dns.credentials.write/read;
+      policy key dns.credentials.write (confirmation-gated). CLI group
+      `nostrhost credential`.
+    - CloudflareProvider: zone discovery + record CRUD through the REST API
+      (verified HTTPS), ownership-bounded via the local mirror (only records
+      NostrHost created are mutated; provider record ids are mirrored so
+      updates/deletes target the Cloudflare record id). DnsRecord gains a
+      provider_id field; the reconciler prefers it over the fingerprint.
+      domain.add --provider cloudflare --credential secret:dns/cloudflare/x.
+    - App [dns.*] manifest section: apps declare DNS records relative to
+      their web.domain; plan_package emits dns.records.ensure (reverse
+      dns.records.remove). The domain desired-set folds app records owned as
+      app:<id>, so domain.add/inspect/dns.plan/apply/verify enforce them and
+      app removal (or a dns.records.remove step) deletes exactly the
+      departing app's records. The web.domain must be a registered native
+      domain.
+    - Drift report-vs-reconcile: dns.plan (and domain.inspect) now include a
+      drift object (in_sync, summary, to_create/to_update/to_delete,
+      preserved); dns.apply reconciles.
+
+yunohost (12.1.41.24) stable; urgency=low
+
+  * nostrhost: W4 Phase A — native domains & DNS as a first-class subsystem.
+    Fully parallel to the legacy YunoHost domain/DNS/DynDNS machinery (no
+    LDAP virtualdomain, no nginx/postfix/mail/cert regenconf).
+    - New modules: nostrhost.domains (models/service/planner/operations),
+      nostrhost.dns (models/reconciler/ownership + providers/manual) and
+      nostrhost.network (public_ip).
+    - DomainResource intent: name, primary, DNS provider ref, exposure
+      (ipv4/ipv6/wildcard), tls (automatic + optional explicit CAA
+      issuers), nostr (nip05). DnsProviderResource carries a
+      secret:dns/<provider>/<name> credential reference only.
+    - Ownership-bounded reconciliation: desired vs actual diff, only
+      NostrHost-owned records are ever created/updated/deleted; external
+      zone records are preserved and reported. State under
+      /var/lib/nostrhost/state/{domains,dns}.
+    - ManualProvider: default, idempotent zone state on disk + best-effort
+      resolution verify.
+    - New ops: domain.list/inspect/add/remove, dns.plan/apply/verify,
+      network.public_ip; new scopes domains.read/domains.write/dns.write;
+      policy mapping domain.add/remove -> domains.write, dns.apply ->
+      domains.dns. CLI groups `nostrhost domain`, `dns`, `network`.
+    - NIP-05: per-domain .well-known/nostr.json via Caddy route ->
+      portal-api authd (build_nostr_json + identity store); only opt-in
+      linked identities are revealed.
+    - Legacy permission URL validation now accepts native domains via the
+      parallel registry (no LDAP); _assert_domain_exists falls back to the
+      native registry when LDAP is unavailable.
+    - Fixes from the live VM proof: native domain state lives in
+      state/domains-native (the legacy state/domains section is re-rendered
+      from LDAP by the state recorder and would clobber it); build_domain_site
+      ANDs host+path in a single matcher so the root route can't shadow the
+      whole server (same trap build_web_route documents).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 06:00:00 +0200
+
+yunohost (12.1.41.23) stable; urgency=low
+
+  * nostrhost: native app lifecycle fixes found porting the first real app
+    (opencode-web_nh):
+    - plan_package stringifies service.working_directory/credentials (a Path
+      in the signed request envelope broke build_operation_request).
+    - ServiceProvider.inspect tolerates enable/start/remove ops (name-only)
+      instead of rendering the unit and KeyError'ing on missing exec.
+    - ServiceSecurity gains read_write_paths (rendered as ReadWritePaths) so
+      service packages can declare writable data dirs under ProtectSystem.
+    - app ids may contain underscores (NostrHost-native `_nh` tail).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 04:00:00 +0200
+
+yunohost (12.1.41.22) stable; urgency=low
+
+  * nostrhost: package.ensure writes a minimal legacy manifest.json (id/
+    version/name) so the app registry can enumerate native apps; app.list
+    now lists native packages from the resource-engine state (best-effort
+    merge with the legacy registry) instead of depending on it.
+  * nostrhost: full native app lifecycle verified on a clean VM — install
+    (coordinate -> fetch/verify -> signed chain -> policy -> approval ->
+    execute -> Caddy route -> permission -> health), backup, upgrade
+    (conservative re-apply), change-url and native removal.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 03:00:00 +0200
+
+yunohost (12.1.41.21) stable; urgency=low
+
+  * nostrhost: core pydantic imports migrate to pydantic.v1 (the full v1
+    compat module bundled with pydantic v2) — the runtime ships pydantic v2
+    for the auth lib, which silently broke the fork's v1-native form.py /
+    configpanel.py / settings / domain / app machinery under the venv.
+  * nostrhost: package.ensure registers a minimal legacy app entry
+    (/etc/yunohost/apps/<id>/settings.yml with id/domain/path) so the portal
+    permission machinery treats native apps as installed; removal cleans it.
+  * nostrhost: new nostr-portal-api daemon (127.0.0.1:6788) serving the Caddy
+    forward_auth authd + Nostr sign-in/identity/OIDC routes — the W2-era
+    gap that left every auth-required web route with a dead forward_auth
+    backend (502).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 02:00:00 +0200
+
+yunohost (12.1.41.20) stable; urgency=low
+
+  * nostrhost: apply_reconciled_plan seeds already-satisfied (skipped)
+    resources into the dependency resolver — a re-apply where the
+    provider-ensure op is satisfied but a dependent op still runs deadlocked
+    with "operation plan contains an unknown dependency or cycle".
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 01:00:00 +0200
+
+yunohost (12.1.41.19) stable; urgency=low
+
+  * nostrhost: postinstall's policy.toml must quote dotted section keys
+    ([policy."apps.upgrade"]) — an unquoted [policy.apps.upgrade] parses as a
+    nested TOML table that load_policy() silently ignores, so the generated
+    overrides (require_backup, minimum_free_space, ...) never applied.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 00:00:00 +0200
+
+yunohost (12.1.41.18) stable; urgency=low
+
+  * nostrhost: fix the venv re-exec detection — the venv python is a symlink
+    to the system interpreter, so realpath can't tell them apart; detect via
+    sys.prefix instead (the CLI could not sign without this).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 23:00:00 +0200
+
+yunohost (12.1.41.17) stable; urgency=low
+
+  * nostrhost: bin scripts re-exec into /opt/nostrhost/venv when present —
+    the runtime's wheels (coincurve, nostr-sdk, ...) live only in the venv,
+    so the system-python CLI could not sign operation requests.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 22:30:00 +0200
+
+yunohost (12.1.41.16) stable; urgency=low
+
+  * nostr_restic.snapshots() no longer filters by the configured tag by
+    default — the tag is a creation default, not a listing filter, so
+    per-app/system snapshots count as policy backup evidence and show in
+    `nostrhost backup list`. `backup create` uses the configured tag.
+  * nostrhost CLI: lifecycle helpers import through yunohost.* (12.1.41.15).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 22:00:00 +0200
+
+yunohost (12.1.41.15) stable; urgency=low
+
+  * nostrhost: fix the lifecycle helpers' import paths — they imported
+    nostr_restic/nostr_operations/nostr_catalog_provider as top-level
+    modules, which only works in the source tree; on an installed node they
+    live inside the yunohost package. Regression test added.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 21:30:00 +0200
+
+yunohost (12.1.41.14) stable; urgency=low
+
+  * nostrhost: register the `backup` CLI group (create/list) — it was built
+    but never add_typer'd, so `nostrhost backup` did not exist.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 21:00:00 +0200
+
+yunohost (12.1.41.13) stable; urgency=low
+
+  * nostrhost-core.postinst: regen-conf is best-effort (|| true) — in a
+    cyclic nostrhost-core/python3-nostrhost upgrade apt may configure the
+    core first, and a stale CLI must not fail the install.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 20:30:00 +0200
+
+yunohost (12.1.41.12) stable; urgency=low
+
+  * nostrhost: `system regen-conf` must init headless mode first — the
+    operation logger reads Moulinette.interface.type, which is unset outside
+    the daemons since moulinette was retired (regression from 12.1.41.11).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 20:00:00 +0200
+
+yunohost (12.1.41.11) stable; urgency=low
+
+  * nostrhost: add `system regen-conf` CLI command and use it from the
+    postinst upgrade path — the renamed CLI dropped /usr/bin/yunohost, so the
+    package postinst must drive regenconf through `nostrhost` (exit 127 on
+    upgrade otherwise).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 19:30:00 +0200
+
+yunohost (12.1.41.10) stable; urgency=low
+
+  * nostrhost-core.postinst: fix the upgrade path — the core rename had
+    replaced `yunohost tools regen-conf` with bare hook invocations, which
+    crash (unbound $1 under set -u) on any apt upgrade of an installed node.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 19:00:00 +0200
+
+yunohost (12.1.41.9) stable; urgency=low
+
+  * nostrhost: Workstream 3 native app lifecycle.
+    - package.reconcile plans now persist the resolved package manifest
+      (package.manifest.ensure -> package.manifest.remove) so native
+      removal / upgrade diff / backup-path resolution work offline.
+    - apply_operation_plan returns per-operation results
+      ({operation, resource, result}) for the admin result.
+    - health.http.check carries the served app URL (domain + path) and
+      native_providers wires a default httpx client on real hosts.
+    - nostr_operations.run_signed_chain(): the local operator path through
+      the full signed request -> policy -> approval -> execute chain with
+      pre/post StateRecorder + Restic hooks.
+    - CLI: app install / upgrade / remove (native plan) / change-url /
+      backup / restore + backup create/list; coordinate resolution from the
+      native catalogue (native_catalog_coordinate) with manifest_sha256
+      verification and --source for local package.toml checkouts.
+    - nostrhost_native_policy counts Restic snapshots as backup evidence so
+      apps.upgrade/remove policy gates are satisfiable by the native backup
+      plane.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 18:30:00 +0200
+
+yunohost (12.1.41.8) stable; urgency=low
+
+  * nostrhost: caddy.service points HOME at /var/lib/caddy so autosave and
+    app-data stay in the writable StateDirectory instead of /root
+    (ProtectHome makes /root read-only).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 17:00:00 +0200
+
+yunohost (12.1.41.7) stable; urgency=low
+
+  * nostrhost: postinstall fixes from the clean-VM acceptance run —
+    api.py auth plugin reads the route rule from bottle 0.12 dict Routes
+    (fixes /healthz 500 on Debian); caddy.service uses StateDirectory/
+    LogsDirectory so the mount namespace never fails on a missing dir;
+    postinstall also creates /var/lib/caddy; nostrhost-certd.service/timer
+    now ship to /lib/systemd/system so postinstall can enable the timer.
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 16:00:00 +0200
+
+yunohost (12.1.41.6) stable; urgency=low
+
+  * nostrhost: native postinstall (ALPHA-PLAN W2) — `nostrhost postinstall
+    new` bootstraps a fresh node (bootstrap_node key-gen callable, operator/
+    portal/relay/policy configs, Caddy base render, daemon + certd enablement,
+    state S0 commit + kind-30617 announce, initial capability grant); `restore`
+    recovers identity + state via bundle or kind-30617 discovery/clone and
+    reconciles. Legacy tools_postinstall deprecated (kept for the SPA wizard).
+  * nostrhost: ship + enable native systemd units (nostr-identityd,
+    nostr-operationsd, nostr-securityd, nostr-api, caddy) on the venv
+    interpreter; add services.yml entries; control unit ships from the
+    nostrhost-control submodule.
+  * nostrhost: nostr-api derives operator/admins from operator.toml so the
+    unit is self-contained; caddy_domain.conf serves /usr/share/nostrhost/
+    {portal,admin}; nostr_state gains kind-30617 discovery + clone helpers.
+  * nostrhost-core now Depends on nostrhost-runtime (fork-side W1 closure).
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 15:00:00 +0200
+
+yunohost (12.1.41.5) stable; urgency=low
+
+  * nostrhost: core rename Stage 2 — binary package is now nostrhost-core
+    (Provides/Replaces/Conflicts yunohost) plus a transitional yunohost
+    package that Depends on it
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 12:00:00 +0200
+
+yunohost (12.1.41.4) stable; urgency=low
+
+  * nostrhost: make the legacy gevent import optional (native Bottle API)
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 11:00:00 +0200
+
+yunohost (12.1.41.3) stable; urgency=low
+
+  * nostrhost: native framework split (python3-nostrhost), ssl-cert dep,
+    /etc/ssowat provisioning fix
+
+ -- NostrHost <noreply@nostrhost.org>  Sat, 12 Sep 2026 10:00:00 +0200
+
 yunohost (12.1.41.2) stable; urgency=low
 
   - migration: fix disclaimer for 0037 (8134c376f)

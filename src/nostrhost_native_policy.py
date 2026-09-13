@@ -17,8 +17,54 @@ from typing import Any, Callable
 
 
 def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
+    if tool == "app.remove":
+        return "apps.remove"
+    if tool == "app.install":
+        return "apps.install"
+    if tool == "app.upgrade":
+        return "apps.upgrade"
+    if tool == "app.change_url":
+        return "apps.change_url"
+    if tool == "app.config.set":
+        return "apps.config"
     if tool == "backup.restore":
         return "backups.restore"
+    if tool == "backup.create":
+        return "backups.create"
+    if tool == "user.create":
+        return "users.admin_access" if args.get("admin") is True else "users.write"
+    if tool == "user.delete":
+        return "users.delete"
+    if tool == "user.update":
+        return "users.write"
+    if tool == "user.group.create":
+        return "users.write"
+    if tool == "user.group.update":
+        return "users.admin_access" if args.get("groupname") == "admins" else "users.write"
+    if tool == "user.group.delete":
+        return "users.delete"
+    if tool in ("user.permission.add", "user.permission.remove", "user.permission.update"):
+        return "users.permissions"
+    if tool == "system.upgrade":
+        return "system.upgrade"
+    if tool == "system.migrate":
+        return "system.migrate"
+    if tool == "backup.delete":
+        return "backups.delete"
+    if tool == "domain.cert.install":
+        return "domains.cert"
+    if tool in ("audit.list", "audit.get"):
+        return "audit.read"
+    if tool in ("firewall.open", "firewall.close", "firewall.reload"):
+        return "firewall.write"
+    if tool == "domain.add":
+        return "domains.write"
+    if tool == "domain.remove":
+        return "domains.remove"
+    if tool == "dns.apply":
+        return "domains.dns"
+    if tool in ("credential.set", "credential.remove"):
+        return "dns.credentials.write"
     if tool == "package.reconcile":
         plan = args.get("plan")
         operations = plan.get("operations", []) if isinstance(plan, dict) else plan or []
@@ -30,12 +76,13 @@ def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
 
 
 def _backup_created_at() -> dict[str, float]:
+    archives: dict[str, float] = {}
     try:
         from .backup import backup_list
 
-        archives = backup_list(with_info=True).get("archives", {})
+        archives.update(backup_list(with_info=True).get("archives", {}))
     except Exception:
-        return {}
+        archives = {}
     result: dict[str, float] = {}
     for name, info in archives.items():
         if not isinstance(info, dict):
@@ -50,6 +97,24 @@ def _backup_created_at() -> dict[str, float]:
                 result[str(name)] = datetime.fromisoformat(created_at).timestamp()
             except ValueError:
                 continue
+    # The native backup plane is Restic: any snapshot is fresh backup
+    # evidence for policy rules that require one (apps.upgrade/remove).
+    try:
+        from .nostr_restic import load_restic_config, ResticClient
+
+        conf = load_restic_config()
+        if conf is not None:
+            client = ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+            for snapshot in client.snapshots():
+                stamp = snapshot.get("time")
+                if not isinstance(stamp, str):
+                    continue
+                try:
+                    result[f"restic:{snapshot.get('id', '')}"] = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+    except Exception:  # noqa: BLE001 - backup facts are best-effort
+        pass
     return result
 
 

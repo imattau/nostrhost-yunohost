@@ -18,7 +18,7 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 #
 
-from moulinette import m18n
+from nostrhost.i18n import locale, default_locale
 
 
 def _value_for_locale(values: str | dict[str, str]) -> str:
@@ -35,7 +35,7 @@ def _value_for_locale(values: str | dict[str, str]) -> str:
     if not isinstance(values, dict):
         return values
 
-    for lang in [m18n.locale, m18n.default_locale]:
+    for lang in [locale, default_locale]:
         try:
             return values[lang]
         except KeyError:

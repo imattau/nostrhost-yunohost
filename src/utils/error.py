@@ -20,18 +20,18 @@
 
 from typing import Any
 
-from moulinette import m18n
-from moulinette.core import MoulinetteAuthenticationError, MoulinetteError
+from nostrhost.core import AuthenticationError, NostrHostError
+from nostrhost.i18n import tr
 
 
-class YunohostError(MoulinetteError):
+class YunohostError(NostrHostError):
     http_code = 500
 
     """
     Yunohost base exception
 
-    The (only?) main difference with MoulinetteError being that keys
-    are translated via m18n.n (namespace) instead of m18n.g (global?)
+    The (only?) main difference with a base exception being that keys
+    are translated via tr (namespace) instead of a global namespace.
     """
 
     def __init__(
@@ -50,7 +50,7 @@ class YunohostError(MoulinetteError):
         if raw_msg:
             msg = key
         else:
-            msg = m18n.n(key, *args, **kwargs)
+            msg = tr(key, *args, **kwargs)
 
         super(YunohostError, self).__init__(msg, raw_msg=True)
 
@@ -70,5 +70,5 @@ class YunohostValidationError(YunohostError):
         return {"error": self.strerror, "error_key": self.key, **self.kwargs}
 
 
-class YunohostAuthenticationError(MoulinetteAuthenticationError):
+class YunohostAuthenticationError(AuthenticationError):
     pass

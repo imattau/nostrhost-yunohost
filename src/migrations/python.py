@@ -21,7 +21,7 @@
 import os
 from logging import getLogger
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from ..tools import Migration, tools_migrations_state
 from ..utils.file_utils import rm
@@ -142,17 +142,17 @@ class PythonMigration(Migration):
             else:
                 rebuild_apps.append(app_corresponding_to_venv)
 
-        msg = m18n.n(
+        msg = tr(
             "migration_python_venv_rebuild_disclaimer_base",
             debian_pretty=debian_version().title(),
         )
         if rebuild_apps:
-            msg += "\n\n" + m18n.n(
+            msg += "\n\n" + tr(
                 "migration_python_venv_rebuild_disclaimer_rebuild",
                 rebuild_apps="\n    - " + "\n    - ".join(rebuild_apps),
             )
         if ignored_apps:
-            msg += "\n\n" + m18n.n(
+            msg += "\n\n" + tr(
                 "migration_python_venv_rebuild_disclaimer_ignored",
                 ignored_apps="\n    - " + "\n    - ".join(ignored_apps),
             )
@@ -174,7 +174,7 @@ class PythonMigration(Migration):
             ):
                 rm(venv + self.venv_requirements_suffix())
                 logger.info(
-                    m18n.n(
+                    tr(
                         "migration_python_venv_rebuild_broken_app",
                         app=app_corresponding_to_venv,
                     )
@@ -182,7 +182,7 @@ class PythonMigration(Migration):
                 continue
 
             logger.info(
-                m18n.n(
+                tr(
                     "migration_python_venv_rebuild_in_progress",
                     app=app_corresponding_to_venv,
                 )
@@ -206,7 +206,7 @@ class PythonMigration(Migration):
             )
             if status != 0:
                 logger.error(
-                    m18n.n(
+                    tr(
                         "migration_python_venv_rebuild_failed",
                         app=app_corresponding_to_venv,
                     )

@@ -1,6 +1,6 @@
 from logging import DEBUG, ERROR, WARNING, getLogger
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from ..tools import Migration
 from ..utils.error import YunohostError
@@ -19,7 +19,7 @@ class MyMigration(Migration):
 
     @property
     def disclaimer(self) -> str | None:
-        return m18n.n("migration_0037_fix_bad_permissions_disclaimer")
+        return tr("migration_0037_fix_bad_permissions_disclaimer")
 
     def run(self, *args):
         from psutil import disk_partitions
@@ -93,7 +93,7 @@ class MyMigration(Migration):
         # Give some summarized info to the instance admin
         if nb_paths_protected:
             logger.info(
-                m18n.n(
+                tr(
                     "migration_0037_fix_bad_permissions_protected",
                     nb=nb_paths_protected,
                 )
@@ -101,7 +101,7 @@ class MyMigration(Migration):
 
         if nb_paths_unprotected:
             logger.warning(
-                m18n.n(
+                tr(
                     "migration_0037_fix_bad_permissions_unprotected",
                     nb=nb_paths_unprotected,
                 )
@@ -114,4 +114,4 @@ class MyMigration(Migration):
             )
 
         if not nb_paths_unprotected and not nb_paths_protected:
-            logger.success(m18n.n("migration_0037_fix_bad_permissions_safe_system"))
+            logger.success(tr("migration_0037_fix_bad_permissions_safe_system"))

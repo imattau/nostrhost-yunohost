@@ -21,6 +21,7 @@ through ``/id/<id>``.
 from __future__ import annotations
 
 import logging
+import os
 import urllib.parse
 from typing import Any
 
@@ -92,13 +93,77 @@ def build_domain_site(domain: str) -> dict[str, Any]:
     Matches only the domain's root path, so it never shadows app routes on the
     same host. ACME for the domain is handled by Caddy's global ``acme_ca`` /
     automatic HTTPS (the "ACME policy"); ``certd`` exports the resulting cert.
+
+    host + path live in a SINGLE matcher object: separate objects would be
+    OR'd, letting the root route hijack every request with path ``/`` on any
+    host (the same trap ``build_web_route`` documents).
     """
     return {
         "@id": f"nostrhost-domain:{domain}",
-        "match": [{"host": [domain]}, {"path": ["/"]}],
+        "match": [{"host": [domain], "path": ["/"]}],
         "handle": [{"handler": "static_response", "status_code": 200, "body": f"nostrhost domain {domain}"}],
         "terminal": True,
     }
+
+
+def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str, Any]:
+    """Route ``domain/.well-known/nostr.json`` to the authd (portal-api),
+    which resolves the queried username against the identity store (W4)."""
+    return {
+        "@id": f"nostrhost-nip05:{domain}",
+        "match": [{"host": [domain], "path": ["/.well-known/nostr.json"]}],
+        "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]}],
+        "terminal": True,
+    }
+
+
+def build_portal_routes(domain: str) -> list[dict[str, Any]]:
+    """The per-domain portal/SSO surface an auth-required app needs.
+
+    The authd ``forward_auth`` 302s unauthenticated requests to
+    ``/yunohost/sso/``; without routes serving the portal (and the API /
+    portal-api / admin paths a browser needs), the redirect lands on a 404
+    and an auth app's health check fails even though its backend is up.
+    Mirrors the per-domain Caddyfile handlers the testbed writes by hand.
+    """
+    routes: list[dict[str, Any]] = [
+        {
+            "@id": f"nostrhost-api:{domain}",
+            "match": [{"host": [domain], "path": ["/yunohost/api/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6787"}]}],
+            "terminal": True,
+        },
+        {
+            "@id": f"nostrhost-portalapi:{domain}",
+            "match": [{"host": [domain], "path": ["/yunohost/portalapi/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:6788"}]}],
+            "terminal": True,
+        },
+        {
+            "@id": f"nostrhost-native-api:{domain}",
+            "match": [{"host": [domain], "path": ["/package/*"]}],
+            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8190"}]}],
+            "terminal": True,
+        },
+    ]
+    for root, tag, prefix in (
+        ("/usr/share/nostrhost/portal", "sso", "/yunohost/sso"),
+        ("/usr/share/nostrhost/admin", "admin", "/admin"),
+    ):
+        if os.path.isdir(root):
+            path = f"{prefix}/*"
+            routes.append(
+                {
+                    "@id": f"nostrhost-{tag}:{domain}",
+                    "match": [{"host": [domain], "path": [path]}],
+                    "handle": [
+                        {"handler": "rewrite", "uri": "/index.html"},
+                        {"handler": "file_server", "root": root},
+                    ],
+                    "terminal": True,
+                }
+            )
+    return routes
 
 
 def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
@@ -237,3 +302,20 @@ class CaddyAdminClient:
     def remove_domain_site(self, domain: str) -> None:
         """Remove Caddy's site for ``domain`` (domain_remove)."""
         self.delete_route(f"nostrhost-domain:{domain}")
+
+    def ensure_nip05_route(self, domain: str) -> str:
+        """Create (or reconcile) the NIP-05 route for ``domain`` (W4)."""
+        return self.ensure_route(build_nip05_route(domain))
+
+    def remove_nip05_route(self, domain: str) -> None:
+        """Remove the NIP-05 route for ``domain`` (W4)."""
+        self.delete_route(f"nostrhost-nip05:{domain}")
+
+    def ensure_portal_routes(self, domain: str) -> list[str]:
+        """Create (or reconcile) the per-domain portal/SSO routes (W4)."""
+        return [self.ensure_route(route) for route in build_portal_routes(domain)]
+
+    def remove_portal_routes(self, domain: str) -> None:
+        """Remove the per-domain portal/SSO routes (W4)."""
+        for tag in ("api", "portalapi", "native-api", "sso", "admin"):
+            self.delete_route(f"nostrhost-{tag}:{domain}")

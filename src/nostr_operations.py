@@ -35,9 +35,13 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Literal
 
-from .nostr_identity import IdentityError, _operator_config, _sign_event, publish_to_relay
+from pydantic import BaseModel, ConfigDict, Field
+
+from .nostr_identity import _operator_config, _sign_event, publish_to_relay
+from .nostr_operations_state import OpState
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
 KIND_OPERATION_REQUEST = 2200
@@ -45,6 +49,7 @@ KIND_OPERATION_APPROVAL = 2201
 KIND_OPERATION_REJECTION = 2202
 KIND_EXECUTION_STARTED = 2203
 KIND_EXECUTION_RESULT = 2204
+KIND_EXECUTION_PROGRESS = 2205
 KIND_CAPABILITY = 31100
 KIND_DELEGATION = 27236
 KIND_DELEGATION_REVOCATION = 27237
@@ -56,18 +61,91 @@ CHAIN_KINDS = (
     KIND_OPERATION_REJECTION,
     KIND_EXECUTION_STARTED,
     KIND_EXECUTION_RESULT,
+    KIND_EXECUTION_PROGRESS,
 )
 
 # Scope names (nostrhost-policy vocabulary). Read scopes cover the safe
 # read-only tools; write scopes gate the minimal control executor's
-# write-capable operations (approval-gated on top of the scope).
+# write-capable operations (approval-gated on top of the scope). Coarse
+# write scopes (apps.write / services.write / state.write) are NostrHost
+# natives for primitives that span several granular actions (the resource
+# reconciler, the bounded service controller, the state layer); the granular
+# scopes come from the shared nostrhost-policy Scope enum so grants and
+# delegations verify against the ops that consume them.
 SCOPE_SERVER_READ = "server.read"
+SCOPE_DIAGNOSIS_READ = "diagnosis.read"
 SCOPE_APPS_READ = "apps.read"
+SCOPE_APPS_INSTALL = "apps.install"
+SCOPE_APPS_UPGRADE = "apps.upgrade"
+SCOPE_APPS_REMOVE = "apps.remove"
 SCOPE_APPS_WRITE = "apps.write"
+SCOPE_APPS_CONFIG_READ = "apps.config.read"
+SCOPE_APPS_CONFIG_WRITE = "apps.config.write"
 SCOPE_SERVICES_READ = "services.read"
+SCOPE_SERVICES_RESTART = "services.restart"
 SCOPE_SERVICES_WRITE = "services.write"
 SCOPE_STATE_WRITE = "state.write"
-KNOWN_SCOPES = frozenset({SCOPE_SERVER_READ, SCOPE_APPS_READ, SCOPE_APPS_WRITE, SCOPE_SERVICES_READ, SCOPE_SERVICES_WRITE, SCOPE_STATE_WRITE})
+SCOPE_BACKUPS_READ = "backups.read"
+SCOPE_BACKUPS_CREATE = "backups.create"
+SCOPE_BACKUPS_RESTORE = "backups.restore"
+SCOPE_USERS_READ = "users.read"
+SCOPE_USERS_WRITE = "users.write"
+SCOPE_USERS_DELETE = "users.delete"
+SCOPE_SYSTEM_UPDATE = "system.update"
+SCOPE_SYSTEM_UPGRADE = "system.upgrade"
+SCOPE_FIREWALL_READ = "firewall.read"
+SCOPE_FIREWALL_WRITE = "firewall.write"
+SCOPE_DOMAINS_READ = "domains.read"
+SCOPE_DOMAINS_WRITE = "domains.write"
+SCOPE_DNS_WRITE = "dns.write"
+SCOPE_DNS_CREDENTIALS_WRITE = "dns.credentials.write"
+SCOPE_DNS_CREDENTIALS_READ = "dns.credentials.read"
+SCOPE_CATALOG_READ = "catalog.inspect"
+SCOPE_CATALOG_VERIFY = "catalog.verify"
+SCOPE_CATALOG_PUBLISH = "catalog.publish"
+SCOPE_LOGS_READ = "logs.read"
+SCOPE_BACKUPS_DELETE = "backups.delete"
+SCOPE_SYSTEM_MIGRATE = "system.migrate"
+SCOPE_AUDIT_READ = "audit.read"
+KNOWN_SCOPES = frozenset(
+    {
+        SCOPE_SERVER_READ,
+        SCOPE_DIAGNOSIS_READ,
+        SCOPE_APPS_READ,
+        SCOPE_APPS_INSTALL,
+        SCOPE_APPS_UPGRADE,
+        SCOPE_APPS_REMOVE,
+        SCOPE_APPS_WRITE,
+        SCOPE_APPS_CONFIG_READ,
+        SCOPE_APPS_CONFIG_WRITE,
+        SCOPE_SERVICES_READ,
+        SCOPE_SERVICES_RESTART,
+        SCOPE_SERVICES_WRITE,
+        SCOPE_STATE_WRITE,
+        SCOPE_BACKUPS_READ,
+        SCOPE_BACKUPS_CREATE,
+        SCOPE_BACKUPS_RESTORE,
+        SCOPE_USERS_READ,
+        SCOPE_USERS_WRITE,
+        SCOPE_USERS_DELETE,
+        SCOPE_SYSTEM_UPDATE,
+        SCOPE_SYSTEM_UPGRADE,
+        SCOPE_FIREWALL_READ,
+        SCOPE_FIREWALL_WRITE,
+        SCOPE_DOMAINS_READ,
+        SCOPE_DOMAINS_WRITE,
+        SCOPE_DNS_WRITE,
+        SCOPE_DNS_CREDENTIALS_WRITE,
+        SCOPE_DNS_CREDENTIALS_READ,
+        SCOPE_CATALOG_READ,
+        SCOPE_CATALOG_VERIFY,
+        SCOPE_CATALOG_PUBLISH,
+        SCOPE_LOGS_READ,
+        SCOPE_BACKUPS_DELETE,
+        SCOPE_SYSTEM_MIGRATE,
+        SCOPE_AUDIT_READ,
+    }
+)
 
 
 class OperationError(ValueError):
@@ -80,6 +158,12 @@ class ToolSpec:
 
     `handler` is the *safe* wrapper — a thin call into the fork's own
     decorated function. The executor backend injects a fake for tests.
+
+    `input_model` / `result_model` are optional Pydantic models whose JSON
+    Schema drives generated interfaces (MCP tool schemas, Admin forms, API
+    docs) — the registry is the single source of truth (MCP transition
+    Phase 0 / docs/MCP-TRANSITION.md). `risk` and `reversibility` feed the
+    operation catalogue and risk classification.
     """
 
     name: str
@@ -87,6 +171,120 @@ class ToolSpec:
     scope: str
     require_approval: bool = True
     description: str = ""
+    input_model: Any = None
+    result_model: Any = None
+    risk: str = "low"  # low | medium | high
+    reversibility: str = "reversible"  # reversible | partial | irreversible
+
+    def input_schema(self) -> dict[str, Any] | None:
+        """The JSON Schema for this tool's arguments, if an input model exists."""
+        if self.input_model is None:
+            return None
+        return self.input_model.model_json_schema()
+
+    def validate_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Coerce/validate ``args`` through the input model when present.
+
+        Returns the validated (coerced) arguments. Unknown tools or models
+        that reject the input raise :class:`OperationError`."""
+        if self.input_model is None:
+            if not isinstance(args, dict):
+                raise OperationError(f"{self.name} arguments must be a JSON object")
+            return dict(args)
+        if not isinstance(args, dict):
+            raise OperationError(f"{self.name} arguments must be a JSON object")
+        try:
+            return self.input_model.model_validate(args).model_dump(exclude_none=True)
+        except Exception as exc:  # pydantic ValidationError -> OperationError
+            raise OperationError(f"invalid arguments for {self.name}: {exc}") from exc
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ServiceRestartArgs(_Strict):
+    name: str = Field(description="one known service name to restart")
+
+
+class ServiceControlArgs(_Strict):
+    name: str = Field(description="one known service name to control")
+    action: Literal["start", "stop", "restart"] = Field(description="the action to run")
+
+
+class AppRemoveArgs(_Strict):
+    app: str = Field(description="one installed app id to remove")
+    purge: bool = False
+
+
+class PackageReconcileArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the signed native package plan envelope (from package.plan)")
+
+
+class RollbackApplyArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the rollback plan produced by the rollback planner")
+
+
+class StateReconcileArgs(_Strict):
+    plan: dict[str, Any] = Field(description="the approved reconciliation plan for the state layer")
+
+
+class DomainAddArgs(_Strict):
+    domain: str = Field(description="the hostname to register (e.g. foo.example.com)")
+    provider_type: str = Field(
+        default="manual", description="DNS provider: manual | cloudflare | duckdns | dynu | dynette | desec"
+    )
+    provider_zone: str | None = Field(default=None, description="DNS zone for the provider (apex name)")
+    credential: str | None = Field(
+        default=None, description="secret:dns/<provider>/<name> reference for the provider token"
+    )
+    primary: bool = False
+    ipv4: bool = True
+    ipv6: bool = True
+    wildcard: bool = True
+    nip05: bool = False
+    tls_caa: list[str] | None = Field(default=None, description="issuer CAA records to publish")
+    apply_dns: bool = True
+    verify: bool = True
+
+
+class DomainRemoveArgs(_Strict):
+    domain: str
+    force: bool = False
+
+
+class DnsApplyArgs(_Strict):
+    domain: str
+
+
+class DnsSubscribeArgs(_Strict):
+    hostname: str = Field(description="a <label> under nohost.me / noho.st / ynh.fr to claim")
+    secret: str | None = Field(default=None, description="TSIG secret; generated if omitted")
+    rotate: bool = False
+
+
+class DnsUnsubscribeArgs(_Strict):
+    hostname: str
+
+
+class CredentialSetArgs(_Strict):
+    provider: str
+    name: str
+    value: str = Field(description="the provider token to store")
+
+
+class CredentialRemoveArgs(_Strict):
+    provider: str
+    name: str
+
+
+# Risk / reversibility tiers used across the registry (MCP transition §6).
+RISK_LOW = "low"
+RISK_MEDIUM = "medium"
+RISK_HIGH = "high"
+REVERSIBLE = "reversible"
+REVERSIBLE_WITH_PLAN = "partial"
+IRREVERSIBLE = "irreversible"
 
 
 def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
@@ -141,9 +339,58 @@ def _safe_system_version(**args: Any) -> dict[str, Any]:
 
 
 def _safe_app_list(**args: Any) -> dict[str, Any]:
-    from yunohost.app import app_list
+    """List installed applications — native packages from the resource-engine
+    state, plus the legacy YunoHost registry (best-effort)."""
+    native: dict[str, Any] = {}
+    try:
+        from nostrhost.native_providers import installed_package_manifest
 
-    return app_list(**args)
+        for state_file in sorted(Path("/var/lib/nostrhost/state/packages").glob("*-manifest.json")):
+            app_id = state_file.name[: -len("-manifest.json")]
+            try:
+                manifest = installed_package_manifest(app_id)
+            except Exception:  # noqa: BLE001 - a broken state file is a listing warning
+                manifest = None
+            if not isinstance(manifest, dict):
+                continue
+            app = manifest.get("app") or {}
+            native[app_id] = {
+                "id": app_id,
+                "version": app.get("version"),
+                "name": {"en": app.get("name") or app_id},
+                "repository": "nostrhost",
+                "source": "nostr",
+                "native": True,
+            }
+    except Exception:  # noqa: BLE001 - state listing is additive
+        native = {}
+    legacy: dict[str, Any] = {}
+    try:
+        from yunohost.app import app_list
+
+        legacy = app_list(**args) or {}
+    except Exception:  # noqa: BLE001 - a partially-registered native app must not break the list
+        legacy = {}
+    if legacy:
+        legacy_apps = legacy.get("apps") or {}
+        if isinstance(legacy_apps, dict):
+            apps = dict(legacy_apps)
+        elif isinstance(legacy_apps, list):
+            # YunoHost's app_list() returns a list of AppInfo objects, while
+            # some adapters expose an id-keyed mapping. Normalize both shapes
+            # before merging the native package registry.
+            apps = {
+                app["id"]: app
+                for app in legacy_apps
+                if isinstance(app, dict) and isinstance(app.get("id"), str)
+            }
+        else:
+            apps = {}
+        apps.update(native)
+        return {"apps": apps}
+    if native:
+        return {"apps": native}
+    return legacy
 
 
 def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[str, Any]:
@@ -165,10 +412,18 @@ def _safe_app_remove(app: str = "", purge: bool = False, **args: Any) -> dict[st
     return {"app": app, "purge": bool(purge)}
 
 
-def _safe_service_status(**args: Any) -> dict[str, Any]:
-    from yunohost.service import service_status
+def _safe_service_status(name: str = "", **args: Any) -> dict[str, Any]:
+    """Read all managed services or one explicitly named service."""
+    name = str(name or "").strip()
+    if args:
+        raise OperationError(f"service.status does not accept extra args: {sorted(args)}")
+    from yunohost.service import _get_services, service_status
 
-    return service_status(**args)
+    if name:
+        if name not in _get_services():
+            raise OperationError(f"unknown service {name!r}")
+        return service_status(name)
+    return service_status()
 
 
 def _safe_service_restart(name: str = "", **args: Any) -> dict[str, Any]:
@@ -270,6 +525,96 @@ def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None
     return {"changes": report, "_ok": all(row["status"] == "executed" for row in report)}
 
 
+def _safe_domain_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_list as _impl
+
+    return _impl(**args)
+
+
+def _safe_domain_inspect(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_inspect as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_domain_add(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_add as _impl
+
+    return _impl(**args)
+
+
+def _safe_domain_remove(domain: str = "", force: bool = False, **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_domain_remove as _impl
+
+    return _impl(domain=domain, force=force, **args)
+
+
+def _safe_dns_plan(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_plan as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_dns_apply(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_apply as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_dns_verify(domain: str = "", **args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_verify as _impl
+
+    return _impl(domain=domain, **args)
+
+
+def _safe_dns_watch(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_watch as _impl
+
+    return _impl(**args)
+
+
+def _safe_dns_subscribe(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_subscribe as _impl
+
+    return _impl(**args)
+
+
+def _safe_dns_subscriptions(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_subscriptions as _impl
+
+    return _impl(**args)
+
+
+def _safe_dns_unsubscribe(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_dns_unsubscribe as _impl
+
+    return _impl(**args)
+
+
+def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_network_public_ip as _impl
+
+    return _impl(**args)
+
+
+def _safe_credential_set(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_set as _impl
+
+    return _impl(**args)
+
+
+def _safe_credential_remove(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_remove as _impl
+
+    return _impl(**args)
+
+
+def _safe_credential_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.domains.operations import _safe_credential_list as _impl
+
+    return _impl(**args)
+
+
 def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     if args:
         raise OperationError(f"state.reconcile does not accept extra args: {sorted(args)}")
@@ -278,10 +623,24 @@ def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
 
 
-# The default registry: read-only tools plus one minimal write operation
-# (service.restart). Read tools are safe by construction; the write tool is
-# safe by gating — `services.write` scope + admin approval on top of the
-# chain, and it is bounded to a single known service name.
+# The default registry: read-only tools plus write operations gated by scope
+# + admin approval. Read tools are safe by construction and run un-gated
+# (require_approval=False); every write carries an approval on top of the
+# scope. The broadened native surface (app lifecycle, backup, user, firewall,
+# diagnosis, system upgrade) lives in nostrhost/native_ops.py and is merged
+# in below so the registry remains the single source of truth.
+def _native_tools() -> dict[str, ToolSpec]:
+    """The broadened native surface (MCP transition Phase 0).
+
+    Imported lazily so the heavy handlers and their Pydantic models are only
+    loaded when the registry is constructed, and so the module can import
+    back from this registry without a cycle.
+    """
+    from .nostrhost.native_ops import NATIVE_TOOLS
+
+    return NATIVE_TOOLS
+
+
 TOOLS: dict[str, ToolSpec] = {
     "package.plan": ToolSpec(
         name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
@@ -289,56 +648,171 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "package.reconcile": ToolSpec(
         name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,
+        input_model=PackageReconcileArgs,
         description="apply an approved native package operation plan",
     ),
     "system.version": ToolSpec(
         name="system.version",
         handler=_safe_system_version,
         scope=SCOPE_SERVER_READ,
+        require_approval=False,
         description="read-only OS/package version information",
     ),
     "app.list": ToolSpec(
         name="app.list",
         handler=_safe_app_list,
         scope=SCOPE_APPS_READ,
+        require_approval=False,
         description="list installed applications",
     ),
     "app.remove": ToolSpec(
         name="app.remove",
         handler=_safe_app_remove,
-        scope=SCOPE_APPS_WRITE,
+        scope=SCOPE_APPS_REMOVE,
+        input_model=AppRemoveArgs,
         description="remove one installed app (rollback reverse-action, write operation)",
     ),
     "service.status": ToolSpec(
         name="service.status",
         handler=_safe_service_status,
         scope=SCOPE_SERVICES_READ,
+        require_approval=False,
         description="status of running services",
     ),
     "service.restart": ToolSpec(
         name="service.restart",
         handler=_safe_service_restart,
-        scope=SCOPE_SERVICES_WRITE,
+        scope=SCOPE_SERVICES_RESTART,
+        input_model=ServiceRestartArgs,
         description="restart one named service (write operation)",
     ),
     "service.control": ToolSpec(
         name="service.control",
         handler=_safe_service_control,
         scope=SCOPE_SERVICES_WRITE,
+        input_model=ServiceControlArgs,
         description="start/stop/restart one named service (rollback reverse-action)",
     ),
     "rollback.apply": ToolSpec(
         name="rollback.apply",
         handler=_safe_rollback_apply,
         scope=SCOPE_STATE_WRITE,
+        input_model=RollbackApplyArgs,
         description="execute an assisted rollback plan (write operation, admin-approval-gated)",
     ),
     "state.reconcile": ToolSpec(
         name="state.reconcile",
         handler=_safe_reconcile_apply,
         scope=SCOPE_STATE_WRITE,
+        input_model=StateReconcileArgs,
         description="apply an approved, bounded reconciliation plan",
     ),
+    "domain.list": ToolSpec(
+        name="domain.list",
+        handler=_safe_domain_list,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="list registered native domains",
+    ),
+    "domain.inspect": ToolSpec(
+        name="domain.inspect",
+        handler=_safe_domain_inspect,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="inspect a native domain: intent, desired/actual DNS, diff, routes",
+    ),
+    "domain.add": ToolSpec(
+        name="domain.add",
+        handler=_safe_domain_add,
+        scope=SCOPE_DOMAINS_WRITE,
+        input_model=DomainAddArgs,
+        description="register a native domain: plan DNS, apply, stand up Caddy routes, record state",
+    ),
+    "domain.remove": ToolSpec(
+        name="domain.remove",
+        handler=_safe_domain_remove,
+        scope=SCOPE_DOMAINS_WRITE,
+        input_model=DomainRemoveArgs,
+        description="remove a native domain (blocks while apps use it; deletes owned DNS only)",
+    ),
+    "dns.plan": ToolSpec(
+        name="dns.plan",
+        handler=_safe_dns_plan,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="compute the desired-vs-actual DNS plan for a domain (no changes)",
+    ),
+    "dns.apply": ToolSpec(
+        name="dns.apply",
+        handler=_safe_dns_apply,
+        scope=SCOPE_DNS_WRITE,
+        input_model=DnsApplyArgs,
+        description="apply the DNS plan for a domain through its provider",
+    ),
+    "dns.verify": ToolSpec(
+        name="dns.verify",
+        handler=_safe_dns_verify,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="verify a domain's DNS records resolve",
+    ),
+    "dns.watch": ToolSpec(
+        name="dns.watch",
+        handler=_safe_dns_watch,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="DDNS watcher status: last-seen public IPs and dynamic-IP domains",
+    ),
+    "dns.subscribe": ToolSpec(
+        name="dns.subscribe",
+        handler=_safe_dns_subscribe,
+        scope=SCOPE_DNS_WRITE,
+        input_model=DnsSubscribeArgs,
+        description="claim a nostr-native free hostname (identity-backed Dynette): sign the ownership claim with the operator key and provision its TSIG secret in the broker",
+    ),
+    "dns.subscriptions": ToolSpec(
+        name="dns.subscriptions",
+        handler=_safe_dns_subscriptions,
+        scope=SCOPE_DOMAINS_READ,
+        require_approval=False,
+        description="list nostr-native free-hostname subscriptions (claims signed by the operator identity)",
+    ),
+    "dns.unsubscribe": ToolSpec(
+        name="dns.unsubscribe",
+        handler=_safe_dns_unsubscribe,
+        scope=SCOPE_DNS_WRITE,
+        input_model=DnsUnsubscribeArgs,
+        description="release a nostr-native free-hostname subscription and drop its broker secret",
+    ),
+    "network.public_ip": ToolSpec(
+        name="network.public_ip",
+        handler=_safe_network_public_ip,
+        scope=SCOPE_SERVER_READ,
+        require_approval=False,
+        description="current public IPv4/IPv6 address",
+    ),
+    "credential.set": ToolSpec(
+        name="credential.set",
+        handler=_safe_credential_set,
+        scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        input_model=CredentialSetArgs,
+        description="store a DNS provider token in the credential broker (secret:dns/<provider>/<name>)",
+    ),
+    "credential.remove": ToolSpec(
+        name="credential.remove",
+        handler=_safe_credential_remove,
+        scope=SCOPE_DNS_CREDENTIALS_WRITE,
+        input_model=CredentialRemoveArgs,
+        description="remove a DNS provider token from the credential broker",
+    ),
+    "credential.list": ToolSpec(
+        name="credential.list",
+        handler=_safe_credential_list,
+        scope=SCOPE_DNS_CREDENTIALS_READ,
+        require_approval=False,
+        description="list configured DNS credential references (names only, never values)",
+    ),
+    **_native_tools(),
 }
 
 
@@ -351,13 +825,35 @@ def known_tools() -> list[str]:
     return sorted(TOOLS)
 
 
+def operation_catalog() -> list[dict[str, Any]]:
+    """JSON-serialisable catalogue of the whole operation registry.
+
+    One entry per tool: name, scope, approval requirement, risk tier,
+    reversibility, description and the input JSON Schema. Generated MCP
+    tools (nostrhost-mcp), Admin forms and API docs all derive from this —
+    the registry is the single source of truth (MCP transition §6).
+    """
+    return [
+        {
+            "name": spec.name,
+            "scope": spec.scope,
+            "require_approval": spec.require_approval,
+            "risk": spec.risk,
+            "reversibility": spec.reversibility,
+            "description": spec.description,
+            "input_schema": spec.input_schema(),
+        }
+        for spec in TOOLS.values()
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # event authoring (each chain step is signed by the actor's own key)
 
 def _derive_pubkey(sk: str) -> str:
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
-    return PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    return Keys.parse(sk).public_key().to_hex()
 
 
 def _e_tag(request_id: str) -> list[list[str]]:
@@ -444,10 +940,10 @@ def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str
     if hashlib.sha256(serialized).hexdigest() != event["id"]:
         raise OperationError("NIP-46 approval id does not match its contents")
     try:
-        from coincurve import PublicKeyXOnly
-        if not PublicKeyXOnly(bytes.fromhex(str(event["pubkey"]))).verify(bytes.fromhex(str(event["sig"])), bytes.fromhex(event["id"])):
+        from nostr_sdk import Event
+        if not Event.from_json(json.dumps(event)).verify():
             raise OperationError("NIP-46 approval signature is invalid")
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
         raise OperationError("NIP-46 approval contains invalid key or signature encoding") from exc
     return event
 
@@ -485,6 +981,72 @@ def build_execution_result(
     if actor_pubkey:
         tags.append(["actor", actor_pubkey.lower()])
     return _sign_event(server_sk, server_pubkey, KIND_EXECUTION_RESULT, content, tags)
+
+
+def build_execution_progress(
+    server_sk: str,
+    server_pubkey: str,
+    request_id: str,
+    *,
+    stage: str,
+    progress: float | None = None,
+    message: str | None = None,
+    actor_pubkey: str | None = None,
+) -> dict[str, Any]:
+    """Build (without publishing) a kind-2205 execution-progress event.
+
+    ``stage`` names the execution phase (e.g. ``database``), ``progress`` is
+    an optional 0..1 completion estimate, ``message`` an optional human
+    update.  Links to the request via the ``e`` tag so subscribers can filter.
+    """
+    if actor_pubkey is not None and not _is_hex64(actor_pubkey):
+        raise OperationError("actor pubkey must be 64-hex")
+    content: dict[str, Any] = {"operation": request_id, "stage": stage}
+    if progress is not None:
+        content["progress"] = max(0.0, min(1.0, float(progress)))
+    if message is not None:
+        content["message"] = message
+    tags = _e_tag(request_id)
+    if actor_pubkey:
+        tags.append(["actor", actor_pubkey.lower()])
+    return _sign_event(
+        server_sk,
+        server_pubkey,
+        KIND_EXECUTION_PROGRESS,
+        json.dumps(content, default=_json_default),
+        tags,
+    )
+
+
+def execution_progress(
+    request_id: str,
+    stage: str,
+    *,
+    progress: float | None = None,
+    message: str | None = None,
+    server_sk: str | None = None,
+    control_relay: str | None = None,
+    actor_pubkey: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish a kind-2205 execution-progress event as the operator/server.
+
+    Tools and the executor call this to report an operation's live progress;
+    interfaces (admin UI via SSE, CLI, MCP) subscribe to the chain to render
+    it.  The event links to the request and is signed by the server key.
+    """
+    cfg = _operator_config(server_sk, control_relay)
+    event = build_execution_progress(
+        cfg.operator_sk,
+        cfg.operator_pubkey,
+        request_id,
+        stage=stage,
+        progress=progress,
+        message=message,
+        actor_pubkey=actor_pubkey,
+    )
+    (transport or publish_to_relay)(_control_relay(control_relay), event)
+    return event
 
 
 def build_capability(
@@ -649,3 +1211,126 @@ def revoke_delegation(
 
 def _control_relay(control_relay: str | None) -> str:
     return control_relay or os.environ.get("NOSTRHOST_CONTROL_RELAY") or "ws://127.0.0.1:4848"
+
+
+# --------------------------------------------------------------------------- #
+# local signed chain (used by the CLI for native app lifecycle writes)
+
+def local_chain_deps(*, operator_sk: str | None = None, control_relay: str | None = None) -> dict[str, Any]:
+    """Wire the local execution plane exactly like ``nostr-operationsd.run``.
+
+    Returns live ``state`` (StateRecorder over the state repo with the Restic
+    snapshot hook), ``restic`` (client when configured) and ``policy`` (native
+    policy adapter when the shared policy lib is installed). Any piece that
+    cannot be built degrades to ``None`` rather than blocking writes, matching
+    the daemon's posture.
+    """
+    cfg = _operator_config(operator_sk, control_relay)
+    restic: Any = None
+    try:
+        from .nostr_restic import ResticClient, load_restic_config
+
+        conf = load_restic_config()
+        if conf is not None:
+            restic = ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+    except Exception:  # noqa: BLE001 - restic is optional
+        restic = None
+    policy: Any = None
+    try:
+        from .nostrhost_native_policy import build_native_policy_adapter
+
+        policy = build_native_policy_adapter()
+    except Exception:  # noqa: BLE001 - policy is optional on old nodes
+        policy = None
+    state: Any = None
+    try:
+        from .nostr_restic import restic_snapshot_hook
+        from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
+
+        state = StateRecorder(
+            StateRepo(state_dir_from_env(), cfg.server_pubkey),
+            capabilities=lambda: {},
+            restic_hook=restic_snapshot_hook() if restic is not None else None,
+        )
+    except Exception:  # noqa: BLE001 - state history is additive
+        state = None
+    return {"state": state, "restic": restic, "policy": policy}
+
+
+def run_signed_chain(
+    tool: str,
+    args: dict[str, Any] | None = None,
+    *,
+    operator_sk: str | None = None,
+    control_relay: str | None = None,
+    server_sk: str | None = None,
+    admins: list[str] | None = None,
+    backend: Any = None,
+    state: Any = None,
+    restic: Any = None,
+    policy: Any = None,
+    policy_owner: str | None = None,
+    approve: bool = True,
+) -> dict[str, Any]:
+    """Run one signed operation request end-to-end through the local engine.
+
+    The local admin is the operator: this builds a kind-2200 request signed
+    by the operator, feeds it to an ``OperationEngine`` wired like the daemon
+    (native backend, pre/post StateRecorder, optional Restic + policy adapter)
+    and approves it as the operator admin, so every write still passes the
+    same authorisation / policy / approval gate a remote agent's request does.
+    Returns the execution-result body (``{ok, result, policy, request_id}``);
+    a policy denial or pending-approval state is returned with ``ok: False``
+    rather than raising.
+
+    Remote/distributed writes keep using ``request_operation`` /
+    ``approve_operation`` through the relay + daemon; this is the local
+    variant for CLI lifecycle commands. ``backend`` / ``state`` / ``restic`` /
+    ``policy`` are injectable for tests (defaults come from
+    :func:`local_chain_deps` / ``YnhExecutorBackend``).
+    """
+    spec = tool_spec(tool)
+    if spec is None:
+        raise OperationError(f"unknown tool {tool!r} (known: {', '.join(known_tools())})")
+    if backend is None:
+        from .nostr_operationsd import YnhExecutorBackend
+
+        backend = YnhExecutorBackend()
+    cfg = _operator_config(operator_sk, control_relay, admins=admins, server_sk=server_sk)
+    sk = operator_sk or cfg.operator_sk
+    pk = _derive_pubkey(sk)
+    if state is None and restic is None and policy is None and admins is None:
+        deps = local_chain_deps(operator_sk=operator_sk, control_relay=control_relay)
+        state, restic, policy = deps["state"], deps["restic"], deps["policy"]
+    from .nostr_operationsd import OperationEngine
+
+    engine = OperationEngine(
+        publish=lambda _event: None,
+        server_sk=cfg.server_sk,
+        admins=cfg.admins,
+        backend=backend,
+        state=state,
+        restic=restic,
+        policy=policy,
+        policy_owner=policy_owner or cfg.operator_pubkey,
+    )
+    request = build_operation_request(sk, pk, tool, args or {}, actor_pubkey=pk)
+    if not engine.handle_event(request):
+        raise OperationError(f"{tool} request was rejected before approval")
+    record = engine.records.get(request["id"])
+    if record is None:
+        raise OperationError(f"{tool} request was not accepted")
+    if record.state == OpState.REJECTED:
+        return {"ok": False, "request_id": request["id"], "state": record.state.value, "reason": record.reason}
+    if not approve:
+        return {"ok": False, "request_id": request["id"], "state": record.state.value, "pending_approval": True}
+    approval = build_approval(sk, pk, request["id"], note="local operator approval")
+    if not engine.handle_event(approval):
+        raise OperationError(f"{tool} approval was not accepted")
+    record = engine.records[request["id"]]
+    if record.state not in (OpState.SUCCEEDED, OpState.FAILED, OpState.REJECTED):
+        return {"ok": False, "request_id": request["id"], "state": record.state.value}
+    body = dict(record.result or {})
+    body["request_id"] = request["id"]
+    body["state"] = record.state.value
+    return body

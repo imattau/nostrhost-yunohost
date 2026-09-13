@@ -20,7 +20,7 @@
 
 import logging
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
 from ..tools import Migration
 
@@ -38,7 +38,7 @@ class MyMigration(Migration):
     @property
     def disclaimer(self):
         return (
-            m18n.n("migration_0031_terms_of_services")
+            tr("migration_0031_terms_of_services")
             + "\n\n"
-            + m18n.n("tos_postinstall_acknowledgement")
+            + tr("tos_postinstall_acknowledgement")
         )

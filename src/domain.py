@@ -26,16 +26,14 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Literal,
-    Mapping,
     Optional,
     TypedDict,
     Union,
 )
 
-from moulinette import Moulinette, m18n
-from moulinette.core import MoulinetteError
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from .log import OperationLogger, is_unit_operation
 from .regenconf import regen_conf
@@ -52,7 +50,7 @@ from .utils.file_utils import (
 from .utils.mail import mail_stack_installed
 
 if TYPE_CHECKING:
-    from pydantic.typing import AbstractSetIntStr, MappingIntStrAny, cast
+    from pydantic.v1.typing import AbstractSetIntStr, MappingIntStrAny, cast
 
     from .dns import DNSRecord
     from .utils.configpanel import ConfigPanel, ConfigPanelModel, RawConfig, RawSettings
@@ -112,13 +110,9 @@ def _get_domains(exclude_subdomains: bool = False) -> list[str]:
         not domain_list_cache
         or abs(domain_list_cache_timestamp - time.time()) > DOMAIN_CACHE_DURATION
     ):
-        from .utils.ldap import _get_ldap_interface
+        from .nostrhost.domains.service import native_domain_names
 
-        ldap = _get_ldap_interface()
-        result = [
-            entry["virtualdomain"][0]
-            for entry in ldap.search("ou=domains", "virtualdomain=*", ["virtualdomain"])
-        ]
+        result = native_domain_names()
 
         def cmp_domain(domain: str) -> list[str]:
             # Keep the main part of the domain and the extension together
@@ -223,48 +217,23 @@ class DomainInfo(TypedDict):
     topest_parent: str | None
 
 
-def domain_info(domain: str) -> DomainInfo:
-    """
-    Print aggregate data for a specific domain
-
-    Keyword argument:
-        domain     -- Domain to be checked
-    """
-
-    from .certificate import certificate_status
-    from .dns import _get_registar_settings
-    from .utils.app_utils import _get_app_label, _get_app_settings, _installed_apps
-
-    _assert_domain_exists(domain)
-
-    registrar, _ = _get_registar_settings(domain)
-    certificate = certificate_status([domain], full=True)["certificates"][domain]
-
-    apps = []
-    for app in _installed_apps():
-        settings = _get_app_settings(app)
-        if settings.get("domain") == domain:
-            apps.append(
-                {
-                    "id": app,
-                    "name": _get_app_label(app),
-                    "path": settings.get("path", ""),
-                }
-            )
-
-    return {
-        "certificate": certificate,
-        "registrar": registrar,
-        "apps": apps,
-        "main": _get_maindomain() == domain,
-        "topest_parent": _get_parent_domain_of(domain, topest=True),
-        # TODO : add parent / child domains ?
-    }
-
-
 def _assert_domain_exists(domain: str) -> None:
-    if domain not in _get_domains():
-        raise YunohostValidationError("domain_unknown", domain=domain)
+    try:
+        if domain in _get_domains():
+            return
+    except Exception:  # noqa: BLE001 - LDAP may be unavailable on a native-only node
+        pass
+    # W4: the native domain plane is fully parallel (no LDAP virtualdomain);
+    # accept native registered domains so permission URL validation works for
+    # native web routes without a legacy registry entry.
+    try:
+        from .nostrhost.domains.service import native_domain_names
+
+        if domain in native_domain_names():
+            return
+    except Exception:  # noqa: BLE001 - native registry is best-effort
+        pass
+    raise YunohostValidationError("domain_unknown", domain=domain)
 
 
 def _list_subdomains_of(parent_domain: str) -> list[str]:
@@ -305,25 +274,22 @@ def domain_add(
         ignore_dyndns -- If we want to just add the DynDNS domain to the list, without subscribing
         install_letsencrypt_cert -- If adding a subdomain of an already added domain, try to install a Let's Encrypt certificate
     """
-    from .app import app_ssowatconf
     from .certificate import (
         _certificate_install_letsencrypt,
         _certificate_install_selfsigned,
         certificate_status,
     )
     from .hook import hook_callback
+    from .nostrhost.domains.models import DomainResource
+    from .nostrhost.domains.service import save_domain
     from .utils.dns import is_yunohost_dyndns_domain
-    from .utils.ldap import _get_ldap_interface
     from .utils.password import assert_password_is_strong_enough
 
     if dyndns_recovery_password:
         operation_logger.data_to_redact.append(dyndns_recovery_password)
 
-    ldap = _get_ldap_interface()
-
-    try:
-        ldap.validate_uniqueness({"virtualdomain": domain})
-    except MoulinetteError:
+    # Validate uniqueness in the native domain store (no LDAP)
+    if domain in _get_domains():
         raise YunohostValidationError("domain_exists")
 
     # Lower domain to avoid some edge cases issues
@@ -348,7 +314,7 @@ def domain_add(
             raise YunohostValidationError("domain_dyndns_already_subscribed")
 
         if not skip_tos and Moulinette.interface.type == "cli" and os.isatty(1):
-            Moulinette.display(m18n.n("tos_dyndns_acknowledgement"), style="warning")
+            Moulinette.display(tr("tos_dyndns_acknowledgement"), style="warning")
             # i18n: confirm_tos_acknowledgement
             _ask_confirmation("confirm_tos_acknowledgement", kind="soft")
 
@@ -365,18 +331,15 @@ def domain_add(
     _certificate_install_selfsigned([domain], force=True)
 
     try:
-        attr_dict: Mapping[str, str | list[str]] = {
-            "objectClass": ["mailDomain", "top"],
-            "virtualdomain": domain,
-        }
+        from .nostr_state import state_dir_from_env
 
-        try:
-            ldap.add(f"virtualdomain={domain},ou=domains", attr_dict)
-        except Exception as e:
-            raise YunohostError("domain_creation_failed", domain=domain, error=e)
-        finally:
-            global domain_list_cache
-            domain_list_cache = []
+        save_domain(
+            state_dir_from_env(),
+            DomainResource(name=domain, primary=(domain == _get_maindomain())),
+        )
+
+        global domain_list_cache
+        domain_list_cache = []
 
         # Don't regen these conf if we're still in postinstall
         if os.path.exists("/etc/yunohost/installed"):
@@ -434,10 +397,10 @@ def domain_add(
 
     hook_callback("post_domain_add", args=[domain])
 
-    logger.success(m18n.n("domain_created"))
+    logger.success(tr("domain_created"))
 
     if failed_letsencrypt_cert_install:
-        logger.warning(m18n.n("certmanager_cert_install_failed", domains=domain))
+        logger.warning(tr("certmanager_cert_install_failed", domains=domain))
 
 
 @is_unit_operation(exclude=["dyndns_recovery_password"])
@@ -462,11 +425,11 @@ def domain_remove(
     """
     import glob
 
-    from .app import app_remove, app_ssowatconf
+    from .app import app_remove
     from .hook import hook_callback
+    from .nostrhost.domains.service import unlink_domain
     from .utils.app_utils import _get_app_label, _get_app_settings, _installed_apps
     from .utils.dns import is_yunohost_dyndns_domain
-    from .utils.ldap import _get_ldap_interface
 
     if dyndns_recovery_password:
         operation_logger.data_to_redact.append(dyndns_recovery_password)
@@ -515,7 +478,7 @@ def domain_remove(
         if remove_apps:
             if Moulinette.interface.type == "cli" and not force:
                 answer = Moulinette.prompt(
-                    m18n.n(
+                    tr(
                         "domain_remove_confirm_apps_removal",
                         apps="\n".join([x[1] for x in apps_on_that_domain]),
                         answers="y/N",
@@ -542,9 +505,10 @@ def domain_remove(
 
     operation_logger.start()
 
-    ldap = _get_ldap_interface()
     try:
-        ldap.remove("virtualdomain=" + domain + ",ou=domains")
+        from .nostr_state import state_dir_from_env
+
+        unlink_domain(state_dir_from_env(), domain)
     except Exception as e:
         raise YunohostError("domain_deletion_failed", domain=domain, error=e)
     finally:
@@ -590,7 +554,7 @@ def domain_remove(
 
     hook_callback("post_domain_remove", args=[domain])
 
-    logger.success(m18n.n("domain_deleted"))
+    logger.success(tr("domain_deleted"))
 
 
 def domain_dyndns_subscribe(*args: Any, **kwargs: Any) -> None:
@@ -609,24 +573,6 @@ def domain_dyndns_unsubscribe(*args: Any, **kwargs: Any) -> None:
     from .dyndns import dyndns_unsubscribe
 
     dyndns_unsubscribe(*args, **kwargs)
-
-
-def domain_dyndns_list() -> dict[str, list[str]]:
-    """
-    Returns all currently subscribed DynDNS domains
-    """
-    from .dyndns import dyndns_list
-
-    return dyndns_list()
-
-
-def domain_dyndns_update(*args: Any, **kwargs: Any) -> None:
-    """
-    Update a DynDNS domain
-    """
-    from .dyndns import dyndns_update
-
-    dyndns_update(*args, **kwargs)
 
 
 def domain_dyndns_set_recovery_password(*args: Any, **kwargs: Any) -> None:
@@ -683,7 +629,7 @@ def domain_main_domain(
         old_main_domain=old_main_domain, new_main_domain=new_main_domain
     )
 
-    logger.success(m18n.n("main_domain_changed"))
+    logger.success(tr("main_domain_changed"))
     return None
 
 
@@ -807,7 +753,7 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
                 # i18n: domain_config_cert_summary_abouttoexpire
                 # i18n: domain_config_cert_summary_ok
                 # i18n: domain_config_cert_summary_letsencrypt
-                raw_config["cert"]["cert_"]["cert_summary"]["ask"] = m18n.n(
+                raw_config["cert"]["cert_"]["cert_summary"]["ask"] = tr(
                     f"domain_config_cert_summary_{status['summary']}"
                 )
 
@@ -908,7 +854,7 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
             if _get_parent_domain_of(self.entity, topest=True) is None and any(
                 option in next_settings for option in portal_options
             ):
-                from .portal import PORTAL_SETTINGS_DIR
+                from .app import PORTAL_SETTINGS_DIR
 
                 # Portal options are also saved in a `domain.portal.yml` file
                 # that can be read by the portal API.
@@ -981,21 +927,6 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
     return DomainConfigPanel
 
 
-def domain_action_run(domain: str, action: str, args=None) -> None:
-    import urllib.parse
-
-    action_func: Callable
-    if action == "cert.cert_.cert_install":
-        from .certificate import certificate_install as action_func
-    elif action == "cert.cert_.cert_renew":
-        from .certificate import certificate_renew as action_func
-
-    args = dict(urllib.parse.parse_qsl(args or "", keep_blank_values=True))
-    no_checks = args["cert_no_checks"] in ("y", "yes", "on", "1")
-
-    action_func([domain], force=True, no_checks=no_checks)
-
-
 def _get_domain_settings(domain: str) -> dict:
     _assert_domain_exists(domain)
 
@@ -1018,14 +949,6 @@ def _set_domain_settings(domain: str, settings: dict) -> None:
 #
 
 
-def domain_cert_status(
-    domain_list: list[str], full: bool = False
-) -> dict[str, dict[str, Any]]:
-    from .certificate import certificate_status
-
-    return certificate_status(domain_list, full)
-
-
 def domain_cert_install(
     domain_list: list[str],
     force: bool = False,
@@ -1035,17 +958,6 @@ def domain_cert_install(
     from .certificate import certificate_install
 
     return certificate_install(domain_list, force, no_checks, self_signed)
-
-
-def domain_cert_renew(
-    domain_list: list[str],
-    force: bool = False,
-    no_checks: bool = False,
-    email: bool = False,
-) -> None:
-    from .certificate import certificate_renew
-
-    return certificate_renew(domain_list, force, no_checks, email)
 
 
 def domain_dns_suggest(domain: str) -> str:

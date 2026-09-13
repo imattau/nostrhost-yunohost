@@ -23,6 +23,25 @@ caddy:
   test_conf: caddy validate --config /etc/caddy/Caddyfile
   needs_exposed_ports: [80, 443]
   category: web
+nostrhost-control:
+  category: core
+nostr-identityd:
+  category: admin
+nostr-permissiond:
+  category: admin
+nostr-operationsd:
+  category: admin
+nostr-securityd:
+  category: security
+nostr-ddnswatchd:
+  category: network
+nostr-api:
+  category: admin
+nostr-portal-api:
+  category: admin
+nostrhost-certd:
+  category: web
+  actual_systemd_service: nostrhost-certd.timer
 # Yunohost will dynamically add installed php-fpm services (7.3, 7.4, 8.0, ...) in services.py
 #php7.4-fpm:
 #  log: /var/log/php7.4-fpm.log
@@ -46,19 +65,10 @@ redis-server:
   log: /var/log/redis/redis-server.log
   category: database
   ignore_if_package_is_not_installed: redis-server
-slapd:
-  category: database
-  test_conf: slapd -Tt
 ssh:
   log: /var/log/auth.log
   test_conf: sshd -t
   needs_exposed_ports: [22]
-  category: admin
-yunohost-portal-api:
-  log: /var/log/yunohost-portal-api.log
-  category: userportal
-yunohost-api:
-  log: /var/log/yunohost/yunohost-api.log
   category: admin
 nftables:
   test_status: nft list chain inet filter input | grep "dport" | grep -q "accept"

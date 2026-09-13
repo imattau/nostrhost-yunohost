@@ -26,13 +26,24 @@ def test_plan_is_typed_and_dependency_ordered():
     plan = plan_package(PackageManifest.parse_obj(example()))
     names = [operation.name for operation in plan]
     assert names == [
-        "package.ensure", "package.apt.ensure", "system_user.ensure",
-        "directory.ensure", "directory.ensure", "source.fetch", "runtime.ensure",
-        "service.ensure", "service.enable", "service.start", "web.route.ensure",
-        "health.http.check",
+        "package.ensure", "package.manifest.ensure", "package.apt.ensure",
+        "system_user.ensure", "directory.ensure", "directory.ensure",
+        "source.fetch", "runtime.ensure", "service.ensure", "service.enable",
+        "service.start", "web.route.ensure", "health.http.check",
     ]
     assert plan[-1].depends_on == ("example:web",)
     assert plan[0].json_dict()["depends_on"] == []
+
+
+def test_plan_operation_args_are_json_serializable():
+    """Every op's args must survive json.dumps without default=str — the signed
+    request serializes the envelope, so a Path (e.g. service.working_directory)
+    leaks through build_operation_request and breaks the chain."""
+    import json
+
+    plan = plan_package(PackageManifest.parse_obj(example()))
+    for operation in plan:
+        json.dumps(operation.args)  # must not raise
 
 
 def test_plan_envelope_binds_manifest_and_operations():
@@ -269,6 +280,21 @@ def test_reconciliation_skips_package_when_version_matches(tmp_path: Path):
 
     provider.apply(Operation("package.remove", "example", {"id": "example"}))
     assert provider.inspect(desired)["exists"] is False
+
+
+def test_reapply_is_idempotent_when_dependency_resource_is_skipped(tmp_path: Path):
+    """A second reconcile whose provider-ensure op is already satisfied must
+    not deadlock: the skipped resource is seeded as satisfied, so dependent
+    pending operations (manifest, ...) proceed."""
+    plan = [
+        Operation("package.ensure", "example", {"id": "example", "version": "1"}),
+        Operation("package.manifest.ensure", "example", {"id": "example", "version": "1", "manifest": {"app": {"id": "example"}}}, depends_on=("example",)),
+    ]
+    executor = NativeOperationExecutor({"package": PackageProvider(state_dir=tmp_path)})
+    first = apply_reconciled_plan(plan, executor)
+    assert len(first) == 2
+    second = apply_reconciled_plan(plan, executor)
+    assert [row["operation"] for row in second] == ["package.manifest.ensure"]
 
 
 def test_reconciliation_detects_config_and_service_drift(tmp_path: Path):

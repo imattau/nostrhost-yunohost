@@ -22,6 +22,8 @@ try:  # Keep the package stable on both the declared v1 and transitional v2 host
 except ImportError:  # pragma: no cover - exercised on Pydantic v1 installations
     from pydantic import BaseModel, Field, root_validator, validator
 
+from .dns.models import DNS_RECORD_TYPES
+
 
 class PackageError(ValueError):
     """A package is syntactically or semantically invalid."""
@@ -33,7 +35,9 @@ class AppResource(BaseModel):
 
     @validator("id")
     def valid_id(cls, value: str) -> str:
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value):
+        # underscores allowed: NostrHost-native ids use the `_nh` tail
+        # (YunoHost's convention is `_ynh`).
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", value):
             raise ValueError("app id must be a lowercase name")
         return value
 
@@ -281,6 +285,7 @@ class ServiceSecurity(BaseModel):
     protect_system: Literal["strict", "full", "yes", "no"] = "strict"
     protect_home: bool = True
     no_new_privileges: bool = True
+    read_write_paths: list[str] = Field(default_factory=list)
 
 
 class ServiceResource(BaseModel):
@@ -318,6 +323,36 @@ class WebResource(BaseModel):
     def absolute_file_root(cls, value: str | None) -> str | None:
         if value is not None and (not value.startswith("/") or ".." in PurePosixPath(value).parts):
             raise ValueError("web.file_root must be an absolute path without '..'")
+        return value
+
+
+class DnsRecordResource(BaseModel):
+    """One app-declared DNS record (``[dns.<name>]``, W4 Phase B).
+
+    ``name`` is relative to the app's ``web.domain`` (``@`` for the apex).
+    NostrHost enforces the record through the domain's provider and owns it
+    (``app:<id>``), deleting it when the app goes away. The record is
+    reconciled inside the domain's own zone, so ``web.domain`` must be a
+    registered native domain.
+    """
+
+    name: str = "@"
+    type: str
+    value: str
+    ttl: int = 3600
+
+    @validator("type")
+    def known_type(cls, value: str) -> str:
+        if value.upper() not in DNS_RECORD_TYPES:
+            raise ValueError(f"unsupported DNS record type {value!r}")
+        return value.upper()
+
+    @validator("name")
+    def sane_name(cls, value: str) -> str:
+        if value == "@":
+            return value
+        if not re.fullmatch(r"[a-zA-Z0-9*_.-]+", value):
+            raise ValueError(f"invalid DNS record name {value!r}")
         return value
 
 
@@ -433,6 +468,7 @@ class PackageManifest(BaseModel):
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
     web: WebResource | None = None
+    dns: dict[str, DnsRecordResource] = Field(default_factory=dict)
     health: HealthResource | None = None
     timer: TimerResource | None = None
     backup: BackupResource | None = None
@@ -441,11 +477,19 @@ class PackageManifest(BaseModel):
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies")
+    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies", "dns")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
         return value
+
+    @root_validator
+    def dns_needs_web_domain(cls, values: dict[str, Any]) -> dict[str, Any]:
+        declared = values.get("dns") or {}
+        web = values.get("web")
+        if declared and (web is None or not (web.domain or "").strip()):
+            raise ValueError("dns records require a declared web.domain (they are enforced inside the domain's zone)")
+        return values
 
     @validator("service")
     def service_user(cls, value: ServiceResource | None, values: dict[str, Any]) -> ServiceResource | None:
@@ -552,8 +596,25 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     """Create a stable install plan from desired state only."""
     app = package.app.id
     plan: list[Operation] = []
-    package_op = _op("package.ensure", app, {"id": app, "version": package.app.version}, reverse="package.remove", summary=f"register package {app}")
+    ensure_args: dict[str, Any] = {"id": app, "version": package.app.version}
+    if package.web and package.web.domain:
+        # The legacy app registry needs domain/path so permission_url can
+        # build the app's portal URL.
+        ensure_args["domain"] = package.web.domain
+        ensure_args["path"] = package.web.path or "/"
+    package_op = _op("package.ensure", app, ensure_args, reverse="package.remove", summary=f"register package {app}")
     plan.append(package_op)
+    # Persist the resolved manifest so later lifecycle steps (native removal,
+    # upgrade diff, backup-path resolution) can recover the installed state
+    # without re-fetching the catalogue. Reverse is the manifest delete.
+    plan.append(_op(
+        "package.manifest.ensure",
+        app,
+        {"id": app, "version": package.app.version, "manifest": json.loads(package.json(by_alias=True))},
+        deps=(package_op.resource,),
+        reverse="package.manifest.remove",
+        summary=f"record installed manifest for {app}",
+    ))
     for name in package.packages.apt:
         plan.append(_op("package.apt.ensure", f"{app}:apt:{name}", {"package": name}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"ensure apt package {name}"))
     for name, port in package.ports.named.items():
@@ -598,6 +659,10 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         service = package.service.dict()
         service["name"] = package.service.name or app
         service["user"] = service.get("user") or (package.user.name if package.user else app)
+        if service.get("working_directory"):
+            service["working_directory"] = str(service["working_directory"])
+        if service.get("credentials"):
+            service["credentials"] = {key: str(value) for key, value in service["credentials"].items()}
         plan.append(_op("service.ensure", f"{app}:service", service, deps=deps, risk="medium", reverse="service.remove", summary=f"render service {package.service.name or app}"))
         plan.append(_op("service.enable", f"{app}:service:enable", {"name": package.service.name or app}, deps=(f"{app}:service",), reverse="service.disable", summary="enable service"))
         plan.append(_op("service.start", f"{app}:service:start", {"name": package.service.name or app}, deps=(f"{app}:service:enable",), risk="medium", reverse="service.stop", summary="start service"))
@@ -605,13 +670,30 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         web_args = {**package.web.dict(), "app": app}
         plan.append(_op("web.route.ensure", f"{app}:web", web_args, deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
+    if package.dns:
+        web_domain = (package.web.domain if package.web else None) or ""
+        records = [record.dict() for record in package.dns.values()]
+        deps = (f"{app}:web",) if package.web else (package_op.resource,)
+        plan.append(_op(
+            "dns.records.ensure",
+            f"{app}:dns",
+            {"app": app, "domain": web_domain, "records": records},
+            deps=deps,
+            risk="medium",
+            reverse="dns.records.remove",
+            summary=f"enforce {len(records)} DNS record(s) for {app} on {web_domain}",
+        ))
     for name, permission in package.permissions.items():
         deps = (f"{app}:web",) if package.web else (package_op.resource,)
         permission_args = {**permission.dict(), "app": app, "name": name}
         plan.append(_op("permission.ensure", f"{app}:permission:{name}", permission_args, deps=deps, risk="medium", reverse="permission.remove", summary=f"ensure Portal permission {app}.{name}"))
     if package.health:
         deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else (package_op.resource,))
-        plan.append(_op("health.http.check", f"{app}:health", package.health.dict(), deps=deps, risk="low", reversible=False, summary="check application health"))
+        health_args = package.health.dict()
+        if package.web and package.web.domain:
+            # Check the served URL (domain + path), not a bare path.
+            health_args["url"] = f"https://{package.web.domain.rstrip('/')}{package.web.path or '/'}"
+        plan.append(_op("health.http.check", f"{app}:health", health_args, deps=deps, risk="low", reversible=False, summary="check application health"))
     if package.timer:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
@@ -707,20 +789,24 @@ def operation_from_dict(value: dict[str, Any]) -> Operation:
     )
 
 
-def apply_operation_plan(plan: list[Operation], executor: Any) -> list[Any]:
-    """Apply a validated plan in dependency order through one executor."""
+def apply_operation_plan(plan: list[Operation], executor: Any, *, initial_completed: set[str] | None = None) -> list[Any]:
+    """Apply a validated plan in dependency order through one executor.
+
+    ``initial_completed`` seeds the satisfied-resource set — reconcilers pass
+    the already-satisfied (skipped) resources so pending operations depending
+    on them are not mistaken for a cycle."""
     if hasattr(executor, "can_execute"):
         unsupported = [operation.name for operation in plan if not executor.can_execute(operation)]
         if unsupported:
             raise PackageError("native providers are unavailable for: " + ", ".join(unsupported))
     pending = list(plan)
-    completed: set[str] = set()
+    completed: set[str] = set(initial_completed or ())
     results: list[Any] = []
     while pending:
         ready = next((operation for operation in pending if set(operation.depends_on) <= completed), None)
         if ready is None:
             raise PackageError("operation plan contains an unknown dependency or cycle")
-        results.append(executor.execute(ready))
+        results.append({"operation": ready.name, "resource": ready.resource, "result": executor.execute(ready)})
         completed.add(ready.resource)
         pending.remove(ready)
     return results
@@ -759,7 +845,14 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
             packages = [operation.args["package"]]
         return bool(packages) and set(packages) <= set(actual.get("installed", []))
     if operation.name == "package.ensure":
-        return actual.get("exists") is True and actual.get("version") == operation.args.get("version")
+        # A legacy app-registry entry (portal permission gateway) is part of
+        # the desired state when the provider tracks it (legacy_aware).
+        legacy_ok = not actual.get("legacy_aware") or actual.get("legacy") is True
+        if legacy_ok and operation.args.get("domain") and actual.get("legacy_domain") != operation.args.get("domain"):
+            legacy_ok = False
+        if legacy_ok and operation.args.get("domain") and actual.get("legacy_path") != operation.args.get("path", "/"):
+            legacy_ok = False
+        return actual.get("exists") is True and actual.get("version") == operation.args.get("version") and legacy_ok
     if operation.name == "runtime.ensure":
         return actual.get("matches") is True
     if operation.name == "config.ensure":
@@ -842,7 +935,10 @@ def apply_reconciled_plan(plan: list[Operation], executor: Any) -> list[Any]:
                   operation.risk, operation.reversible, operation.reverse, operation.summary)
         for operation in pending
     ]
-    return apply_operation_plan(pending, executor)
+    # Skipped resources are already satisfied; seed the dependency resolver
+    # with them so a pending operation that depends on an already-satisfied
+    # resource is not mistaken for a cycle.
+    return apply_operation_plan(pending, executor, initial_completed=set(skipped))
 
 
 def load_package(path: Path) -> PackageManifest:

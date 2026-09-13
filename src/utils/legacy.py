@@ -23,7 +23,7 @@ from logging import getLogger
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
-from moulinette.core import MoulinetteError
+from nostrhost.core import NostrHostError
 
 from ..utils.error import YunohostValidationError
 from .file_utils import read_file, write_to_file
@@ -69,7 +69,7 @@ def _patch_legacy_helpers(app_folder: str | Path) -> None:
 
         try:
             content = read_file(str(file))
-        except MoulinetteError:
+        except NostrHostError:
             continue
 
         replaced_stuff = False

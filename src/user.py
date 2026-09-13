@@ -33,7 +33,6 @@ from typing import (
     BinaryIO,
     Callable,
     Literal,
-    Mapping,
     NotRequired,
     TextIO,
     TypedDict,
@@ -41,7 +40,8 @@ from typing import (
     cast,
 )
 
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from .log import is_flash_unit_operation, is_unit_operation
 from .service import service_status
@@ -76,28 +76,41 @@ FIELDS_FOR_IMPORT = {
 ADMIN_ALIASES = ["root", "admin", "admins", "webmaster", "postmaster", "abuse"]
 
 
-def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    from .utils.ldap import _get_ldap_interface
+def _regen_native_permissions_projection() -> None:
+    """Refresh the authd's native permission projection (roadmap §25).
 
-    ldap_attrs = {
-        "username": "uid",
-        "password": "",  # We can't request password in ldap
-        "fullname": "cn",
-        "firstname": "givenName",
-        "lastname": "sn",
-        "mail": "mail",
-        "mail-alias": "mail",
-        "mail-forward": "maildrop",
-        "mailbox-quota": "mailuserquota",
-        "groups": "memberOf",
-        "shell": "loginShell",
-        "home-path": "homeDirectory",
-    }
+    ``app_ssowatconf()`` regenerates the legacy ``/etc/ssowat/conf.json``;
+    SSOwat itself is retired, but ``nostr_login``'s authd still falls back to
+    that file when the native ``/etc/nostrhost/permissions.json`` hasn't been
+    (re)written yet. Every user-CRUD call site that regenerates the legacy
+    conf must also refresh the native one -- otherwise a routine user
+    create/delete/update leaves the file Caddy's ``forward_auth`` actually
+    reads stale, silently falling back to the legacy path. Best-effort: a
+    permission-projection hiccup must not fail an otherwise-successful user
+    operation.
+    """
+    try:
+        from nostrhost.permissions import write_permissions_projection
+
+        write_permissions_projection()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning(f"failed to refresh native permission projection: {exc}")
+
+
+def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    from .nostrhost.accounts import groups as native_groups
+    from .nostrhost.accounts import user_mail, users as native_users
 
     def display_default(values: list[str], _: dict[str, list[str]]) -> str | list[str]:
         return values[0] if len(values) == 1 else values
 
     display: dict[str, Callable[[list[str], dict[str, list[str]]], Any]] = {
+        "username": lambda values, _: display_default(values, _),
+        "fullname": lambda values, _: display_default(values, _),
+        "firstname": lambda values, _: display_default(values, _),
+        "lastname": lambda values, _: display_default(values, _),
+        "mailbox-quota": lambda values, _: display_default(values, _),
+        "home-path": lambda values, _: display_default(values, _),
         "password": lambda values, user: "",
         "mail": lambda values, user: display_default(values[:1], user),
         "mail-alias": lambda values, _: values[1:],
@@ -105,48 +118,76 @@ def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
             forward for forward in values if forward != user["uid"][0]
         ],
         "groups": lambda values, user: [
-            group[3:].split(",")[0]
+            group
             for group in values
-            if not group.startswith("cn=all_users,")
-            and not group.startswith("cn=" + user["uid"][0] + ",")
+            if group != "all_users" and group != user["uid"][0]
         ],
         "shell": lambda values, _: (
             len(values) > 0 and values[0].strip() == "/bin/false"
         ),
     }
 
-    attrs = {"uid"}
-    users = {}
-
     if not fields:
         fields = ["username", "fullname", "mail", "mailbox-quota"]
 
     for field in fields:
-        if field in ldap_attrs:
-            attrs.add(ldap_attrs[field])
-        else:
+        if field not in ("username", "password", "fullname", "firstname", "lastname", "mail", "mail-alias", "mail-forward", "mailbox-quota", "groups", "shell", "home-path"):
             raise YunohostError("field_invalid", field=field)
 
-    ldap = _get_ldap_interface()
-    result = ldap.search(
-        "ou=users",
-        "(&(objectclass=person)(!(uid=root))(!(uid=nobody)))",
-        attrs,
-    )
+    native = native_users()
+    all_groups = native_groups()
+    users: dict[str, dict[str, Any]] = {}
 
-    for user in result:
+    for username, record in native.items():
+        mails = user_mail(username)
+        membership = []
+        for group, ginfos in all_groups.items():
+            if username in ginfos.get("members", []):
+                membership.append(group)
+        attrs: dict[str, list[str]] = {
+            "uid": [username],
+            "cn": [str(record.get("fullname", username))],
+            "givenName": [str(record.get("firstname", username))],
+            "sn": [str(record.get("lastname", ""))],
+            "mail": mails or [],
+            "maildrop": [username] + [str(f) for f in record.get("mail_forward", [])],
+            "mailuserquota": [str(record.get("mailbox_quota", "0"))],
+            "memberOf": [f"cn={g},ou=groups,dc=yunohost,dc=org" for g in membership],
+            "loginShell": [str(record.get("shell", "/bin/bash"))],
+            "homeDirectory": ["/home/" + username],
+        }
+
         entry: dict[str, str] = {}
         for field in fields:
-            values = []
-            if ldap_attrs[field] in user:
-                values = user[ldap_attrs[field]]
-            entry[field] = display.get(field, display_default)(values, user)
+            values = attrs.get(field, [])
+            if field == "username":
+                values = [username]
+            elif field == "fullname":
+                values = attrs["cn"]
+            elif field == "firstname":
+                values = attrs["givenName"]
+            elif field == "lastname":
+                values = attrs["sn"]
+            elif field == "mail":
+                values = attrs["mail"][:1]
+            elif field == "mail-alias":
+                values = attrs["mail"][1:]
+            elif field == "mail-forward":
+                values = attrs["maildrop"]
+            elif field == "mailbox-quota":
+                values = attrs["mailuserquota"]
+            elif field == "groups":
+                values = attrs["memberOf"]
+            elif field == "shell":
+                values = attrs["loginShell"]
+            elif field == "home-path":
+                values = attrs["homeDirectory"]
+            elif field == "password":
+                values = [""]
+            entry[field] = display[field](values, attrs)
 
-        username: str = user["uid"][0]
         users[username] = entry
 
-    # Dict entry 0 has incompatible type "str": "dict[Any, dict[str, Any]]";
-    #                           expected "str": "dict[str, str]"  [dict-item]
     return {"users": users}
 
 
@@ -188,7 +229,6 @@ def user_create(
     from .app import app_ssowatconf
     from .domain import _assert_domain_exists, _get_maindomain, domain_list
     from .hook import hook_callback
-    from .utils.ldap import _get_ldap_interface
     from .utils.password import (
         _hash_user_password,
         assert_password_is_compatible,
@@ -207,13 +247,13 @@ def user_create(
             )
         else:
             # On affiche les differents domaines possibles
-            Moulinette.display(m18n.n("domains_available"))
+            Moulinette.display(tr("domains_available"))
             for domain in domain_list()["domains"]:
                 Moulinette.display(f"- {domain}")
 
             maindomain = _get_maindomain()
             domain = Moulinette.prompt(
-                m18n.n("ask_user_domain") + f" (default: {maindomain})"
+                tr("ask_user_domain") + f" (default: {maindomain})"
             )
             if not domain:
                 domain = maindomain
@@ -222,16 +262,18 @@ def user_create(
     _assert_domain_exists(domain)
 
     mail = f"{username}@{domain}"
-    ldap = _get_ldap_interface()
 
     if username in user_list()["users"]:
         raise YunohostValidationError("user_already_exists", user=username)
 
-    # Validate uniqueness of username and mail in LDAP
-    try:
-        ldap.validate_uniqueness({"uid": username, "mail": mail, "cn": username})
-    except Exception as e:
-        raise YunohostValidationError("user_creation_failed", user=username, error=e)
+    # Validate uniqueness of username and mail (native store, no LDAP)
+    from .nostrhost.accounts import users as native_users
+
+    for _other, record in native_users().items():
+        if mail in record.get("mail", []):
+            raise YunohostValidationError(
+                "user_creation_failed", user=username, error="mail already used"
+            )
 
     # Validate uniqueness of username in system users
     all_existing_usernames = {x.pw_name for x in pwd.getpwall()}
@@ -265,32 +307,37 @@ def user_create(
         if not shellexists(loginShell) or loginShell not in list_shells():
             raise YunohostValidationError("invalid_shell", shell=loginShell)
 
-    attr_dict: Mapping[str, str | list[str]] = {
-        "objectClass": [
-            "mailAccount",
-            "inetOrgPerson",
-            "posixAccount",
-            "userPermissionYnh",
-        ],
-        "givenName": [firstname],
-        "sn": [lastname],
-        "displayName": [fullname],
-        "cn": [fullname],
-        "uid": [username],
-        "mail": mail,  # NOTE: this one seems to be already a list
-        "maildrop": [username],
-        "mailuserquota": [mailbox_quota or "0"],
-        "userPassword": [_hash_user_password(password)],
-        "gidNumber": [uid],
-        "uidNumber": [uid],
-        "homeDirectory": ["/home/" + username],
-        "loginShell": [loginShell],
-    }
+    # Create the real Unix account (replaces LDAP add + libnss-ldapd)
+    from .nostrhost.accounts import create_real_user
 
     try:
-        ldap.add(f"uid={username},ou=users", attr_dict)
+        create_real_user(
+            username,
+            uid=uid,
+            gid=uid,
+            shell=loginShell,
+            home="/home/",
+            password_hash=_hash_user_password(password),
+        )
     except Exception as e:
         raise YunohostError("user_creation_failed", user=username, error=e)
+
+    # Record the YunoHost metadata LDAP used to carry
+    record = {
+        "fullname": fullname,
+        "firstname": firstname,
+        "lastname": lastname,
+        "mail": [mail],
+        "mailbox_quota": mailbox_quota or "0",
+        "shell": loginShell,
+        "uid": uid,
+        "admin": bool(admin),
+    }
+    _native = native_users()
+    _native[username] = record
+    from .nostrhost.accounts import save_users
+
+    save_users(_native)
 
     # Invalidate passwd and group to take user and group creation into account
     subprocess.call(["nscd", "-i", "passwd"])
@@ -303,7 +350,7 @@ def user_create(
         home = f"/home/{username}"
         if not os.path.isdir(home):
             logger.warning(
-                m18n.n("user_home_creation_failed", home=home), exc_info=True
+                tr("user_home_creation_failed", home=home), exc_info=True
             )
 
     try:
@@ -317,6 +364,7 @@ def user_create(
         user_group_update(groupname="admins", add=username, sync_perm=False)
     user_group_update(groupname="all_users", add=username, force=True, sync_perm=True)
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     # Trigger post_user_create hooks
     env_dict = {
@@ -331,7 +379,7 @@ def user_create(
 
     # TODO: Send a welcome mail to user
     if not from_import:
-        logger.success(m18n.n("user_created"))
+        logger.success(tr("user_created"))
 
     return {"fullname": fullname, "username": username, "mail": mail}
 
@@ -349,7 +397,6 @@ def user_delete(
     from .authenticators.ldap_ynhuser import Authenticator as PortalAuth
     from .hook import hook_callback
     from .permission import _sync_permissions_with_ldap
-    from .utils.ldap import _get_ldap_interface
 
     groups = user_group_list()["groups"]
 
@@ -382,20 +429,29 @@ def user_delete(
                 force=force,
             )
 
+    # Remove the real Unix account (replaces LDAP remove). In the native model
+    # the user's primary group is a real /etc/group entry, so the user must be
+    # removed before groupdel can delete it.
+    from .nostrhost.accounts import delete_real_user, save_users, users as native_users
+
+    try:
+        delete_real_user(username, purge=purge)
+    except Exception as e:
+        raise YunohostError("user_deletion_failed", user=username, error=e)
+
     # Delete primary group if it exists (why wouldnt it exists ?  because some
     # epic bug happened somewhere else and only a partial removal was
     # performed...)
     if username in user_group_list()["groups"].keys():
         user_group_delete(username, force=True, sync_perm=True)
 
-    ldap = _get_ldap_interface()
-    try:
-        ldap.remove(f"uid={username},ou=users")
-    except Exception as e:
-        raise YunohostError("user_deletion_failed", user=username, error=e)
+    _native = native_users()
+    _native.pop(username, None)
+    save_users(_native)
 
     _sync_permissions_with_ldap()
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     PortalAuth.invalidate_all_sessions_for_user(username)
     AdminAuth.invalidate_all_sessions_for_user(username)
@@ -410,7 +466,7 @@ def user_delete(
     hook_callback("post_user_delete", args=[username, purge])
 
     if not from_import:
-        logger.success(m18n.n("user_deleted"))
+        logger.success(tr("user_deleted"))
 
 
 @is_unit_operation([("username", "user")], exclude=["change_password"])
@@ -441,7 +497,7 @@ def user_update(
     from .app import app_ssowatconf
     from .domain import domain_list
     from .hook import hook_callback
-    from .utils.ldap import _get_ldap_interface
+    from .nostrhost.accounts import save_users, user_get, users as native_users
     from .utils.password import (
         _hash_user_password,
         assert_password_is_compatible,
@@ -450,17 +506,12 @@ def user_update(
 
     domains = domain_list()["domains"]
 
-    # Populate user informations
-    ldap = _get_ldap_interface()
-    attrs_to_fetch = ["givenName", "sn", "mail", "maildrop", "memberOf"]
-    result = ldap.search(
-        base="ou=users",
-        filter="uid=" + username,
-        attrs=attrs_to_fetch,
-    )
-    if not result:
+    # Populate user informations (native store, no LDAP)
+    user = user_get(username)
+    if not user:
         raise YunohostValidationError("user_unknown", user=username)
-    user = result[0]
+    mails = list(user.get("mail", []))
+    maildrops = [username] + [str(f) for f in user.get("mail_forward", [])]
     env_dict: dict[str, str] = {"YNH_USER_USERNAME": username}
 
     # Get modifications from arguments
@@ -468,14 +519,14 @@ def user_update(
     if firstname:
         new_attr_dict["givenName"] = firstname  # TODO: Validate
         new_attr_dict["cn"] = new_attr_dict["displayName"] = (
-            firstname + " " + user["sn"][0]
+            firstname + " " + str(user.get("lastname", ""))
         ).strip()
         env_dict["YNH_USER_FIRSTNAME"] = firstname
 
     if lastname:
         new_attr_dict["sn"] = lastname  # TODO: Validate
         new_attr_dict["cn"] = new_attr_dict["displayName"] = (
-            user["givenName"][0] + " " + lastname
+            str(user.get("firstname", "")) + " " + lastname
         ).strip()
         env_dict["YNH_USER_LASTNAME"] = lastname
 
@@ -493,13 +544,13 @@ def user_update(
             change_password = cast(
                 str,
                 Moulinette.prompt(
-                    m18n.n("ask_password"), is_password=True, confirm=True
+                    tr("ask_password"), is_password=True, confirm=True
                 ),
             )
 
         # Ensure compatibility and sufficiently complex password
         assert_password_is_compatible(change_password)
-        is_admin = "cn=admins,ou=groups,dc=yunohost,dc=org" in user["memberOf"]
+        is_admin = bool(user.get("admin"))
         assert_password_is_strong_enough(
             "admin" if is_admin else "user", change_password
         )
@@ -509,15 +560,16 @@ def user_update(
 
     if mail:
         # If the requested mail address is already as main address or as an alias by this user
-        if mail in user["mail"]:
-            if mail != user["mail"][0]:
-                user["mail"].remove(mail)
+        if mail in mails:
+            if mail != mails[0]:
+                mails.remove(mail)
         # Othewise, check that this mail address is not already used by this user
         else:
-            try:
-                ldap.validate_uniqueness({"mail": mail})
-            except Exception as e:
-                raise YunohostError("user_update_failed", user=username, error=e)
+            for _other, record in native_users().items():
+                if _other != username and mail in record.get("mail", []):
+                    raise YunohostError(
+                        "user_update_failed", user=username, error="mail already used"
+                    )
         if mail[mail.find("@") + 1 :] not in domains:
             raise YunohostError(
                 "mail_domain_unknown", domain=mail[mail.find("@") + 1 :]
@@ -526,8 +578,8 @@ def user_update(
         if mail.split("@")[0] in ADMIN_ALIASES:
             raise YunohostValidationError("mail_unavailable")
 
-        user["mail"] = [mail] + user["mail"][1:]
-        new_attr_dict["mail"] = user["mail"]
+        mails = [mail] + mails[1:]
+        new_attr_dict["mail"] = mails
 
     if add_mailalias is not None:
         if not isinstance(add_mailalias, list):
@@ -537,29 +589,30 @@ def user_update(
                 raise YunohostValidationError("mail_unavailable")
 
             # (c.f. similar stuff as before)
-            if mail in user["mail"]:
+            if mail in mails:
                 continue
             else:
-                try:
-                    ldap.validate_uniqueness({"mail": mail})
-                except Exception as e:
-                    raise YunohostError("user_update_failed", user=username, error=e)
+                for _other, record in native_users().items():
+                    if _other != username and mail in record.get("mail", []):
+                        raise YunohostError(
+                            "user_update_failed", user=username, error="mail already used"
+                        )
             if mail[mail.find("@") + 1 :] not in domains:
                 raise YunohostError(
                     "mail_domain_unknown", domain=mail[mail.find("@") + 1 :]
                 )
-            user["mail"].append(mail)
-        new_attr_dict["mail"] = user["mail"]
+            mails.append(mail)
+        new_attr_dict["mail"] = mails
 
     if remove_mailalias:
         if not isinstance(remove_mailalias, list):
             remove_mailalias = [remove_mailalias]
         for mail in remove_mailalias:
-            if len(user["mail"]) > 1 and mail in user["mail"][1:]:
-                user["mail"].remove(mail)
+            if len(mails) > 1 and mail in mails[1:]:
+                mails.remove(mail)
             else:
                 raise YunohostValidationError("mail_alias_remove_failed", mail=mail)
-        new_attr_dict["mail"] = user["mail"]
+        new_attr_dict["mail"] = mails
 
     if "mail" in new_attr_dict:
         env_dict["YNH_USER_MAILS"] = ",".join(new_attr_dict["mail"])
@@ -567,15 +620,15 @@ def user_update(
     if add_mailforward:
         if not isinstance(add_mailforward, list):
             add_mailforward = [add_mailforward]
-        new_attr_dict["maildrop"] = set(user["maildrop"])
+        new_attr_dict["maildrop"] = set(maildrops)
         new_attr_dict["maildrop"].update(set(add_mailforward))
 
     if remove_mailforward:
         if not isinstance(remove_mailforward, list):
             remove_mailforward = [remove_mailforward]
-        new_attr_dict["maildrop"] = set(user["maildrop"]) - set(remove_mailforward)
+        new_attr_dict["maildrop"] = set(maildrops) - set(remove_mailforward)
 
-        if len(user["maildrop"]) - len(remove_mailforward) != len(
+        if len(maildrops) - len(remove_mailforward) != len(
             new_attr_dict["maildrop"]
         ):
             raise YunohostValidationError("mail_forward_remove_failed", mail=mail)
@@ -596,8 +649,35 @@ def user_update(
     if not from_import:
         operation_logger.start()
 
+    # Apply to the native store (replaces LDAP update)
     try:
-        ldap.update(f"uid={username},ou=users", new_attr_dict)
+        if "givenName" in new_attr_dict:
+            user["firstname"] = new_attr_dict["givenName"]
+        if "sn" in new_attr_dict:
+            user["lastname"] = new_attr_dict["sn"]
+        if "cn" in new_attr_dict:
+            user["fullname"] = new_attr_dict["cn"]
+        if "userPassword" in new_attr_dict:
+            # Real Unix password (replaces LDAP userPassword via chpasswd)
+            subprocess.run(
+                ["chpasswd", "-e"],
+                input=f"{username}:{new_attr_dict['userPassword']}\n",
+                check=True,
+                text=True,
+            )
+        if "mail" in new_attr_dict:
+            user["mail"] = list(new_attr_dict["mail"])
+        if "maildrop" in new_attr_dict:
+            forwards = [f for f in new_attr_dict["maildrop"] if f != username]
+            user["mail_forward"] = sorted(forwards)
+        if "mailuserquota" in new_attr_dict:
+            user["mailbox_quota"] = new_attr_dict["mailuserquota"]
+        if "loginShell" in new_attr_dict:
+            user["shell"] = new_attr_dict["loginShell"]
+            subprocess.run(["chsh", "-s", str(new_attr_dict["loginShell"]), username], check=True)
+        _native = native_users()
+        _native[username] = user
+        save_users(_native)
     except Exception as e:
         raise YunohostError("user_update_failed", user=username, error=e)
 
@@ -616,7 +696,8 @@ def user_update(
 
     if not from_import:
         app_ssowatconf()
-        logger.success(m18n.n("user_updated"))
+        _regen_native_permissions_projection()
+        logger.success(tr("user_updated"))
         return user_info(username)
 
 
@@ -636,57 +717,46 @@ UserInfos = TypedDict(
 
 
 def user_info(username: str) -> UserInfos:
-    from .utils.ldap import _get_ldap_interface
+    from .nostrhost.accounts import user_get, user_mail
 
-    ldap = _get_ldap_interface()
+    record = user_get(username)
+    if record is None:
+        raise YunohostValidationError("user_unknown", user=username)
 
-    user_attrs = ["cn", "mail", "uid", "maildrop", "mailuserquota", "loginShell"]
-
-    if len(username.split("@")) == 2:
-        filter = "mail=" + username
-    else:
-        filter = "uid=" + username
-
-    result = ldap.search("ou=users", filter, user_attrs)
-
-    if result:
-        user = result[0]
-    else:
+    mails = user_mail(username)
+    if not mails:
         raise YunohostValidationError("user_unknown", user=username)
 
     result_dict: UserInfos = {
-        "username": user["uid"][0],
-        "fullname": user["cn"][0],
-        "mail": user["mail"][0],
-        "loginShell": user["loginShell"][0],
+        "username": username,
+        "fullname": str(record.get("fullname", username)),
+        "mail": mails[0],
+        "loginShell": str(record.get("shell", "/bin/bash")),
         "mail-aliases": [],
         "mail-forward": [],
     }
 
-    if len(user["mail"]) > 1:
-        result_dict["mail-aliases"] = user["mail"][1:]
+    if len(mails) > 1:
+        result_dict["mail-aliases"] = mails[1:]
 
-    if len(user["maildrop"]) > 1:
-        user["maildrop"].remove(username)
-        result_dict["mail-forward"] = user["maildrop"]
+    forwards = [str(f) for f in record.get("mail_forward", [])]
+    if forwards:
+        result_dict["mail-forward"] = forwards
 
-    if "mailuserquota" in user:
-        userquota = user["mailuserquota"][0]
-
-        if isinstance(userquota, int):
-            userquota = str(userquota)
+    if "mailbox_quota" in record:
+        userquota = str(record.get("mailbox_quota", "0"))
 
         # Test if userquota is '0' or '0M' ( quota pattern is ^(\d+[bkMGT])|0$ )
         is_limited = not re.match("0[bkMGT]?", userquota)
         storage_use = "?"
 
         if service_status("dovecot")["status"] != "running":
-            logger.warning(m18n.n("mailbox_used_space_dovecot_down"))
+            logger.warning(tr("mailbox_used_space_dovecot_down"))
         elif username not in user_permission_info("mail.main")["corresponding_users"]:
-            logger.debug(m18n.n("mailbox_disabled", user=username))
+            logger.debug(tr("mailbox_disabled", user=username))
         else:
             try:
-                uid_ = user["uid"][0]
+                uid_ = username
                 cmd_result = check_output(f"doveadm -f flow quota get -u {uid_}")
             except Exception as e:
                 cmd_result = ""
@@ -709,7 +779,7 @@ def user_info(username: str) -> UserInfos:
                         storage_use += " (%s%%)" % percentage
 
         result_dict["mailbox-quota"] = {
-            "limit": userquota if is_limited else m18n.n("unlimit"),
+            "limit": userquota if is_limited else tr("unlimit"),
             "use": storage_use,
         }
 
@@ -848,7 +918,7 @@ def user_import(
 
         if format_errors:
             logger.error(
-                m18n.n(
+                tr(
                     "user_import_bad_line",
                     line=reader.line_num,
                     details=", ".join(format_errors),
@@ -888,7 +958,7 @@ def user_import(
     total = len(actions["created"] + actions["updated"] + actions["deleted"])
 
     if total == 0:
-        logger.info(m18n.n("user_import_nothing_to_do"))
+        logger.info(tr("user_import_nothing_to_do"))
         return {}
 
     # Apply creation, update and deletion operation
@@ -914,7 +984,7 @@ def user_import(
             logger.warning(
                 user
                 + ": "
-                + m18n.n("user_import_cannot_edit_or_delete_admins", user=user)
+                + tr("user_import_cannot_edit_or_delete_admins", user=user)
             )
         else:
             result["errors"] += 1
@@ -1020,15 +1090,16 @@ def user_import(
 
     _sync_permissions_with_ldap()
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
     if result["errors"]:
-        msg = m18n.n("user_import_partial_failed")
+        msg = tr("user_import_partial_failed")
         if result["created"] + result["updated"] + result["deleted"] == 0:
-            msg = m18n.n("user_import_failed")
+            msg = tr("user_import_failed")
         logger.error(msg)
         operation_logger.error(msg)
     else:
-        logger.success(m18n.n("user_import_success"))
+        logger.success(tr("user_import_success"))
         operation_logger.success()
     return result
 
@@ -1050,16 +1121,16 @@ def user_group_list(
                                   to list them when called from other functions
     """
 
-    # Fetch relevant informations
+    # Fetch relevant informations (native store, no LDAP)
 
-    from .utils.ldap import _get_ldap_interface, _ldap_path_extract
+    from .nostrhost.accounts import ensure_base_groups, groups as native_groups
 
-    ldap = _get_ldap_interface()
-    groups_infos = ldap.search(
-        "ou=groups",
-        "(objectclass=groupOfNamesYnh)",
-        ["cn", "member"],
-    )
+    ensure_base_groups()
+
+    groups_infos = [
+        {"cn": [name], "member": list(ginfos.get("members", []))}
+        for name, ginfos in native_groups().items()
+    ]
 
     # Parse / organize information to be outputed
 
@@ -1073,9 +1144,7 @@ def user_group_list(
 
         groups[name] = {}
 
-        groups[name]["members"] = [
-            _ldap_path_extract(p, "uid") for p in ginfos.get("member", [])
-        ]
+        groups[name]["members"] = list(ginfos.get("member", []))
 
     if full:
         for group in groups:
@@ -1107,14 +1176,19 @@ def user_group_create(
         groupname -- Must be unique
 
     """
+    from .nostrhost.accounts import (
+        create_real_group,
+        groups as native_groups,
+        save_groups,
+    )
     from .permission import _sync_permissions_with_ldap
-    from .utils.ldap import _get_ldap_interface
 
-    ldap = _get_ldap_interface()
-
-    # Validate uniqueness of groupname in LDAP
-    conflict = ldap.get_conflict({"cn": groupname}, base_dn="ou=groups")
-    if conflict:
+    # Validate uniqueness of groupname in native store. The primary group of
+    # a user is created as part of user_create (create_real_user) so it may
+    # already exist here for that path; that is expected, not an error.
+    if groupname in native_groups():
+        if primary_group:
+            return {"name": groupname}
         raise YunohostValidationError("group_already_exist", group=groupname)
 
     # Validate uniqueness of groupname in system group
@@ -1122,7 +1196,7 @@ def user_group_create(
     if groupname in all_existing_groupnames:
         if primary_group:
             logger.warning(
-                m18n.n("group_already_exist_on_system_but_removing_it", group=groupname)
+                tr("group_already_exist_on_system_but_removing_it", group=groupname)
             )
             subprocess.check_call(
                 ["sed", "--in-place", f"/^{groupname}:/d", "/etc/group"]
@@ -1143,21 +1217,17 @@ def user_group_create(
 
     assert gid
 
-    attr_dict: dict[str, str | list[str]] = {
-        "objectClass": ["top", "groupOfNamesYnh", "posixGroup"],
-        "cn": groupname,
-        "gidNumber": [gid],
-    }
-
     # Here we handle the creation of a primary group
     # We want to initialize this group to contain the corresponding user
     # (then we won't be able to add/remove any user in this group)
-    if primary_group:
-        attr_dict["member"] = ["uid=" + groupname + ",ou=users,dc=yunohost,dc=org"]
+    members = [groupname] if primary_group else []
 
     operation_logger.start()
     try:
-        ldap.add(f"cn={groupname},ou=groups", attr_dict)
+        create_real_group(groupname, gid)
+        _native = native_groups()
+        _native[groupname] = {"gid": gid, "members": members}
+        save_groups(_native)
     except Exception as e:
         raise YunohostError("group_creation_failed", group=groupname, error=e)
 
@@ -1165,9 +1235,9 @@ def user_group_create(
         _sync_permissions_with_ldap()
 
     if not primary_group:
-        logger.success(m18n.n("group_created", group=groupname))
+        logger.success(tr("group_created", group=groupname))
     else:
-        logger.debug(m18n.n("group_created", group=groupname))
+        logger.debug(tr("group_created", group=groupname))
 
     return {"name": groupname}
 
@@ -1186,8 +1256,12 @@ def user_group_delete(
         groupname -- Groupname to delete
 
     """
+    from .nostrhost.accounts import (
+        delete_real_group,
+        groups as native_groups,
+        save_groups,
+    )
     from .permission import _sync_permissions_with_ldap
-    from .utils.ldap import _get_ldap_interface
 
     existing_groups = list(user_group_list()["groups"].keys())
     if groupname not in existing_groups:
@@ -1203,9 +1277,11 @@ def user_group_delete(
         raise YunohostValidationError("group_cannot_be_deleted", group=groupname)
 
     operation_logger.start()
-    ldap = _get_ldap_interface()
     try:
-        ldap.remove(f"cn={groupname},ou=groups")
+        delete_real_group(groupname)
+        _native = native_groups()
+        _native.pop(groupname, None)
+        save_groups(_native)
     except Exception as e:
         raise YunohostError("group_deletion_failed", group=groupname, error=e)
 
@@ -1213,9 +1289,9 @@ def user_group_delete(
         _sync_permissions_with_ldap()
 
     if groupname not in existing_users:
-        logger.success(m18n.n("group_deleted", group=groupname))
+        logger.success(tr("group_deleted", group=groupname))
     else:
-        logger.debug(m18n.n("group_deleted", group=groupname))
+        logger.debug(tr("group_deleted", group=groupname))
 
 
 @is_unit_operation([("groupname", "group")])
@@ -1231,10 +1307,17 @@ def user_group_update(
     from_import: bool = False,
 ) -> None | dict[str, Any]:
     from .hook import hook_callback
+    from .nostrhost.accounts import (
+        add_real_user_to_group,
+        ensure_base_groups,
+        groups as native_groups,
+        remove_real_user_from_group,
+        save_groups,
+    )
     from .permission import _sync_permissions_with_ldap
-    from .utils.ldap import _get_ldap_interface, _ldap_path_extract
 
     existing_users = list(user_list()["users"].keys())
+    ensure_base_groups()
 
     # Refuse to edit a primary group of a user (e.g. group 'sam' related to user 'sam')
     # Those kind of group should only ever contain the user (e.g. sam) and only this one.
@@ -1258,33 +1341,19 @@ def user_group_update(
                     "group_cannot_remove_last_admin", user=remove[0]
                 )
 
-    ldap = _get_ldap_interface()
-
-    # Fetch info for this group
-    result = ldap.search(
-        "ou=groups",
-        "cn=" + groupname,
-        ["cn", "member", "permission", "mail", "objectClass"],
-    )
-
-    if not result:
+    group = native_groups().get(groupname)
+    if group is None:
         raise YunohostValidationError("group_unknown", group=groupname)
 
-    group = result[0]
-
     # We extract the uid for each member of the group to keep a simple flat list of members
-    current_group_mail = group.get("mail", [])
+    current_group_mail = list(group.get("mail", []))
     new_group_mail = copy.copy(current_group_mail)
-    current_group_members = [
-        _ldap_path_extract(p, "uid") for p in group.get("member", [])
-    ]
+    current_group_members = list(group.get("members", []))
     new_group_members = copy.copy(current_group_members)
     new_attr_dict: dict[str, Any] = {}
 
-    # Group permissions
-    current_group_permissions = [
-        _ldap_path_extract(p, "cn") for p in group.get("permission", [])
-    ]
+    # Group permissions (native projection, no LDAP object)
+    current_group_permissions = list(group.get("permissions", []))
 
     if add:
         users_to_add = [add] if not isinstance(add, list) else add
@@ -1295,11 +1364,11 @@ def user_group_update(
 
             if user in current_group_members:
                 logger.warning(
-                    m18n.n("group_user_already_in_group", user=user, group=groupname)
+                    tr("group_user_already_in_group", user=user, group=groupname)
                 )
             else:
                 operation_logger.related_to.append(("user", user))
-                logger.info(m18n.n("group_user_add", group=groupname, user=user))
+                logger.info(tr("group_user_add", group=groupname, user=user))
 
         new_group_members += users_to_add
 
@@ -1309,11 +1378,11 @@ def user_group_update(
         for user in users_to_remove:
             if user not in current_group_members:
                 logger.warning(
-                    m18n.n("group_user_not_in_group", user=user, group=groupname)
+                    tr("group_user_not_in_group", user=user, group=groupname)
                 )
             else:
                 operation_logger.related_to.append(("user", user))
-                logger.info(m18n.n("group_user_remove", group=groupname, user=user))
+                logger.info(tr("group_user_remove", group=groupname, user=user))
 
         # Remove users_to_remove from new_group_members
         # Kinda like a new_group_members -= users_to_remove
@@ -1321,11 +1390,7 @@ def user_group_update(
 
     # If something changed, we add this to the stuff to commit later in the code
     if set(new_group_members) != set(current_group_members):
-        new_group_members_dns = [
-            "uid=" + user + ",ou=users,dc=yunohost,dc=org" for user in new_group_members
-        ]
-        new_attr_dict["member"] = list(set(new_group_members_dns))
-        new_attr_dict["memberUid"] = list(set(new_group_members))
+        new_attr_dict["members"] = list(set(new_group_members))
 
     # Check the whole alias situation
     if add_mailalias:
@@ -1340,16 +1405,17 @@ def user_group_update(
                 raise YunohostValidationError("mail_unavailable")
             if mail in current_group_mail:
                 continue
-            try:
-                ldap.validate_uniqueness({"mail": mail})
-            except Exception as e:
-                raise YunohostError("group_update_failed", group=groupname, error=e)
+            for _other_name, _other_group in native_groups().items():
+                if _other_name != groupname and mail in _other_group.get("mail", []):
+                    raise YunohostError(
+                        "group_update_failed", group=groupname, error="mail already used"
+                    )
             if mail[mail.find("@") + 1 :] not in domains:
                 raise YunohostError(
                     "mail_domain_unknown", domain=mail[mail.find("@") + 1 :]
                 )
             new_group_mail.append(mail)
-            logger.info(m18n.n("group_mailalias_add", group=groupname, mail=mail))
+            logger.info(tr("group_mailalias_add", group=groupname, mail=mail))
 
     if remove_mailalias:
         from .domain import _get_maindomain
@@ -1370,29 +1436,34 @@ def user_group_update(
             if mail in new_group_mail:
                 new_group_mail.remove(mail)
                 logger.info(
-                    m18n.n("group_mailalias_remove", group=groupname, mail=mail)
+                    tr("group_mailalias_remove", group=groupname, mail=mail)
                 )
             else:
                 raise YunohostValidationError("mail_alias_remove_failed", mail=mail)
 
     if set(new_group_mail) != set(current_group_mail):
-        logger.info(m18n.n("group_update_aliases", group=groupname))
+        logger.info(tr("group_update_aliases", group=groupname))
         new_attr_dict["mail"] = list(set(new_group_mail))
-
-        if new_attr_dict["mail"]:
-            new_attr_dict["objectClass"] = set(group["objectClass"])
-            new_attr_dict["objectClass"].add("mailGroup")
-        else:
-            new_attr_dict["objectClass"] = set(group["objectClass"]) - {
-                "mailGroup",
-                "mailAccount",
-            }
 
     if new_attr_dict:
         if not from_import:
             operation_logger.start()
         try:
-            ldap.update(f"cn={groupname},ou=groups", new_attr_dict)
+            # Apply to the real system group + native store (replaces LDAP update)
+            if "members" in new_attr_dict:
+                for user in current_group_members:
+                    if user not in new_group_members:
+                        remove_real_user_from_group(user, groupname)
+                for user in new_group_members:
+                    if user not in current_group_members:
+                        add_real_user_to_group(user, groupname)
+            _native = native_groups()
+            _native[groupname] = {
+                **group,
+                "members": new_group_members,
+                "mail": list(set(new_group_mail)) if "mail" in new_attr_dict else current_group_mail,
+            }
+            save_groups(_native)
         except Exception as e:
             raise YunohostError("group_update_failed", group=groupname, error=e)
 
@@ -1428,11 +1499,11 @@ def user_group_update(
     if not from_import:
         if groupname != "all_users":
             if not new_attr_dict:
-                logger.info(m18n.n("group_no_change", group=groupname))
+                logger.info(tr("group_no_change", group=groupname))
             else:
-                logger.success(m18n.n("group_updated", group=groupname))
+                logger.success(tr("group_updated", group=groupname))
         else:
-            logger.debug(m18n.n("group_updated", group=groupname))
+            logger.debug(tr("group_updated", group=groupname))
 
         return user_group_info(groupname)
 
@@ -1448,30 +1519,18 @@ def user_group_info(groupname: str) -> dict[str, Any]:
 
     """
 
-    from .utils.ldap import _get_ldap_interface, _ldap_path_extract
+    from .nostrhost.accounts import ensure_base_groups, groups as native_groups
 
-    ldap = _get_ldap_interface()
+    ensure_base_groups()
 
-    # Fetch info for this group
-    result = ldap.search(
-        "ou=groups",
-        "cn=" + groupname,
-        ["cn", "member", "mail"],
-    )
-
-    if not result:
+    group = native_groups().get(groupname)
+    if group is None:
         raise YunohostValidationError("group_unknown", group=groupname)
 
-    infos = result[0]
-
-    # Format data
-
     return {
-        "members": [_ldap_path_extract(p, "uid") for p in infos.get("member", [])],
-        "permissions": [
-            _ldap_path_extract(p, "cn") for p in infos.get("permission", [])
-        ],
-        "mail-aliases": [m for m in infos.get("mail", [])],
+        "members": list(group.get("members", [])),
+        "permissions": list(group.get("permissions", [])),
+        "mail-aliases": list(group.get("mail", [])),
     }
 
 
@@ -1502,22 +1561,6 @@ def user_group_remove(
     """
     return user_group_update(
         groupname, remove=usernames, force=force, sync_perm=sync_perm
-    )
-
-
-def user_group_add_mailalias(
-    groupname: str, aliases: list[str], force: bool = False
-) -> dict[str, Any] | None:
-    return user_group_update(
-        groupname, add_mailalias=aliases, force=force, sync_perm=False
-    )
-
-
-def user_group_remove_mailalias(
-    groupname: str, aliases: list[str], force: bool = False
-) -> dict[str, Any] | None:
-    return user_group_update(
-        groupname, remove_mailalias=aliases, force=force, sync_perm=False
     )
 
 
@@ -1578,8 +1621,9 @@ def user_permission_update(
     )
 
     app_ssowatconf()
+    _regen_native_permissions_projection()
 
-    logger.success(m18n.n("permission_updated", permission=permission))
+    logger.success(tr("permission_updated", permission=permission))
 
     app_permissions = app_setting(app, "_permissions") or {}
     assert isinstance(app_permissions, dict)
@@ -1620,12 +1664,6 @@ def user_permission_info(permission: str) -> "PermInfos":
     from .permission import user_permission_info
 
     return user_permission_info(permission)
-
-
-def user_permission_ldapsync() -> None:
-    from .permission import _sync_permissions_with_ldap
-
-    _sync_permissions_with_ldap()
 
 
 #

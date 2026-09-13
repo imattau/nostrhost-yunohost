@@ -22,11 +22,11 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Generator, NotRequired, TypedDict
+from typing import IO, Any, NotRequired, TypedDict
 
 import psutil
 
-MOULINETTE_LOCK = Path("/var/run/moulinette_yunohost.lock")
+OPERATION_LOCK = Path("/var/run/nostrhost/locks/yunohost.lock")
 
 RUNDIR = Path("/var/run/yunohost")
 LOG_BROKER_BACKEND_ENDPOINT = f"ipc://{RUNDIR}/log_broker_backend"
@@ -129,7 +129,7 @@ class SSELogStreamingHandler(logging.Handler):
         self.log_stream_cache: IO[str] | None
 
         import zmq
-        from moulinette import Moulinette
+        from nostrhost.core import Moulinette
 
         from ..log import OPERATIONS_PATH
 
@@ -229,8 +229,8 @@ def get_current_operation() -> (
     from ..log import _guess_who_started_process
 
     try:
-        pid = MOULINETTE_LOCK.read_text().split("\n")[0]
-        lock_mtime = MOULINETTE_LOCK.stat().st_mtime
+        pid = OPERATION_LOCK.read_text().split("\n")[0]
+        lock_mtime = OPERATION_LOCK.stat().st_mtime
     except FileNotFoundError:
         return None, None, None, None
 
@@ -258,106 +258,3 @@ def get_current_operation() -> (
     started_by = _guess_who_started_process(process)
 
     return pid, operation_id, process_command_line, started_by
-
-
-def sse_stream() -> Generator[str, None, None]:
-    # We need zmq.green to uh have some sort of async ? (I think)
-    import zmq.green as zmq
-
-    from ..log import OPERATIONS_PATH, log_list
-
-    ctx = zmq.Context()
-    sub = ctx.socket(zmq.SUB)
-    sub.subscribe("")
-    sub.connect(LOG_BROKER_FRONTEND_ENDPOINT)
-
-    # Set client-side auto-reconnect timeout, ms.
-    yield "retry: 100\n\n"
-
-    # Check if there's any ongoing operation right now
-    _, current_operation_id, _, _ = get_current_operation()
-
-    # Log list metadata is cached so it shouldnt be a bit deal to ask for "details" (which loads the metadata yaml for every operation)
-    recent_operation_history = log_list(since_days_ago=2, limit=20, with_details=True)[
-        "operation"
-    ]
-    for operation in reversed(recent_operation_history):
-        if current_operation_id and operation["name"] == current_operation_id:
-            continue
-
-        history_event: SSEEventHistory = {
-            "operation_id": operation["name"],
-            "title": operation["description"],
-            "success": operation["success"],
-            "started_at": operation["started_at"].timestamp(),
-            "started_by": operation["started_by"],
-        }
-        payload = json.dumps(history_event)
-        yield "event: recent_history\n"
-        yield f"data: {payload}\n\n"
-
-    if current_operation_id:
-        log_stream_cache = None
-        try:
-            log_stream_cache = open(
-                f"{OPERATIONS_PATH}/.{current_operation_id}.logstreamcache"
-            )
-        except Exception:
-            pass
-        else:
-            entries = [entry.strip() for entry in log_stream_cache.readlines()]
-            for payload in entries:
-                event_type, payload = payload.split(":", 1)
-                yield f"event: {event_type}\n"
-                yield f"data: {payload}\n\n"
-        finally:
-            if log_stream_cache:
-                log_stream_cache.close()
-
-    # Init heartbeat
-    last_heartbeat: float = 0
-
-    try:
-        while True:
-            # Calculate remaining time until next heartbeat
-            time_until_heartbeat = SSE_HEARTBEAT_PERIOD - (time.time() - last_heartbeat)
-
-            if time_until_heartbeat <= 0:
-                # Time to send heartbeat
-                try:
-                    _, current_operation_id, cmdline, started_by = (
-                        get_current_operation()
-                    )
-                    event: SSEEventHeartbeat = {
-                        "current_operation": current_operation_id,
-                        "cmdline": cmdline,
-                        "timestamp": time.time(),
-                        "started_by": started_by,
-                    }
-                    payload = json.dumps(event)
-                    yield "event: heartbeat\n"
-                    yield f"data: {payload}\n\n"
-                    last_heartbeat = time.time()
-                except Exception as e:
-                    logging.warning(f"Failed to send heartbeat: {e}")
-                    last_heartbeat = time.time()  # Reset to avoid spamming errors
-
-            # Poll for messages with a timeout that aligns with heartbeat timing
-            # Use the time until next heartbeat (in ms) or 1 second max to keep responsive
-            poll_timeout = (
-                min(int(time_until_heartbeat * 1000), 1000)
-                if time_until_heartbeat > 0
-                else 1000
-            )
-
-            if sub.poll(poll_timeout, zmq.POLLIN):
-                try:
-                    _, message_payload = sub.recv_multipart()
-                    event_type, event_data = message_payload.decode().split(":", 1)
-                    yield f"event: {event_type}\n"
-                    yield f"data: {event_data}\n\n"
-                except Exception as e:
-                    logging.warning(f"Failed to process message: {e}")
-    finally:
-        sub.close()
-        ctx.term()

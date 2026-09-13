@@ -6,51 +6,78 @@ Build-Depends: debhelper (>=9), debhelper-compat (= 13), dh-python, python3-all 
 Standards-Version: 3.9.6
 Homepage: https://yunohost.org/
 
-Package: yunohost
+Package: nostrhost-core
 Essential: yes
 Architecture: all
+Provides: yunohost
+Replaces: yunohost (<< 12.1.41.28)
 Depends: python3-all (>= 3.11),
- , moulinette (>= 12.1.4),
+ , nostrhost-runtime
+ , python3-nostrhost
  , python3-psutil, python3-requests, python3-dnspython, python3-openssl
  , python3-miniupnpc, python3-dbus, python3-jinja2 (>= 3.0)
  , python3-toml, python3-packaging, python3-publicsuffix2
- , python3-ldap, python3-zeroconf (>= 0.47), python3-lexicon,
+ , python3-zeroconf (>= 0.47), python3-lexicon,
  , python3-cryptography, python3-jwt, python3-passlib, python3-magic
  , python-is-python3, python3-pydantic, python3-email-validator
- , python3-sortedcollections, python3-sdbus, python3-debian
- , udisks2, udisks2-bcache, udisks2-btrfs, udisks2-lvm2, udisks2-zram
- , smartmontools
+ , python3-debian
  , python3-zmq
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
- , openssl, ca-certificates, netcat-openbsd, iproute2
- , slapd, ldap-utils, sudo-ldap, libnss-ldapd, unscd, libpam-ldapd
+ , openssl, ca-certificates, ssl-cert, netcat-openbsd, iproute2
  , dnsmasq, resolvconf, libnss-myhostname
- , libsasl2-modules
  , acl
  , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli
  , lsb-release, haveged, fake-hwclock, lsof, whois
  , xz-utils, zstd
 Recommends: yunohost-admin (>= 12.1), yunohost-portal (>= 12.1)
  , ntp, inetutils-ping | iputils-ping
- , bash-completion, rsyslog
- , unattended-upgrades
- , libdbd-ldap-perl, libnet-dns-perl
+, bash-completion, rsyslog
+  , unattended-upgrades
 Conflicts: iptables-persistent
  , apache2
  , bind9
  , openresolv
  , systemd-resolved
- , openssl (>= 3.1)
- , slapd (>= 2.6)
- , dovecot-core (>= 1:2.4)
+, openssl (>= 3.1)
+  , dovecot-core (>= 1:2.4)
  , nftables (>= 1.1)
+ , yunohost (<< 12.1.41.28)
 Description: manageable and configured self-hosting server
  YunoHost aims to make self-hosting accessible to everyone. It configures
  a Web server alongside a LDAP base (email is an optional app, not part of
  the default install). It also provides facilities to manage users,
  domains, apps and so.
  .
- This package contains YunoHost scripts and binaries to be used by the
- moulinette. It allows one to manage the server with a command-line tool
- and an API.
+ This package contains the NostrHost server-management engine, renamed from
+ the historical `yunohost` binary package (Stage 2 of the core rename). It
+ Provides/Replaces/Conflicts the old name so existing installs upgrade
+ cleanly; a transitional empty `yunohost` package depends on it. The CLI
+ and API entry points live in the python3-nostrhost package (the native
+ replacement for the retired moulinette framework).
+
+Package: python3-nostrhost
+Architecture: all
+Section: python
+Depends: python3-all (>= 3.11), nostrhost-core
+ , python3-typer, python3-bottle, python3-requests
+ , python3-nostrhost-auth
+Description: native nostrhost framework — moulinette replacement
+ nostrhost is the native framework layer that replaces the retired
+ moulinette in the YunoHost fork: interface primitives (core, i18n, ui,
+ logging, locking, auth) plus the native Typer command-line tool
+ (/usr/bin/nostrhost) and the Bottle+NIP-98 HTTP API (/usr/bin/nostr-api).
+ .
+ It depends on nostrhost-core (its CLI/API import yunohost.nostr_operations
+ and friends), while nostrhost-core depends back on it for the framework
+ primitives — a legal circular dependency resolved by apt.
+
+Package: yunohost
+Architecture: all
+Section: utils
+Depends: nostrhost-core (>= 12.1.41.28)
+Description: transitional package (core renamed to nostrhost-core)
+ Empty dependency package so existing installs and scripts that reference
+ `yunohost` keep resolving after the engine moved to nostrhost-core. This
+ package installs nothing itself. It can be removed once nothing depends on
+ the `yunohost` name.

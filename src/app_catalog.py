@@ -25,8 +25,9 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 
+from .nostr_catalog_provider import DEFAULT_NATIVE_CATALOG_STATE
 from .utils.error import YunohostError
 from .utils.file_utils import download_json, mkdir, read_json, read_yaml, write_to_json
 from .utils.i18n import _value_for_locale
@@ -37,7 +38,6 @@ APPS_CATALOG_CACHE = "/var/cache/yunohost/repo"
 APPS_CATALOG_LOGOS = "/usr/share/yunohost/applogos"
 APPS_CATALOG_CONF = "/etc/yunohost/apps_catalog.yml"
 APPS_CATALOG_API_VERSION = 3
-NATIVE_CATALOG_STATE = "/var/lib/nostrhost/catalogue.json"
 NATIVE_CATALOG_MODE_ENV = "NOSTRHOST_CATALOG_BACKEND"
 APPS_CATALOG_DEFAULT_URL = "https://app.yunohost.org/default"
 DEFAULT_APPS_CATALOG_LIST: list[dict[Literal["id", "url"], str]] = [
@@ -202,7 +202,7 @@ def _update_apps_catalog() -> None:
 
     apps_catalog_list = _read_apps_catalog_list()
 
-    logger.info(m18n.n("apps_catalog_updating"))
+    logger.info(tr("apps_catalog_updating"))
 
     # Create cache folder if needed
     if not os.path.exists(APPS_CATALOG_CACHE):
@@ -283,7 +283,7 @@ def _update_apps_catalog() -> None:
             # Is this even needed to iterate on the results ?
             pass
 
-    logger.success(m18n.n("apps_catalog_update_success"))  # type: ignore
+    logger.success(tr("apps_catalog_update_success"))  # type: ignore
 
 
 _apps_catalog_cache_timestamp: float = 0
@@ -306,7 +306,11 @@ def _load_apps_catalog() -> AppCatalog:
         stats = f.stat()
         timestamps.append(stats.st_mtime)
         timestamps.append(stats.st_ctime)
-    native_state = Path(os.environ.get("NOSTRHOST_CATALOG_STATE", NATIVE_CATALOG_STATE))
+    native_state = Path(
+        os.environ.get(
+            "NOSTRHOST_CATALOG_STATE", DEFAULT_NATIVE_CATALOG_STATE
+        )
+    )
     if native_state.exists():
         stats = native_state.stat()
         timestamps.extend((stats.st_mtime, stats.st_ctime))
@@ -351,7 +355,7 @@ def _load_apps_catalog() -> AppCatalog:
             not apps_catalog_content
             or apps_catalog_content.get("from_api_version") != APPS_CATALOG_API_VERSION
         ):
-            logger.info(m18n.n("apps_catalog_obsolete_cache"))
+            logger.info(tr("apps_catalog_obsolete_cache"))
             _update_apps_catalog()
             apps_catalog_content = read_json(str(cache_file))  # type: ignore[assignment]
 

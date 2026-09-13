@@ -1,22 +1,25 @@
 """Unit tests for the fork's Nostr-native identity (Phase 3).
 
-Run with: pytest tests_nostr/  (needs nostrhost-auth, coincurve, nostr-sdk)
+Run with: pytest tests_nostr/  (needs nostrhost-auth and nostr-sdk)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_identity import (
     IdentityError,
     _build_identity_event,
     _parse_pubkey,
+    _pubkey,
     _store,
+    is_admin_user,
     link_identity,
     resolve_pubkey,
     resolve_username,
@@ -27,7 +30,7 @@ from yunohost.nostr_identityd import handle_identity_event
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 
@@ -223,6 +226,55 @@ def test_bootstrapped_state(tmp_path, monkeypatch):
     _require_bootstrapped()  # no raise
 
 
+def test_is_admin_user_true_for_linked_admin_pubkey(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    store = _store(tmp_path / "i.db")
+    event = _build_identity_event(admin_sk, admin_pk, admin_pk, "matt", "unknown", None, True)
+    assert handle_identity_event(event, store=store, admin_pubkeys=[admin_pk]) is True
+
+    assert is_admin_user("matt", db_path=tmp_path / "i.db") is True
+
+
+def test_is_admin_user_false_for_non_admin_pubkey(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    _, other_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    store = _store(tmp_path / "i.db")
+    event = _build_identity_event(admin_sk, admin_pk, other_pk, "bob", "unknown", None, True)
+    assert handle_identity_event(event, store=store, admin_pubkeys=[admin_pk]) is True
+
+    assert is_admin_user("bob", db_path=tmp_path / "i.db") is False
+
+
+def test_is_admin_user_false_for_unlinked_username(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    assert is_admin_user("nobody", db_path=tmp_path / "i.db") is False
+
+
+def test_is_admin_user_degrades_to_false_on_bad_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "nope.toml"))
+    monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
+
+    assert is_admin_user("matt", db_path=tmp_path / "i.db") is False
+
+
 def test_default_auth_degrades_on_unreadable_config(tmp_path, monkeypatch):
     """A non-root caller (portal service) that cannot read the root-only
     operator config must get None from default_auth, not a PermissionError -
@@ -332,3 +384,60 @@ def test_publish_to_relay_nip42_handshake(tmp_path, monkeypatch):
     done.set()
     t.join(timeout=5)
     assert auth_seen["n"] == 1
+
+
+def test_bootstrap_node_writes_configs(tmp_path: Path, monkeypatch):
+    """bootstrap_node generates the five node keys and writes operator/portal/
+    relay configs (the native postinstall --new bootstrap path)."""
+    from yunohost.nostr_identity import bootstrap_node
+
+    op_cfg = tmp_path / "operator.toml"
+    notice_cfg = tmp_path / "portal.toml"
+    relay_cfg = tmp_path / "relay.toml"
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(op_cfg))
+    monkeypatch.setenv("NOSTRHOST_NOTICE_CONFIG", str(notice_cfg))
+
+    result = bootstrap_node(force=True, write_relay=str(relay_cfg))
+    for key in ("server_sk", "operator_sk", "notice_sk", "publisher_sk", "notifier_sk"):
+        assert len(result[key]) == 64
+        assert int(result[key], 16) >= 0
+    assert result["server_pubkey"] == _pubkey(result["server_sk"])
+    assert result["operator_pubkey"] == _pubkey(result["operator_sk"])
+    assert result["publisher_pubkey"] == _pubkey(result["publisher_sk"])
+    assert result["notifier_pubkey"] == _pubkey(result["notifier_sk"])
+    assert result["admins"] == [result["operator_pubkey"]]
+
+    data = tomllib.loads(op_cfg.read_text())
+    assert data["operator_sk"] == result["operator_sk"]
+    assert data["server_sk"] == result["server_sk"]
+    assert data["publisher_sk"] == result["publisher_sk"]
+    assert data["notifier_sk"] == result["notifier_sk"]
+    assert data["admins"] == [result["operator_pubkey"]]
+
+    notice = tomllib.loads(notice_cfg.read_text())
+    assert notice["notice_sk"] == result["notice_sk"]
+
+    relay = tomllib.loads(relay_cfg.read_text())
+    assert relay["operator_pubkey"] == result["operator_pubkey"]
+    assert relay["server_pubkey"] == result["server_pubkey"]
+    assert relay["notice_pubkey"] == result["notice_pubkey"]
+    assert relay["publisher_pubkey"] == result["publisher_pubkey"]
+    assert relay["allowlist_mode"] is True
+
+    # second run without force refuses to overwrite
+    with pytest.raises(IdentityError):
+        bootstrap_node()
+
+    # importing an explicit operator key keeps its identity
+    sk, pk = new_key()
+    result2 = bootstrap_node(operator_sk=sk, force=True)
+    assert result2["operator_pubkey"] == pk
+    assert tomllib.loads(op_cfg.read_text())["operator_sk"] == sk
+
+
+def test_bootstrap_node_rejects_bad_import(tmp_path: Path, monkeypatch):
+    from yunohost.nostr_identity import IdentityError, bootstrap_node
+
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "operator.toml"))
+    with pytest.raises(IdentityError):
+        bootstrap_node(operator_sk="not-hex", force=True)

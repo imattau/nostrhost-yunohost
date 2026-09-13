@@ -1,0 +1,173 @@
+"""Operation event streaming (SSE source).
+
+The executor publishes signed chain events (2203 execution.started, 2205
+execution.progress, 2204 execution.result) to the control relay.  This module
+subscribes to those kinds and yields the events for one operation, so
+interfaces (the admin UI via SSE, CLI ``--follow``, MCP) render live progress
+-- the replacement for moulinette's SSE/log-broker plumbing.
+
+The relay's control kinds are NIP-42 protected, so the stream authenticates
+as the operator (or an injected auth tuple) before REQ.
+"""
+
+from __future__ import annotations
+
+import json
+import secrets
+import time
+from collections.abc import Iterator
+from typing import Any
+
+from yunohost.nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
+
+from yunohost.nostr_operations import (
+    KIND_EXECUTION_RESULT,
+    KIND_EXECUTION_STARTED,
+    KIND_EXECUTION_PROGRESS,
+    KIND_OPERATION_REJECTION,
+)
+
+# Execution kinds plus 2202 (rejection): a rejected operation is also a
+# terminal outcome, so the stream must surface it or interfaces polling
+# op_status could never tell "rejected" apart from "still awaiting approval".
+STREAM_KINDS = (KIND_EXECUTION_STARTED, KIND_EXECUTION_PROGRESS, KIND_EXECUTION_RESULT, KIND_OPERATION_REJECTION)
+
+
+def _e_tag(event: dict[str, Any]) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == "e" and len(tag) > 1:
+            return tag[1]
+    return None
+
+
+def _d_tag(event: dict[str, Any]) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == "d" and len(tag) > 1:
+            return tag[1]
+    return None
+
+
+def _tag_value(event: dict[str, Any], name: str) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == name and len(tag) > 1:
+            return str(tag[1])
+    return None
+
+
+def stream_operation_events(
+    request_id: str,
+    *,
+    relay_url: str,
+    auth: tuple[str, str] | None = None,
+    timeout: float = 30.0,
+) -> Iterator[dict[str, Any]]:
+    """Yield the signed chain events for ``request_id`` until its result.
+
+    Subscribes to the control relay for the execution kinds, filters by the
+    ``e`` tag, yields each event (started/progress/result), and stops once a
+    kind-2204 result for this request is seen.  Yields nothing if the relay
+    cannot be reached within ``timeout``.
+    """
+    from websockets.sync.client import connect
+
+    auth = auth or default_auth()
+    deadline = time.time() + timeout
+    try:
+        with connect(relay_url) as ws:
+            sub_id = "nostrhost-events-" + secrets.token_hex(4)
+            request = json.dumps(["REQ", sub_id, {"kinds": list(STREAM_KINDS), "#e": [request_id]}])
+            ws.send(request)
+            while time.time() < deadline:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "AUTH":
+                    if auth is not None:
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth_event = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                        ws.send(json.dumps(["AUTH", auth_event]))
+                        _wait_auth_ok(ws, auth_event["id"], deadline)
+                        ws.send(request)  # re-send after auth
+                    continue
+                if msg[0] != "EVENT":
+                    if msg[0] == "EOSE":
+                        continue
+                    continue
+                event = msg[2]
+                if _e_tag(event) != request_id:
+                    continue
+                yield event
+                if int(event.get("kind", 0)) in (KIND_EXECUTION_RESULT, KIND_OPERATION_REJECTION):
+                    return
+    except Exception:  # noqa: BLE001 - stream is best-effort
+        return
+
+
+def sse_format(event: dict[str, Any]) -> str:
+    """Render an event dict as a Server-Sent Events frame."""
+    return f"data: {json.dumps(event)}\n\n"
+
+
+def sse_ping() -> str:
+    """Heartbeat comment frame to keep the connection alive."""
+    return ": ping\n\n"
+
+
+def query_chain_events(
+    relay_url: str,
+    *,
+    kinds: tuple[int, ...] | None = None,
+    limit: int = 100,
+    since: int | None = None,
+    auth: tuple[str, str] | None = None,
+    timeout: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Query the control relay for signed chain events (the durable audit).
+
+    The signed operation chain (kinds 2200 request / 2201 approval / 2202
+    rejection / 2203 executing / 2204 result / 2205 progress, plus the
+    capability/delegation kinds 31100 / 27236 / 27237) is the audit log
+    (nostr_operations.py module docstring). This helper issues a REQ for the
+    requested kinds against the control relay, authenticating as the operator
+    (the control kinds are NIP-42 protected) exactly like
+    :func:`stream_operation_events`, and returns the stored events in relay
+    order (oldest first). Best-effort: an unreachable relay yields an empty
+    list rather than raising, so a read-only audit call degrades gracefully.
+    """
+    from yunohost.nostr_operations import CHAIN_KINDS
+
+    from websockets.sync.client import connect
+
+    auth = auth or default_auth()
+    event_kinds = list(kinds) if kinds else list(CHAIN_KINDS)
+    filters: dict[str, Any] = {"kinds": event_kinds, "limit": limit}
+    if since is not None:
+        filters["since"] = int(since)
+    deadline = time.time() + timeout
+    events: list[dict[str, Any]] = []
+    try:
+        with connect(relay_url) as ws:
+            sub_id = "nostrhost-audit-" + secrets.token_hex(4)
+            request = json.dumps(["REQ", sub_id, filters])
+            ws.send(request)
+            while time.time() < deadline and len(events) < limit:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "AUTH":
+                    if auth is not None:
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth_event = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                        ws.send(json.dumps(["AUTH", auth_event]))
+                        _wait_auth_ok(ws, auth_event["id"], deadline)
+                        ws.send(request)  # re-send after auth
+                    continue
+                if msg[0] == "EVENT":
+                    events.append(msg[2])
+                elif msg[0] == "EOSE":
+                    break
+    except Exception:  # noqa: BLE001 - audit query is best-effort
+        return []
+    return events

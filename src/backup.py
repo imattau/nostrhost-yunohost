@@ -35,7 +35,8 @@ from glob import glob
 from logging import getLogger
 from typing import TYPE_CHECKING, cast
 
-from moulinette import Moulinette, m18n
+from nostrhost.core import Moulinette
+from nostrhost.i18n import tr
 
 from .hook import (
     CUSTOM_HOOK_FOLDER,
@@ -384,7 +385,7 @@ class BackupManager:
         """
 
         def unknown_error(part):
-            logger.error(m18n.n("backup_hook_unknown", hook=part))
+            logger.error(tr("backup_hook_unknown", hook=part))
 
         self.targets.set_wanted(
             "system", system_parts, hook_list("backup")["hooks"], unknown_error
@@ -401,7 +402,7 @@ class BackupManager:
         """
 
         def unknown_error(app):
-            logger.error(m18n.n("unbackup_app", app=app))
+            logger.error(tr("unbackup_app", app=app))
 
         target_list = self.targets.set_wanted(
             "apps", apps, os.listdir("/etc/yunohost/apps"), unknown_error
@@ -416,11 +417,11 @@ class BackupManager:
             restore_script_path = os.path.join(app_script_folder, "restore")
 
             if not os.path.isfile(backup_script_path):
-                logger.warning(m18n.n("backup_with_no_backup_script_for_app", app=app))
+                logger.warning(tr("backup_with_no_backup_script_for_app", app=app))
                 self.targets.set_result("apps", app, "Skipped")
 
             elif not os.path.isfile(restore_script_path):
-                logger.warning(m18n.n("backup_with_no_restore_script_for_app", app=app))
+                logger.warning(tr("backup_with_no_restore_script_for_app", app=app))
                 self.targets.set_result("apps", app, "Warning")
 
     #
@@ -500,13 +501,13 @@ class BackupManager:
                 self.csv_file, fieldnames=self.fieldnames, quoting=csv.QUOTE_ALL
             )
         except (IOError, OSError, csv.Error):
-            logger.error(m18n.n("backup_csv_creation_failed"))
+            logger.error(tr("backup_csv_creation_failed"))
 
         for row in self.paths_to_backup:
             try:
                 self.csv.writerow(row)
             except csv.Error:
-                logger.error(m18n.n("backup_csv_addition_failed"))
+                logger.error(tr("backup_csv_addition_failed"))
         self.csv_file.close()
 
     #
@@ -614,7 +615,7 @@ class BackupManager:
         if system_targets == []:
             return
 
-        logger.debug(m18n.n("backup_running_hooks"))
+        logger.debug(tr("backup_running_hooks"))
 
         # Prepare environnement
         env_dict = self._get_env_var()
@@ -667,11 +668,11 @@ class BackupManager:
                     self._add_to_list_to_backup(hook["path"], "hooks/restore/")
                 self.targets.set_result("system", part, "Success")
             else:
-                logger.warning(m18n.n("restore_hook_unavailable", hook=part))
+                logger.warning(tr("restore_hook_unavailable", hook=part))
                 self.targets.set_result("system", part, "Warning")
 
         for part in ret_failed.keys():
-            logger.error(m18n.n("backup_system_part_failed", part=part))
+            logger.error(tr("backup_system_part_failed", part=part))
             self.targets.set_result("system", part, "Error")
 
     def _collect_apps_files(self):
@@ -720,7 +721,7 @@ class BackupManager:
         tmp_app_bkp_dir = env_dict["YNH_APP_BACKUP_DIR"]
         settings_dir = os.path.join(self.work_dir, "apps", app, "settings")
 
-        logger.info(m18n.n("app_start_backup", app=app))
+        logger.info(tr("app_start_backup", app=app))
         tmp_workdir_for_app = _make_tmp_workdir_for_app(app=app)
         try:
             # Prepare backup directory for the app
@@ -742,7 +743,7 @@ class BackupManager:
             logger.debug(e)
             abs_tmp_app_dir = os.path.join(self.work_dir, "apps/", app)
             shutil.rmtree(abs_tmp_app_dir, ignore_errors=True)
-            logger.error(m18n.n("backup_app_script_failed", app=app))
+            logger.error(tr("backup_app_script_failed", app=app))
             self.targets.set_result("apps", app, "Error")
         else:
             # Add app info
@@ -771,14 +772,14 @@ class BackupManager:
                 method.method if hasattr(method, "method") else method.method_name
             )
             logger.debug(
-                m18n.n(
+                tr(
                     "backup_applying_method_" + method.method_name,
                     method=method_name,
                 )
             )
             method.mount_and_backup()
             logger.debug(
-                m18n.n(
+                tr(
                     "backup_method_" + method.method_name + "_finished",
                     method=method_name,
                 )
@@ -861,7 +862,7 @@ class RestoreManager:
         restore_manager.restore()
 
         if restore_manager.success:
-            logger.success(m18n.n('restore_complete'))
+            logger.success(tr('restore_complete'))
 
         return restore_manager.result
     """
@@ -978,7 +979,7 @@ class RestoreManager:
         if os.path.ismount(self.work_dir):
             ret = subprocess.call(["umount", self.work_dir])
             if ret != 0:
-                logger.warning(m18n.n("restore_cleaning_failed"))
+                logger.warning(tr("restore_cleaning_failed"))
         rm(self.work_dir, recursive=True, force=True)
 
     #
@@ -996,7 +997,7 @@ class RestoreManager:
         """
 
         def unknown_error(part):
-            logger.error(m18n.n("backup_archive_system_part_not_available", part=part))
+            logger.error(tr("backup_archive_system_part_not_available", part=part))
 
         target_list = self.targets.set_wanted(
             "system", system_parts, self.info["system"].keys(), unknown_error
@@ -1029,7 +1030,7 @@ class RestoreManager:
                 or "paths" not in self.info["system"][system_part]
                 or len(self.info["system"][system_part]["paths"]) == 0
             ):
-                logger.error(m18n.n("restore_hook_unavailable", part=system_part))
+                logger.error(tr("restore_hook_unavailable", part=system_part))
                 self.targets.set_result("system", system_part, "Skipped")
                 continue
 
@@ -1058,7 +1059,7 @@ class RestoreManager:
         """
 
         def unknown_error(app):
-            logger.error(m18n.n("backup_archive_app_not_found", app=app))
+            logger.error(tr("backup_archive_app_not_found", app=app))
 
         to_be_restored = self.targets.set_wanted(
             "apps", apps, self.info["apps"].keys(), unknown_error
@@ -1075,7 +1076,7 @@ class RestoreManager:
                 )
             else:
                 logger.warning(
-                    m18n.n(
+                    tr(
                         "restore_already_installed_apps",
                         apps=", ".join(already_installed),
                     )
@@ -1232,7 +1233,7 @@ class RestoreManager:
         operation_logger = OperationLogger("backup_restore_system")
         operation_logger.start()
 
-        logger.debug(m18n.n("restore_running_hooks"))
+        logger.debug(tr("restore_running_hooks"))
 
         env_dict = {
             "YNH_BACKUP_DIR": self.work_dir,
@@ -1264,13 +1265,13 @@ class RestoreManager:
 
         error_part = []
         for part in ret_failed:
-            logger.error(m18n.n("restore_system_part_failed", part=part))
+            logger.error(tr("restore_system_part_failed", part=part))
             self.targets.set_result("system", part, "Error")
             error_part.append(part)
 
         if ret_failed:
             operation_logger.error(
-                m18n.n("restore_system_part_failed", part=", ".join(error_part))
+                tr("restore_system_part_failed", part=", ".join(error_part))
             )
         else:
             operation_logger.success()
@@ -1330,7 +1331,7 @@ class RestoreManager:
 
         # Check if the app is not already installed
         if _is_installed(app_instance_name):
-            logger.error(m18n.n("restore_already_installed_app", app=app_instance_name))
+            logger.error(tr("restore_already_installed_app", app=app_instance_name))
             self.targets.set_result("apps", app_instance_name, "Error")
             return
 
@@ -1339,7 +1340,7 @@ class RestoreManager:
         operation_logger = OperationLogger("backup_restore_app", related_to)
         operation_logger.start()
 
-        logger.info(m18n.n("app_start_restore", app=app_instance_name))
+        logger.info(tr("app_start_restore", app=app_instance_name))
 
         app_dir_in_archive = os.path.join(self.work_dir, "apps", app_instance_name)
         app_backup_in_archive = os.path.join(app_dir_in_archive, "backup")
@@ -1356,7 +1357,7 @@ class RestoreManager:
         # Check if the app has a restore script
         app_restore_script_in_archive = os.path.join(app_scripts_in_archive, "restore")
         if not os.path.isfile(app_restore_script_in_archive):
-            logger.warning(m18n.n("unrestore_app", app=app_instance_name))
+            logger.warning(tr("unrestore_app", app=app_instance_name))
             self.targets.set_result("apps", app_instance_name, "Warning")
             return
 
@@ -1385,8 +1386,8 @@ class RestoreManager:
         except Exception:
             import traceback
 
-            error = m18n.n("unexpected_error", error="\n" + traceback.format_exc())
-            msg = m18n.n("app_restore_failed", app=app_instance_name, error=error)
+            error = tr("unexpected_error", error="\n" + traceback.format_exc())
+            msg = tr("app_restore_failed", app=app_instance_name, error=error)
             logger.error(msg)
             operation_logger.error(msg)
 
@@ -1398,7 +1399,7 @@ class RestoreManager:
 
             return
 
-        logger.debug(m18n.n("restore_running_app_script", app=app_instance_name))
+        logger.debug(tr("restore_running_app_script", app=app_instance_name))
 
         # Prepare env. var. to pass to script
         # FIXME : workdir should be a tmp workdir
@@ -1440,8 +1441,8 @@ class RestoreManager:
                 chdir=app_backup_in_archive,
                 env=env_dict,
                 operation_logger=operation_logger,
-                error_message_if_script_failed=m18n.n("app_restore_script_failed"),
-                error_message_if_failed=lambda e: m18n.n(
+                error_message_if_script_failed=tr("app_restore_script_failed"),
+                error_message_if_failed=lambda e: tr(
                     "app_restore_failed", app=app_instance_name, error=e
                 ),
             )
@@ -1695,7 +1696,7 @@ class BackupMethod:
                     subprocess.check_call(["mount", "--rbind", src, dest])
                     subprocess.check_call(["mount", "-o", "remount,ro,bind", dest])
                 except Exception:
-                    logger.warning(m18n.n("backup_couldnt_bind", src=src, dest=dest))
+                    logger.warning(tr("backup_couldnt_bind", src=src, dest=dest))
                     # To check if dest is mounted, use /proc/mounts that
                     # escape spaces as \040
                     raw_mounts = read_file("/proc/mounts").strip().split("\n")
@@ -1757,7 +1758,7 @@ class BackupMethod:
 
             if is_interactive:
                 i = Moulinette.prompt(
-                    m18n.n(
+                    tr(
                         "backup_ask_for_copying_if_needed",
                         answers="y/N",
                         size=str(size),
@@ -1772,7 +1773,7 @@ class BackupMethod:
                 )
 
         # Copy unbinded path
-        logger.debug(m18n.n("backup_copying_to_organize_the_archive", size=str(size)))
+        logger.debug(tr("backup_copying_to_organize_the_archive", size=str(size)))
         for path in paths_needed_to_be_copied:
             dest = os.path.join(self.work_dir, path["dest"])
             if os.path.isdir(path["source"]):
@@ -1893,7 +1894,7 @@ class TarBackupMethod(BackupMethod):
                 tar.add(path["source"], arcname=path["dest"])
         except IOError:
             logger.error(
-                m18n.n(
+                tr(
                     "backup_archive_writing_error",
                     source=path["source"],
                     archive=self._archive_file,
@@ -1924,7 +1925,7 @@ class TarBackupMethod(BackupMethod):
         super(TarBackupMethod, self).mount()
 
         # Mount the tarball
-        logger.debug(m18n.n("restore_extracting"))
+        logger.debug(tr("restore_extracting"))
         try:
             tar = tarfile.open(
                 self._archive_file,
@@ -2197,16 +2198,16 @@ def backup_create(
         }
 
     # Apply backup methods on prepared files
-    logger.info(m18n.n("backup_actually_backuping"))
+    logger.info(tr("backup_actually_backuping"))
     logger.info(
-        m18n.n(
+        tr(
             "backup_create_size_estimation",
             size=binary_to_human(backup_manager.size) + "B",
         )
     )
     backup_manager.backup()
 
-    logger.success(m18n.n("backup_created", name=backup_manager.name))
+    logger.success(tr("backup_created", name=backup_manager.name))
     operation_logger.success()
 
     return {
@@ -2258,12 +2259,12 @@ def backup_restore(name, system=[], apps=[], force=False, no_remove_on_failure=F
         and restore_manager.targets.targets["system"] != []
         and os.path.isfile("/etc/yunohost/installed")
     ):
-        logger.warning(m18n.n("yunohost_already_installed"))
+        logger.warning(tr("yunohost_already_installed"))
         if not force:
             try:
                 # Ask confirmation for restoring
                 i = Moulinette.prompt(
-                    m18n.n("restore_confirm_yunohost_installed", answers="y/N")
+                    tr("restore_confirm_yunohost_installed", answers="y/N")
                 )
             except NotImplementedError:
                 pass
@@ -2277,13 +2278,13 @@ def backup_restore(name, system=[], apps=[], force=False, no_remove_on_failure=F
     # Mount the archive then call the restore for each system part / app    #
     #
 
-    logger.info(m18n.n("backup_mount_archive_for_restore"))
+    logger.info(tr("backup_mount_archive_for_restore"))
     restore_manager.mount()
     restore_manager.restore()
 
     # Check if something has been restored
     if restore_manager.success:
-        logger.success(m18n.n("restore_complete"))
+        logger.success(tr("restore_complete"))
     else:
         raise YunohostError("restore_nothings_done")
 
@@ -2524,7 +2525,7 @@ def backup_delete(name, display_success: bool = True):
             os.remove(backup_file)
         except Exception:
             logger.debug("unable to delete '%s'", backup_file, exc_info=True)
-            logger.warning(m18n.n("backup_delete_error", path=backup_file))
+            logger.warning(tr("backup_delete_error", path=backup_file))
 
     hook_callback("post_backup_delete", args=[name])
 
@@ -2533,7 +2534,7 @@ def backup_delete(name, display_success: bool = True):
     # upgrade and we don't really want it to trigger a success or toast saying
     # that some backup was deleted and is counter intuitive...
     if display_success:
-        logger.success(m18n.n("backup_deleted", name=name))
+        logger.success(tr("backup_deleted", name=name))
 
 
 #
@@ -2582,7 +2583,7 @@ def _recursive_umount(directory):
         ret = subprocess.call(["umount", point])
         if ret != 0:
             everything_went_fine = False
-            logger.warning(m18n.n("backup_cleaning_failed", point))
+            logger.warning(tr("backup_cleaning_failed", point))
             continue
 
     return everything_went_fine

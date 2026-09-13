@@ -3,7 +3,7 @@ import os
 import subprocess
 from logging import getLogger
 
-from moulinette import m18n
+from nostrhost.i18n import tr
 from yunohost.domain import domain_list
 from yunohost.dyndns import dyndns_list, dyndns_update
 from yunohost.service import service_restart
@@ -65,7 +65,7 @@ class MyMigration(Migration):
         else:
             domains = "no domains seems concerned"
 
-        return m18n.n("migration_0036_dkim_keys_upgrade_disclaimer", domains=domains)
+        return tr("migration_0036_dkim_keys_upgrade_disclaimer", domains=domains)
 
     def check_assertions(self):
         try:
@@ -111,7 +111,7 @@ class MyMigration(Migration):
                 )
             except subprocess.CalledProcessError:
                 logger.error(
-                    m18n.n(
+                    tr(
                         "migration_0036_dkim_keys_upgrade_failed",
                         domains=", ".join(domains),
                     )
@@ -143,7 +143,7 @@ class MyMigration(Migration):
         if self.manual_domains:
             domains = "\n - " + "\n - ".join(self.manual_domains)
             logger.warning(
-                m18n.n(
+                tr(
                     "migration_0036_dkim_keys_upgrade_manual_action", domains=domains
                 )
             )

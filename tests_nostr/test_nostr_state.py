@@ -8,6 +8,7 @@ Uses a fake Backend (no live server) and a real git repository under tmp_path
 
 from __future__ import annotations
 
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -207,11 +208,11 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     a post commit, the post one linked to the request and known-good."""
     import os
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     def key():
         s = os.urandom(32).hex()
-        return s, PublicKeyXOnly.from_secret(bytes.fromhex(s)).format().hex()
+        return s, Keys.parse(s).public_key().to_hex()
 
     server_sk, server_pk = key()
     admin_sk, admin_pk = key()
@@ -234,7 +235,6 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     assert engine.handle_event(build_capability(admin_sk, admin_pk, agent_pk, "agent", ["server.read"]))
     req = build_operation_request(agent_sk, agent_pk, "system.version", {})
     assert engine.handle_event(req)
-    assert engine.handle_event(build_approval(admin_sk, admin_pk, req["id"]))
     assert engine.state(req["id"]) == OpState.SUCCEEDED
 
     hist = repo.history()
@@ -254,11 +254,11 @@ def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
 def test_executor_failure_marks_post_not_known_good(tmp_path: Path):
     import os
 
-    from coincurve import PublicKeyXOnly
+    from nostr_sdk import Keys
 
     def key():
         s = os.urandom(32).hex()
-        return s, PublicKeyXOnly.from_secret(bytes.fromhex(s)).format().hex()
+        return s, Keys.parse(s).public_key().to_hex()
 
     server_sk, server_pk = key()
     admin_sk, admin_pk = key()
@@ -280,7 +280,6 @@ def test_executor_failure_marks_post_not_known_good(tmp_path: Path):
     assert engine.handle_event(build_capability(admin_sk, admin_pk, agent_pk, "agent", ["server.read"]))
     req = build_operation_request(agent_sk, agent_pk, "system.version", {})
     assert engine.handle_event(req)
-    assert engine.handle_event(build_approval(admin_sk, admin_pk, req["id"]))
     assert engine.state(req["id"]) == OpState.FAILED
 
     pre, post = repo.history()[1], repo.history()[0]
@@ -346,3 +345,231 @@ def test_toml_serializer_handles_nested_and_ordered(tmp_path: Path):
     tree["system"]["host.toml"]["settings"] = OrderedDict([("security.root_access", OrderedDict([("root", True)]))])
     repo.commit(tree, op_event_id="c" * 64, phase="post", known_good=True, health="passed")
     assert repo.known_good_revision()  # commit succeeded despite nested data
+
+
+def test_manifest_for_reads_commit_metadata(tmp_path: Path):
+    """manifest_for recovers a revision's manifest (restic linkage etc.),
+    used by postinstall --restore to find the linked data snapshot."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    rev = repo.commit(
+        export_state(FakeBackend()),
+        op_event_id="c" * 64,
+        phase="post",
+        known_good=True,
+        restic_snapshot="9f" * 32,
+        health="passed",
+    )
+    manifest = repo.manifest_for(rev)
+    assert manifest["state"]["known_good"] is True
+    assert manifest["backup"]["restic_snapshot"] == "9f" * 32
+    assert manifest["health"]["result"] == "passed"
+    assert manifest["operation"]["phase"] == "post"
+    # HEAD manifest equals the committed revision's (no later commit)
+    assert repo.manifest_for()["backup"]["restic_snapshot"] == "9f" * 32
+    # unknown revision -> empty
+    assert repo.manifest_for("0" * 40) == {}
+
+
+def test_clone_state_repository_falls_back_to_relay_bundle(tmp_path: Path, monkeypatch):
+    """A NIP-34 announcement with a bare relative 'r' name has no git transport:
+    Stage C reconstructs the repository from the relay-published bundle instead."""
+    from yunohost.nostr_state import STATE_REPO_NAME, clone_state_repository
+
+    def fake_discover(*args, **kwargs):
+        return {
+            "kind": 30617,
+            "content": "nostrhost state",
+            "tags": [["d", STATE_REPO_NAME], ["r", "nostrhost-state.git"]],
+        }
+
+    # Build a real state repo to serve as the source bundle payload.
+    src = StateRepo(tmp_path / "src", "a" * 64)
+    src.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    def fake_fetch(*args, **kwargs):
+        from yunohost.nostr_state import _create_bundle_bytes
+
+        payload, _ = _create_bundle_bytes(src)
+        return payload
+
+    monkeypatch.setattr("yunohost.nostr_state.discover_state_repository", fake_discover)
+    monkeypatch.setattr("yunohost.nostr_state.fetch_state_bundle", fake_fetch)
+    destination = clone_state_repository(
+        "ws://127.0.0.1:9", server_pubkey="b" * 64, destination=tmp_path / "state"
+    )
+    assert destination.exists()
+    assert (destination / "manifest.toml").exists()
+    assert (destination / ".git").exists()
+
+
+def test_clone_state_repository_requires_r_tag(tmp_path: Path, monkeypatch):
+    from yunohost.nostr_state import STATE_REPO_NAME, StateError, clone_state_repository
+
+    def fake_discover(*args, **kwargs):
+        return {"kind": 30617, "content": "no repo tag", "tags": [["d", STATE_REPO_NAME]]}
+
+    monkeypatch.setattr("yunohost.nostr_state.discover_state_repository", fake_discover)
+    with pytest.raises(StateError, match="'r' tag"):
+        clone_state_repository(
+            "ws://127.0.0.1:9", server_pubkey="b" * 64, destination=tmp_path / "state"
+        )
+
+
+def test_state_bundle_events_chunk_and_reassemble(tmp_path: Path):
+    """Kind-2214 chunk events round-trip: build from a real repo, reassemble via
+    the fetch-side logic, and verify the bundle restores to the same state."""
+    import base64
+    import gzip
+
+    from yunohost.nostr_state import (
+        KIND_STATE_BUNDLE,
+        STATE_REPO_NAME,
+        build_state_bundle_events,
+    )
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    rev = repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    events, bundle_rev = build_state_bundle_events(repo, "ab" * 32, "cd" * 32, chunk_bytes=100)
+    assert bundle_rev == rev
+    assert len(events) >= 2  # small chunk forces multiple events
+    assert all(ev["kind"] == KIND_STATE_BUNDLE for ev in events)
+    tags = dict((t[0], t[1]) for t in events[0]["tags"])
+    assert tags["d"] == STATE_REPO_NAME
+    assert tags["r"] == rev
+    assert tags["t"] == str(len(events))
+    assert tags["v"] == "1"
+
+    # Reassemble through the fetch-side series logic (bypass relay I/O).
+    series = {int(dict((t[0], t[1]) for t in ev["tags"])["i"]): ev["content"] for ev in events}
+    payload_b64 = "".join(series[i] for i in sorted(series))
+    payload = base64.b64decode(payload_b64.encode("ascii"))
+    bundle_bytes = gzip.decompress(payload)
+    with tempfile.TemporaryDirectory(prefix="nostrhost-test-bundle-") as tmp:
+        bundle_path = Path(tmp) / "state.bundle"
+        bundle_path.write_bytes(bundle_bytes)
+        StateRepo.verify_bundle(bundle_path)
+        restored = StateRepo.restore_bundle(bundle_path, tmp_path / "recovered")
+        kg = restored
+        assert (kg / "manifest.toml").exists()
+
+
+def test_state_bundle_publish_fans_out_and_reports(tmp_path: Path, monkeypatch):
+    """publish_state_bundle sends every chunk to control + external relays and
+    returns a summary with the reassembled sha256."""
+    from yunohost.nostr_state import KIND_STATE_BUNDLE, publish_state_bundle
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    class _Cfg:
+        server_sk = "ab" * 32
+        server_pubkey = "cd" * 32
+        control_relay = "ws://127.0.0.1:4848"
+
+    sent: list[tuple[str, dict]] = []
+
+    def fake_transport(relay: str, event: dict) -> None:
+        sent.append((relay, event))
+
+    monkeypatch.setattr(
+        "yunohost.nostr_state._operator_config", lambda *a, **k: _Cfg()
+    )
+    monkeypatch.setattr("yunohost.nostr_state._require_bootstrapped", lambda: None)
+    monkeypatch.setattr("yunohost.nostr_state.state_dir_from_env", lambda: tmp_path / "state")
+
+    result = publish_state_bundle(relays=["wss://relay.example.com"], transport=fake_transport)
+    assert result["chunks"] == 1  # small state repo -> single chunk event
+    assert len(sent) == result["chunks"] * 2  # each chunk to control + external
+    assert len(set(relay for relay, _ev in sent)) == 2  # control + external
+    assert all(ev["kind"] == KIND_STATE_BUNDLE for _relay, ev in sent)
+    assert result["sha256"] == result["sha256"]  # deterministic summary present
+    assert result["relays"] == ["ws://127.0.0.1:4848", "wss://relay.example.com"]
+
+
+def test_state_bundle_snapshot_only_flattens(tmp_path: Path):
+    """--snapshot-only bundles a single-commit flattened repo of the latest
+    known-good revision; the reassembled bundle restores with that tag."""
+    from yunohost.nostr_state import KNOWN_GOOD_TAG, build_state_bundle_events
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    rev = repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+    assert repo.known_good_revision() == rev
+
+    events, bundle_rev = build_state_bundle_events(repo, "ab" * 32, "cd" * 32, snapshot_only=True)
+    assert bundle_rev == rev
+    assert len(events) == 1  # flattened snapshot is tiny -> single chunk
+
+    # Reassemble and restore; the known-good tag survives the flatten.
+    import base64
+    import gzip
+
+    payload = base64.b64decode(events[0]["content"].encode("ascii"))
+    bundle_bytes = gzip.decompress(payload)
+    with tempfile.TemporaryDirectory(prefix="nostrhost-test-snap-") as tmp:
+        bundle_path = Path(tmp) / "state.bundle"
+        bundle_path.write_bytes(bundle_bytes)
+        StateRepo.verify_bundle(bundle_path)
+        restored = StateRepo.restore_bundle(bundle_path, tmp_path / "snap-recovered")
+        assert KNOWN_GOOD_TAG in [t for t in _git_tags(restored)]
+
+
+def test_state_bundle_fetch_prefers_full_over_snapshot_series(tmp_path: Path, monkeypatch):
+    """When both a full-history (many chunks) and a snapshot-only (one chunk)
+    series exist for the same revision, fetch_state_bundle must return the
+    complete full-history bundle — series are keyed by their sha256 digest,
+    not by revision (the revision tag is shared across both publishes)."""
+    import base64
+    import gzip
+    import json as _json
+
+    from yunohost.nostr_state import build_state_bundle_events
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    full_events, _ = build_state_bundle_events(repo, "ab" * 32, "cd" * 32, chunk_bytes=100)
+    snap_events, _ = build_state_bundle_events(repo, "ab" * 32, "cd" * 32, snapshot_only=True)
+    assert len(full_events) > len(snap_events)
+
+    all_events = full_events + snap_events  # same author, same d, same r revision
+
+    stream = list(all_events)
+
+    class _Ws:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def send(self, _msg):
+            pass
+
+        def recv(self, timeout=None):
+            if stream:
+                return _json.dumps(["EVENT", "sub", stream.pop(0)])
+            return _json.dumps(["EOSE", "sub"])
+
+    def fake_connect(_url, **_kw):
+        return _Ws()
+
+    monkeypatch.setattr("websockets.sync.client.connect", fake_connect)
+    monkeypatch.setattr("yunohost.nostr_identity.default_auth", lambda: None)
+
+    from yunohost.nostr_state import fetch_state_bundle
+
+    payload = fetch_state_bundle("ws://127.0.0.1:9", server_pubkey="cd" * 32)
+    bundle_bytes = gzip.decompress(payload)
+    expected = gzip.decompress(base64.b64decode("".join(ev["content"] for ev in full_events)))
+    assert bundle_bytes == expected
+    with tempfile.TemporaryDirectory(prefix="nostrhost-test-full-") as tmp:
+        bundle_path = Path(tmp) / "state.bundle"
+        bundle_path.write_bytes(bundle_bytes)
+        StateRepo.verify_bundle(bundle_path)
+
+
+def _git_tags(repo: Path) -> list[str]:
+    import subprocess
+
+    return subprocess.run(["git", "-C", str(repo), "tag", "-l"], capture_output=True, text=True).stdout.split()

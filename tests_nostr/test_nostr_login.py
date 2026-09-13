@@ -1,6 +1,6 @@
 """Unit tests for §8 passwordless Nostr portal login.
 
-Run with: pytest tests_nostr/  (needs nostrhost-auth, coincurve, nostr-sdk)
+Run with: pytest tests_nostr/  (needs nostrhost-auth and nostr-sdk)
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sys
 import types
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_identity import _sign_event, _store
 from yunohost.nostr_login import (
@@ -30,7 +30,7 @@ DOMAIN = "nostrhost.test"
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

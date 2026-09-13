@@ -4,8 +4,6 @@ from datetime import datetime, timezone
 import sys
 import types
 
-import pytest
-
 from yunohost.nostrhost_native_policy import NativePolicyAdapter, _backup_created_at, _native_policy_key
 
 
@@ -17,6 +15,26 @@ class Rule:
 def test_native_plan_maps_removal_to_remove_policy():
     plan = {"operations": [{"name": "package.remove"}]}
     assert _native_policy_key("package.reconcile", {"plan": plan}) == "apps.remove"
+
+
+def test_phase5_policy_keys():
+    # user.group.update escalates to the owner-co-signed admins tier.
+    assert _native_policy_key("user.group.update", {"groupname": "admins"}) == "users.admin_access"
+    assert _native_policy_key("user.group.update", {"groupname": "devs"}) == "users.write"
+    assert _native_policy_key("user.update", {}) == "users.write"
+    assert _native_policy_key("user.group.create", {}) == "users.write"
+    assert _native_policy_key("user.group.delete", {}) == "users.delete"
+    assert _native_policy_key("user.permission.add", {}) == "users.permissions"
+    assert _native_policy_key("user.permission.remove", {}) == "users.permissions"
+    assert _native_policy_key("user.permission.update", {}) == "users.permissions"
+    assert _native_policy_key("system.migrate", {}) == "system.migrate"
+    assert _native_policy_key("backup.delete", {}) == "backups.delete"
+    assert _native_policy_key("domain.cert.install", {}) == "domains.cert"
+    assert _native_policy_key("audit.list", {}) == "audit.read"
+    assert _native_policy_key("audit.get", {}) == "audit.read"
+    # Read-only / unlisted ops fall through to their tool name (no rule -> allow).
+    assert _native_policy_key("logs.read", {}) == "logs.read"
+    assert _native_policy_key("service.history", {}) == "service.history"
 
 
 def test_native_policy_checks_shared_hard_requirements():

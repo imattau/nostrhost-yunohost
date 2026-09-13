@@ -27,7 +27,7 @@ from ..diagnosis import Diagnoser
 from ..domain import domain_list
 from ..settings import settings_get
 from ..utils.dns import is_special_use_tld
-from ..utils.file_utils import mkdir, read_file, rm
+from ..utils.file_utils import mkdir, rm
 
 
 def _domain_has_caddy_site(domain: str) -> bool:

@@ -187,19 +187,21 @@ def _get_user_for_ssh(
             "homeDirectory": root_unix.pw_dir,
         }
 
-    # TODO escape input using https://www.python-ldap.org/doc/html/ldap-filter.html
-    from .utils.ldap import _get_ldap_interface
+    # Real /etc/passwd account (no LDAP)
+    from .nostrhost.accounts import user_get
 
-    ldap = _get_ldap_interface()
-    user: list[UserSshInfo] = ldap.search(  # type: ignore
-        "ou=users",
-        "(&(objectclass=person)(uid=%s))" % username,
-        attrs,
-    )
-
-    assert len(user) in (0, 1)
-
-    if not user:
+    record = user_get(username)
+    if record is None:
+        return None
+    try:
+        unix = pwd.getpwnam(username)
+    except KeyError:
         return None
 
-    return user[0]
+    return {
+        "username": username,
+        "fullname": str(record.get("fullname", username)),
+        "uid": [str(unix.pw_uid)],
+        "mail": (user_get(username) or {}).get("mail", [""])[0] if isinstance(user_get(username), dict) else "",
+        "homeDirectory": [unix.pw_dir],
+    }

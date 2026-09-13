@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from coincurve import PublicKeyXOnly
+from nostr_sdk import Keys
 
 from yunohost.nostr_account import (
     AccountError,
@@ -33,7 +33,7 @@ from yunohost.nostr_identityd import (
 
 def new_key():
     sk = os.urandom(32).hex()
-    pk = PublicKeyXOnly.from_secret(bytes.fromhex(sk)).format().hex()
+    pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
 
 

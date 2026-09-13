@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import toml
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -32,31 +33,78 @@ class ProviderError(RuntimeError):
 
 
 class PackageProvider:
-    """Package identity bookkeeping; resource mutations belong to providers."""
+    """Package identity bookkeeping; resource mutations belong to providers.
 
-    def __init__(self, *, state_dir: Path | None = None) -> None:
+    ``apps_dir`` (optional) is the legacy app registry (/etc/yunohost/apps):
+    native packages create a minimal entry there so the portal's permission
+    machinery (permission_create's ``_is_installed``) treats them as
+    installed without a full legacy manifest install."""
+
+    def __init__(self, *, state_dir: Path | None = None, apps_dir: Path | None = None) -> None:
         self.state_dir = state_dir
+        self.apps_dir = apps_dir
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        legacy: bool | None = None
+        legacy_domain: str | None = None
+        legacy_path: str | None = None
+        if self.apps_dir is not None:
+            legacy_dir = self.apps_dir / _safe_name(desired["id"])
+            legacy = legacy_dir.is_dir()
+            if legacy:
+                settings = self._legacy_settings(legacy_dir)
+                legacy_domain = settings.get("domain")
+                legacy_path = settings.get("path")
+        legacy_state = {"legacy_aware": self.apps_dir is not None, "legacy": legacy, "legacy_domain": legacy_domain, "legacy_path": legacy_path}
         if self.state_dir is None:
-            return {"exists": False, "version": None}
+            return {"exists": False, "version": None, **legacy_state}
         target = self.state_dir / f"{_safe_name(desired['id'])}.json"
         if not target.is_file():
-            return {"exists": False, "version": None}
+            return {"exists": False, "version": None, **legacy_state}
         try:
             data = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ProviderError(f"invalid native package state: {target}") from exc
-        return {"exists": True, "version": data.get("version"), "state": str(target)}
+        return {"exists": True, "version": data.get("version"), "state": str(target), **legacy_state}
+
+    @staticmethod
+    def _legacy_settings(legacy_dir: Path) -> dict[str, Any]:
+        try:
+            import yaml
+
+            data = yaml.safe_load((legacy_dir / "settings.yml").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001 - best-effort settings read
+            return {}
 
     def apply(self, operation: Operation) -> dict[str, Any]:
         package_id = _safe_name(operation.args["id"])
+        legacy_dir = (self.apps_dir / package_id) if self.apps_dir is not None else None
+        if operation.name == "package.ensure":
+            self._ensure_legacy(legacy_dir, app_id=package_id, version=operation.args.get("version"), domain=operation.args.get("domain"), path=operation.args.get("path"))
+        elif operation.name in {"package.remove", "package.manifest.remove"}:
+            self._drop_legacy(legacy_dir)
         if self.state_dir is None:
             result = {"package": package_id, "changed": False}
             if operation.name != "package.remove":
                 result["version"] = operation.args["version"]
             return result
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        if operation.name == "package.manifest.remove":
+            target = self.state_dir / f"{package_id}-manifest.json"
+            existed = target.exists()
+            target.unlink(missing_ok=True)
+            return {"package": package_id, "manifest": False, "changed": existed}
+        if operation.name == "package.manifest.ensure":
+            target = self.state_dir / f"{package_id}-manifest.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps({"id": package_id, "version": operation.args["version"], "manifest": operation.args["manifest"]}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o640)
+            temporary.replace(target)
+            return {"package": package_id, "version": operation.args["version"], "manifest": True, "changed": True}
         target = self.state_dir / f"{package_id}.json"
         if operation.name == "package.remove":
             existed = target.exists()
@@ -67,6 +115,55 @@ class PackageProvider:
         os.chmod(temporary, 0o640)
         temporary.replace(target)
         return {"package": package_id, "version": operation.args["version"], "changed": True}
+
+    @staticmethod
+    def _ensure_legacy(legacy_dir: Path | None, *, app_id: str | None = None, version: str | None = None, domain: str | None = None, path: str | None = None) -> None:
+        """Create the minimal legacy app-registry entry (permission gateway)."""
+        if legacy_dir is None:
+            return
+        existed = legacy_dir.is_dir()
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if existed:
+            existing = PackageProvider._legacy_settings(legacy_dir)
+        settings: dict[str, Any] = {"installed": True}
+        if app_id:
+            settings["id"] = app_id
+            settings["install_time"] = int(time.time())
+        if version:
+            settings["version"] = version
+        if domain:
+            settings["domain"] = domain
+            settings["path"] = path or "/"
+        elif existing.get("domain"):
+            settings["domain"] = existing["domain"]
+            settings["path"] = existing.get("path", "/")
+        body = "".join(f"{key}: {value}\n" for key, value in settings.items())
+        target = legacy_dir / "settings.yml"
+        if not existed or target.read_text(encoding="utf-8") != body:
+            target.write_text(body, encoding="utf-8")
+            os.chmod(target, 0o644)
+        # Minimal manifest.json so the legacy app registry (app_map / app_list)
+        # can enumerate the native app without a full legacy manifest install.
+        manifest: dict[str, Any] = {
+            "id": app_id or "app",
+            "version": settings.get("version"),
+            "name": {"en": app_id or "app"},
+            "description": {"en": ""},
+            "integration": {"architectures": []},
+        }
+        manifest_target = legacy_dir / "manifest.json"
+        payload = json.dumps(manifest, sort_keys=True, indent=1) + "\n"
+        if not existed or manifest_target.read_text(encoding="utf-8") != payload:
+            manifest_target.write_text(payload, encoding="utf-8")
+
+    @staticmethod
+    def _drop_legacy(legacy_dir: Path | None) -> None:
+        if legacy_dir is None or not legacy_dir.exists():
+            return
+        import shutil
+
+        shutil.rmtree(legacy_dir, ignore_errors=True)
 
     def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
         return self.inspect(desired)
@@ -79,6 +176,22 @@ def _safe_name(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.@:-]*", value):
         raise ProviderError(f"unsafe systemd unit name: {value!r}")
     return value
+
+
+def installed_package_manifest(app_id: str, *, state_dir: Path | None = None) -> dict[str, Any] | None:
+    """Return the persisted native manifest dict for an installed app.
+
+    ``package.manifest.ensure`` writes this at install time so removal,
+    upgrade diffs and backup-path resolution never need the catalogue again.
+    """
+    base = state_dir or Path("/var/lib/nostrhost/state/packages")
+    target = base / f"{app_id}-manifest.json"
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    manifest = data.get("manifest") if isinstance(data, dict) else None
+    return manifest if isinstance(manifest, dict) else None
 
 
 def _target(root: Path, absolute: str | Path) -> Path:
@@ -794,7 +907,9 @@ class ServiceProvider:
         name = _safe_name(desired.get("name") or "nostrhost-app")
         unit = self.unit_dir / f"{name}.service"
         result = {"unit": str(unit), "exists": unit.is_file()}
-        if unit.is_file():
+        # enable/start/remove ops carry only a name; only the ensure op has the
+        # full desired unit (exec, env, security) to diff against.
+        if unit.is_file() and desired.get("exec"):
             result["sha256"] = hashlib.sha256(unit.read_bytes()).hexdigest()
             result["desired_sha256"] = hashlib.sha256(self.render_unit(name, desired).encode()).hexdigest()
         return result
@@ -838,6 +953,9 @@ class ServiceProvider:
         if args.get("working_directory"):
             lines.append(f"WorkingDirectory={args['working_directory']}")
         lines.extend([f"Restart={args.get('restart', 'on-failure')}", f"PrivateTmp={'yes' if security.get('private_tmp', True) else 'no'}", f"ProtectSystem={security.get('protect_system', 'strict')}", f"ProtectHome={'yes' if security.get('protect_home', True) else 'no'}", f"NoNewPrivileges={'yes' if security.get('no_new_privileges', True) else 'no'}"])
+        read_write_paths = security.get("read_write_paths") or []
+        if read_write_paths:
+            lines.append(f"ReadWritePaths={' '.join(read_write_paths)}")
         if environment:
             lines.append(environment)
         for credential, path in sorted(args.get("credentials", {}).items()):
@@ -892,12 +1010,13 @@ class HealthProvider:
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         if self.client is None:
             raise ProviderError("an httpx client is required for native health checks")
+        url = desired.get("url") or desired["path"]
         attempts = desired.get("retries", 0) + 1
         last_status = None
         last_error = None
         for attempt in range(attempts):
             try:
-                response = self.client.get(desired["path"], timeout=desired.get("timeout", 10))
+                response = self.client.get(url, timeout=desired.get("timeout", 10))
             except Exception as exc:
                 last_error = str(exc) or exc.__class__.__name__
                 continue
@@ -1533,6 +1652,49 @@ class CaddyProvider:
         return [Operation("web.route.remove", label or "web", desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
 
 
+class DnsRecordsProvider:
+    """Enforce/remove an app's ``[dns.*]`` records through its native domain.
+
+    The apply step re-runs the domain's reconciliation with the app's records
+    folded in (install/upgrade) or excluded (removal), so the domain's
+    provider creates/updates the owned records or deletes exactly the
+    departing app's records. Domain must be a registered native domain.
+    """
+
+    resource_type = "dns.records"
+
+    def __init__(self, *, reconciler: Callable[[str, str, bool], Any] | None = None) -> None:
+        self.reconciler = reconciler
+
+    def _run(self, app_id: str, domain: str, exclude_app: bool) -> Any:
+        if self.reconciler is not None:
+            return self.reconciler(app_id, domain, exclude_app)
+        from .domains.service import DomainService
+
+        return DomainService().dns_reconcile_app(app_id, domain, exclude_app=exclude_app)
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        return {"app": desired.get("app"), "domain": desired.get("domain"), "records": desired.get("records", [])}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        app = desired.get("app")
+        domain = desired.get("domain") or ""
+        return [Operation("dns.records.ensure", f"{app}:dns", desired, risk="medium", reverse="dns.records.remove", summary=f"enforce DNS records for {app} on {domain}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        exclude_app = operation.name == "dns.records.remove"
+        result = self._run(operation.args.get("app", ""), operation.args.get("domain", ""), exclude_app)
+        return {"app": operation.args.get("app"), "domain": operation.args.get("domain"), "reconciled": result, "ok": True}
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        app = desired.get("app")
+        domain = desired.get("domain") or ""
+        return [Operation("dns.records.remove", f"{app}:dns", desired, risk="medium", reverse="dns.records.ensure", summary=f"remove DNS records for {app} from {domain}")]
+
+
 class NativeOperationExecutor:
     """Apply only operations backed by registered native providers."""
 
@@ -1547,6 +1709,8 @@ class NativeOperationExecutor:
         if provider is None and operation.name.startswith("health.http."):
             provider = self.providers.get("health")
         if provider is None and operation.name == "package.ensure":
+            provider = self.providers.get("package")
+        if provider is None and operation.name.startswith("package.manifest."):
             provider = self.providers.get("package")
         return provider
 
@@ -1563,7 +1727,7 @@ class NativeOperationExecutor:
 def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), unit_dir: Path = Path("/etc/systemd/system"), template_root: Path | None = None, command: Callable[..., Any] | None = None, runtime_installer: Callable[[dict[str, Any]], Any] | None = None, apt_cache_factory: Callable[[], Any] | None = None, postgres_connection_factory: Callable[[], Any] | None = None, mysql_connection_factory: Callable[[], Any] | None = None, mongo_client_factory: Callable[[], Any] | None = None, redis_client_factory: Callable[[int], Any] | None = None, credential_reader: Callable[[str], str] | None = None, caddy_client: Any = None, caddy_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, caddy_remove_config_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None, health_client: Any = None) -> dict[str, Provider]:
     """Build the default provider set without global state or shell wrappers."""
     providers: dict[str, Provider] = {
-        "package": PackageProvider(state_dir=(root / "var/lib/nostrhost/state/packages") if root != Path("/") else Path("/var/lib/nostrhost/state/packages")),
+        "package": PackageProvider(state_dir=(root / "var/lib/nostrhost/state/packages") if root != Path("/") else Path("/var/lib/nostrhost/state/packages"), apps_dir=(root / "etc/yunohost/apps") if root != Path("/") else Path("/etc/yunohost/apps")),
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "access": AccessProvider(root=root),
         "permission": PermissionProvider(),
@@ -1583,6 +1747,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
+        "dns.records": DnsRecordsProvider(),
     }
     if caddy_client is None and root == Path("/"):
         # Real host: talk to the local Caddy admin API with @id-tagged routes.
@@ -1592,4 +1757,16 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         caddy_config_builder = build_web_route
     if caddy_client is not None and caddy_config_builder is not None:
         providers["web.route"] = CaddyProvider(client=caddy_client, config_builder=caddy_config_builder)
+    if health_client is None and root == Path("/"):
+        # Real host: the package health check hits the served app URL over
+        # the system trust store (Caddy/Let's Encrypt certs). Testbeds that
+        # use Caddy's internal CA add it to the trust store once.
+        try:
+            import httpx
+
+            health_client = httpx.Client(follow_redirects=True)
+        except ImportError:  # pragma: no cover - packaging provides httpx
+            health_client = None
+        if health_client is not None:
+            providers["health"] = HealthProvider(client=health_client)
     return providers

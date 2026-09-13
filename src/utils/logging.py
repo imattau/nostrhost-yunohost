@@ -88,7 +88,7 @@ def init_logging(
         "handlers": {
             "cli": {
                 "level": "DEBUG" if debug else "INFO",
-                "class": "moulinette.interfaces.cli.TTYHandler",
+                "class": "nostrhost.logging.TTYHandler",
                 "formatter": "tty-debug" if debug else "",
             },
             "file": {
