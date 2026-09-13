@@ -375,6 +375,7 @@ def test_portal_public_and_me_routes_wired():
     rules = {route.rule for route in app.routes}
     assert "/public" in rules
     assert "/me" in rules
+    assert "/logout" in rules
 
 
 def test_portal_public_returns_settings(monkeypatch):

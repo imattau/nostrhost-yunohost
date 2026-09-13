@@ -13,8 +13,27 @@ permission projection itself).
 
 from __future__ import annotations
 
+import logging
 
 from bottle import Bottle
+
+logger = logging.getLogger("nostr-portal-api")
+
+
+def logout_route():
+    """GET /nostrhost/portalapi/logout — clear the portal session.
+
+    Deletes the session file + the nostrhost.portal cookie so the user is
+    signed out of the portal (and, transitively, the admin console which
+    authenticates through the same session). Always returns ok (idempotent).
+    """
+    try:
+        from yunohost.authenticators.ldap_ynhuser import Authenticator
+
+        Authenticator().delete_session_cookie()
+    except Exception as exc:  # noqa: BLE001 - session may already be gone
+        logger.warning("logout session cleanup failed: %s", exc)
+    return {"ok": True}
 
 
 def build_app() -> Bottle:
@@ -36,6 +55,7 @@ def build_app() -> Bottle:
 
     app.get("/public", callback=portal_public_route)
     app.get("/me", callback=portal_me_route)
+    app.get("/logout", callback=logout_route)
     app.get("/nostr/challenge", callback=challenge_route)
     app.post("/nostr/login", callback=login_route)
     app.get("/nostr/auth-request", callback=auth_request_route)
