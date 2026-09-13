@@ -11,12 +11,19 @@ configuration, linked to the Nostr operation events that changed it:
   nostrhost-state diff <from> [<to>]         semantic diff between revisions
   nostrhost-state status                     revision + known-good + dirty?
   nostrhost-state announce                   publish the NIP-34 repo event
+  nostrhost-state publish [--snapshot-only]  replicate the repo to relays (Stage C)
   nostrhost-state replicate [--output PATH]  export a portable recovery bundle
   nostrhost-state restore BUNDLE DESTINATION verify and restore a bundle
   nostrhost-state reconcile [--json]    report desired/live drift (no apply)
   nostrhost-state reconcile apply PLAN --approve
   nostrhost-state rollback plan [--from K] [--to C] [--json] [--restic ID]
   nostrhost-state rollback apply <plan.json> [--approve]
+
+`publish` sends the state repository as chunked, gzip-compressed, server-signed
+events to the control + external relays, so a blank VM can reconstruct the full
+repository (no central forge, no hand-carried bundle). `--snapshot-only` flattens
+the latest known-good revision into a small single-commit bundle for relays with
+tight size limits.
 
 `rollback plan` generates a change-class-aware assisted rollback plan (from
 the latest known-good revision to the current state by default); `rollback
@@ -64,7 +71,7 @@ import os
 import sys
 
 from yunohost.nostr_identity import IdentityError
-from yunohost.nostr_state import StateError, StateRepo, announce_state_repository, default_repo, export_state, state_dir_from_env
+from yunohost.nostr_state import StateError, StateRepo, announce_state_repository, default_repo, export_state, publish_state_bundle, state_dir_from_env
 from yunohost.nostr_state import YunohostBackend
 
 EXIT_OK = 0
@@ -146,6 +153,20 @@ def cmd_announce(args) -> int:
         return EXIT_ERR
     print(f"published NIP-34 repository announcement {event['id'][:16]}… kind {event['kind']} to local and configured relays")
     print(f"  repo: nostr://{event['pubkey']}/nostrhost-state")
+    return EXIT_OK
+
+
+def cmd_publish(args) -> int:
+    try:
+        relays = args.relay or [value.strip() for value in os.environ.get("NOSTRHOST_STATE_RELAYS", "").split(",") if value.strip()]
+        result = publish_state_bundle(snapshot_only=args.snapshot_only, relays=relays)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERR
+    mode = "snapshot-only" if result["snapshot_only"] else "full-history"
+    print(f"published {mode} state bundle: revision {result['revision'][:16]}… in {result['chunks']} chunk event(s)")
+    print(f"  sha256: {result['sha256']}")
+    print(f"  relays: {', '.join(result['relays'])}")
     return EXIT_OK
 
 
@@ -297,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="revision + known-good + dirty state")
     announce = sub.add_parser("announce", help="publish the NIP-34 repository announcement")
     announce.add_argument("--relay", action="append", default=[], help="additional external relay (repeatable; or use NOSTRHOST_STATE_RELAYS)")
+    publish = sub.add_parser("publish", help="replicate the state repo to relays as a chunked bundle (Stage C)")
+    publish.add_argument("--snapshot-only", action="store_true", help="flatten latest known-good into a small single-commit bundle")
+    publish.add_argument("--relay", action="append", default=[], help="additional external relay (repeatable; or use NOSTRHOST_STATE_RELAYS)")
     replicate = sub.add_parser("replicate", help="export a portable verified state bundle")
     replicate.add_argument("--output", help="bundle path (or NOSTRHOST_STATE_BUNDLE)")
     restore = sub.add_parser("restore", help="verify and restore a state bundle")
@@ -330,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
             _require_bootstrapped()
         if args.command == "rollback":
             return {"plan": cmd_rollback_plan, "apply": cmd_rollback_apply}[args.rollback_command](args)
-        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce, "replicate": cmd_replicate, "restore": cmd_restore, "reconcile": cmd_reconcile}[args.command](args)
+        return {"export": cmd_export, "commit": cmd_commit, "history": cmd_history, "diff": cmd_diff, "status": cmd_status, "announce": cmd_announce, "publish": cmd_publish, "replicate": cmd_replicate, "restore": cmd_restore, "reconcile": cmd_reconcile}[args.command](args)
     except (StateError, IdentityError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR

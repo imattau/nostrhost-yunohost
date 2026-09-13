@@ -659,6 +659,15 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
     except Exception as exc:  # noqa: BLE001 - non-fatal
         announce = str(exc)
 
+    bundle: dict[str, Any] | str | None = None
+    try:
+        from yunohost.nostr_state import publish_state_bundle
+
+        publish_state_bundle()
+        bundle = "published"
+    except Exception as exc:  # noqa: BLE001 - non-fatal
+        bundle = str(exc)
+
     Path(INSTALLED_MARKER).touch()
 
     return {
@@ -670,6 +679,7 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         "notifier_npub": _npub(boot["notifier_pubkey"]),
         "control_relay": boot["control_relay"],
         "state_revision": rev[:16],
+        "state_bundle": bundle,
         "policy_file": POLICY_CONFIG,
         "relay_config": RELAY_CONFIG,
         "notify_config": NOTIFY_CONFIG,
@@ -812,6 +822,15 @@ def _postinstall_restore(
     except Exception as exc:  # noqa: BLE001 - non-fatal
         announce = str(exc)
 
+    bundle: dict[str, Any] | str | None = None
+    try:
+        from yunohost.nostr_state import publish_state_bundle
+
+        publish_state_bundle()
+        bundle = "published"
+    except Exception as exc:  # noqa: BLE001 - non-fatal
+        bundle = str(exc)
+
     rev = repo.commit(
         export_state(YunohostBackend()),
         known_good=False,
@@ -833,6 +852,7 @@ def _postinstall_restore(
         "data_restore": data_restore,
         "reconcile": reconcile,
         "state_revision": rev[:16],
+        "state_bundle": bundle,
         "policy_file": POLICY_CONFIG,
         "notify_config": NOTIFY_CONFIG,
         "catalogue_env": CATALOGUE_ENV,

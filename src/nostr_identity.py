@@ -35,9 +35,10 @@ DEFAULT_RELAY_CONFIG = "/etc/nostrhost/relay.toml"
 NOTICE_CONFIG = "/etc/nostrhost/portal.toml"
 
 # Kinds the local control relay accepts: the control plane (2200-2213, 31100,
-# 31102) plus the state-repository announcement (30617) so `postinstall
-# --restore` can discover the node's state repo through the relay.
-CONTROL_KINDS = [2200, 2201, 2202, 2203, 2204, 2206, 2210, 2211, 2212, 2213, 31100, 31102, 30617]
+# 31102), the state-repository announcement (30617) and the state-bundle
+# replication chunks (2214) so `postinstall --restore` can discover and
+# reconstruct the node's state repo through the relay (Stage C).
+CONTROL_KINDS = [2200, 2201, 2202, 2203, 2204, 2206, 2210, 2211, 2212, 2213, 31100, 31102, 30617, 2214]
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
 

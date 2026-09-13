@@ -33,6 +33,14 @@ publishes a NIP-34 repository announcement (kind 30617) signed by the server
 key, making the state repository discoverable as
 ``nostr://<server-npub>/nostrhost-state``.
 
+Stage C (ngit replication / DR): :func:`publish_state_bundle` replicates the
+repository outbound to the control + external relays as chunked,
+gzip-compressed, server-signed kind-2214 events, and
+:func:`clone_state_repository` / :func:`fetch_state_bundle` reconstruct the
+repository from those relays + identity alone — no central forge, no
+hand-carried bundle. ``nostrhost-state publish`` drives this by hand;
+postinstall ``--new``/``--restore`` publish automatically.
+
 Repository authority is separate from operational authority: a repository
 change never bypasses ``nostrhost-policy`` — it is applied through the same
 operation chain. Secrets are never stored: the manifest references secret
@@ -44,6 +52,8 @@ module is importable and unit-testable without a live server.
 
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -74,6 +84,15 @@ KNOWN_GOOD_TAG = "known-good"
 
 # NIP-34 kind: repository announcement (replaceable, server-authoritative).
 KIND_REPOSITORY_ANNOUNCEMENT = 30617
+
+# NostrHost kind: state-repository bundle (Stage C DR). A regular kind; each
+# event carries one base64 chunk of a gzip-compressed git bundle. The full set
+# for a given revision is reassembled on restore. Signed by the server key.
+KIND_STATE_BUNDLE = 2214
+STATE_BUNDLE_SCHEMA = 1
+# Keep each event's content well under the relay max_content_length (the local
+# relay defaults to 100000); base64 inflates by 4/3, so chunk well below that.
+STATE_BUNDLE_CHUNK_BYTES = 60000
 
 # Operations that can affect application data and therefore warrant a linked
 # Restic data snapshot alongside the configuration-state commit.
@@ -930,6 +949,233 @@ def announce_state_repository(
     return event
 
 
+def _create_bundle_bytes(
+    repo: StateRepo,
+    *,
+    snapshot_only: bool = False,
+) -> tuple[bytes, str]:
+    """Create a gzip-compressed git bundle of the state repository.
+
+    Returns ``(gzip_bytes, revision)``. ``snapshot_only`` flattens the latest
+    known-good revision into a single-commit scratch repository before bundling,
+    so the published bundle stays small (current semantic state, no full
+    history) for relays with tight size limits.
+    """
+    with tempfile.TemporaryDirectory(prefix="nostrhost-state-bundle-") as tmp:
+        bundle_path = Path(tmp) / "nostrhost-state.bundle"
+        if snapshot_only:
+            kg = repo.known_good_revision()
+            if not kg:
+                raise StateError("cannot publish snapshot-only bundle: no known-good revision yet")
+            flat = Path(tmp) / "flat"
+            flat.mkdir()
+            archive = subprocess.run(
+                ["git", "-C", str(repo.path), "archive", "--format=tar", kg],
+                capture_output=True,
+                text=False,
+            )
+            if archive.returncode != 0:
+                raise StateError(f"git archive failed: {archive.stderr.decode().strip() or 'unknown error'}")
+            subprocess.run(["tar", "-xf", "-", "-C", str(flat)], input=archive.stdout, check=True)
+            subprocess.run(["git", "-C", str(flat), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(flat), "add", "-A"], check=True)
+            subprocess.run(
+                ["git", "-C", str(flat), "-c", "user.email=nostrhost@local", "-c", "user.name=nostrhost", "commit", "-qm", f"state snapshot {kg[:16]}"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(flat), "tag", KNOWN_GOOD_TAG], check=True)
+            result = subprocess.run(
+                ["git", "-C", str(flat), "bundle", "create", str(bundle_path), "--all"],
+                capture_output=True,
+                text=True,
+            )
+            revision = kg
+        else:
+            result = subprocess.run(
+                ["git", "-C", str(repo.path), "bundle", "create", str(bundle_path), "--all"],
+                capture_output=True,
+                text=True,
+            )
+            revision = repo.revision() or "0" * 40
+        if result.returncode != 0:
+            raise StateError(f"git bundle create failed: {result.stderr.strip()}")
+        raw = bundle_path.read_bytes()
+    return gzip.compress(raw, compresslevel=9), revision
+
+
+def build_state_bundle_events(
+    repo: StateRepo,
+    server_sk: str,
+    server_pubkey: str,
+    *,
+    snapshot_only: bool = False,
+    chunk_bytes: int = STATE_BUNDLE_CHUNK_BYTES,
+) -> tuple[list[dict[str, Any]], str]:
+    """Split the state repository into signed kind-2214 bundle-chunk events.
+
+    Returns ``(events, revision)``. Each event's content is one base64 chunk of
+    the gzip-compressed git bundle; tags carry the repo name (``d``), revision
+    (``r``), ``i``/``t`` chunk index/total and ``x`` sha256 of the full payload
+    for integrity on reassembly.
+    """
+    payload, revision = _create_bundle_bytes(repo, snapshot_only=snapshot_only)
+    digest = hashlib.sha256(payload).hexdigest()
+    b64 = base64.b64encode(payload).decode("ascii")
+    total = max(1, (len(b64) + chunk_bytes - 1) // chunk_bytes)
+    events: list[dict[str, Any]] = []
+    for index in range(total):
+        chunk = b64[index * chunk_bytes : (index + 1) * chunk_bytes]
+        tags = [
+            ["d", STATE_REPO_NAME],
+            ["r", revision],
+            ["i", str(index)],
+            ["t", str(total)],
+            ["x", digest],
+            ["v", str(STATE_BUNDLE_SCHEMA)],
+        ]
+        events.append(_sign_event(server_sk, server_pubkey, KIND_STATE_BUNDLE, chunk, tags))
+    return events, revision
+
+
+def publish_state_bundle(
+    *,
+    snapshot_only: bool = False,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+    relays: list[str] | None = None,
+) -> dict[str, Any]:
+    """Publish the state repository to the control + external relays (Stage C).
+
+    Replicates the git objects as chunked, gzip-compressed, server-signed
+    kind-2214 events so a blank node can reconstruct the repository from relays
+    + identity alone (no central forge). The control relay is always first and
+    mandatory; external relay failures are reported after all targets attempt.
+    """
+    _require_bootstrapped()
+    cfg = _operator_config()
+    repo = StateRepo(state_dir_from_env(), cfg.server_pubkey)
+    events, revision = build_state_bundle_events(
+        repo, cfg.server_sk, cfg.server_pubkey, snapshot_only=snapshot_only
+    )
+    targets = [control_relay or cfg.control_relay]
+    for relay in relays or []:
+        if relay and relay not in targets:
+            targets.append(relay)
+    publisher = transport or publish_to_relay
+    failures: list[tuple[str, Exception]] = []
+    for event in events:
+        for relay in targets:
+            try:
+                publisher(relay, event)
+            except Exception as exc:  # noqa: BLE001 - report fan-out failures after all attempts
+                failures.append((relay, exc))
+    if failures:
+        failed = ", ".join(f"{relay}: {exc}" for relay, exc in failures)
+        raise StateError(f"state bundle publish failed on {len(failures)} relay(s): {failed}")
+    return {
+        "revision": revision,
+        "chunks": len(events),
+        "snapshot_only": snapshot_only,
+        "sha256": hashlib.sha256(
+            b"".join(base64.b64decode(ev["content"]) for ev in events)
+        ).hexdigest(),
+        "relays": targets,
+    }
+
+
+def fetch_state_bundle(
+    relay_url: str,
+    *,
+    server_pubkey: str,
+    name: str = STATE_REPO_NAME,
+    timeout: float = 15.0,
+) -> bytes:
+    """Fetch the newest complete state-bundle event series and return the raw
+    gzip bundle bytes.
+
+    Subscribes ``REQ {"kinds": [2214], "authors": [server_pubkey], "#d":
+    [name]}`` (NIP-42-authenticated when bootstrapped), groups events by the
+    ``r`` revision tag, keeps the highest ``t`` (most chunks / newest) complete
+    series, verifies the sha256 ``x`` tag against the reassembled payload, and
+    returns the decompressed bundle. Raises :class:`StateError` on no/incomplete/
+    tampered series.
+    """
+    import secrets
+    import time
+
+    from .nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
+    from websockets.sync.client import connect
+
+    auth = default_auth()
+    deadline = time.time() + timeout
+    events: list[dict[str, Any]] = []
+    try:
+        with connect(relay_url, open_timeout=timeout) as ws:
+            sub_id = "nostrhost-bundle-" + secrets.token_hex(4)
+            request = json.dumps(
+                [
+                    "REQ",
+                    sub_id,
+                    {"kinds": [KIND_STATE_BUNDLE], "authors": [server_pubkey], "#d": [name]},
+                ]
+            )
+            ws.send(request)
+            while time.time() < deadline:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "AUTH":
+                    if auth is not None:
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth_event = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                        ws.send(json.dumps(["AUTH", auth_event]))
+                        _wait_auth_ok(ws, auth_event["id"], deadline)
+                        ws.send(request)  # re-send after auth
+                    continue
+                if msg[0] == "EVENT":
+                    events.append(msg[2])
+                elif msg[0] == "EOSE":
+                    break
+    except Exception as exc:  # noqa: BLE001 - relay unreachable / protocol error
+        raise StateError(f"state bundle fetch failed on {relay_url}: {exc}") from exc
+
+    def _tag(ev: dict[str, Any], key: str) -> str:
+        return next((t[1] for t in ev.get("tags") or [] if t and t[0] == key and len(t) > 1), "")
+
+    by_series: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        by_series.setdefault(_tag(ev, "x"), []).append(ev)
+
+    best: tuple[int, str, bytes] | None = None
+    for digest, series in by_series.items():
+        total = int(_tag(series[0], "t") or "0")
+        if total < 1 or len(series) < total:
+            continue  # incomplete series for this publish
+        chunks = {}
+        for ev in series:
+            index = int(_tag(ev, "i") or "-1")
+            chunks[index] = ev.get("content", "")
+        if sorted(chunks) != list(range(total)):
+            continue
+        payload_b64 = "".join(chunks[i] for i in range(total))
+        try:
+            payload = base64.b64decode(payload_b64.encode("ascii"))
+        except Exception:  # noqa: BLE001 - corrupt chunk encoding; skip series
+            continue
+        if digest and hashlib.sha256(payload).hexdigest() != digest:
+            continue  # tampered series; skip
+        revision = _tag(series[0], "r") or ""
+        if best is None or total > best[0]:
+            best = (total, revision, payload)
+
+    if best is None:
+        raise StateError(
+            f"no complete state bundle for {name} by {server_pubkey[:16]}… on {relay_url}"
+        )
+    return best[2]
+
+
 def discover_state_repository(
     relay_url: str,
     *,
@@ -999,34 +1245,42 @@ def clone_state_repository(
 
     Discovers the announcement (see :func:`discover_state_repository`) and
     clones the git repository named by its ``r`` tag into ``destination``.
-    Only an ``r`` tag that is a usable git remote URL (http(s)://, ssh://,
-    git@, file://) can be cloned directly; a bare NIP-34 name (e.g.
-    ``nostrhost-state.git`` or ``nostr://…``) means no git transport is
-    published for this node, so the caller must recover via a state bundle
-    (``nostrhost-state replicate``/``restore``) instead — that raises here
-    with a clear error rather than silently succeeding.
+    When the ``r`` tag is a usable git remote URL (http(s)://, ssh://, git@,
+    file://) it is cloned directly. Otherwise the repository is reconstructed
+    from the relay-published state bundle (Stage C): the kind-2214 chunk events
+    are fetched, reassembled, verified, and restored — so a blank node recovers
+    the full state repository from relays + identity alone, with no central
+    forge and no hand-carried bundle file.
     """
     announcement = discover_state_repository(relay_url, server_pubkey=server_pubkey, name=name, timeout=timeout)
     r_tag = next((tag[1] for tag in announcement.get("tags") or [] if tag and tag[0] == "r" and len(tag) > 1), "")
     if not r_tag:
         raise StateError("state repository announcement carries no 'r' tag to clone")
-    if not (r_tag.startswith(("http://", "https://", "ssh://", "git@", "file://"))):
-        raise StateError(
-            f"state repository announcement names {r_tag!r} — no git transport is published "
-            "for this node. Recover via a state bundle instead: run `nostrhost-state replicate` "
-            "on the source node and `postinstall restore --bundle <file>` here."
-        )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        subprocess.run(
-            ["git", "clone", "--no-hardlinks", r_tag, str(destination)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=max(timeout * 4, 60),
-        )
-    except subprocess.CalledProcessError as exc:
-        raise StateError(f"state repository clone from {r_tag!r} failed: {exc.stderr.strip() or exc}") from exc
+    if r_tag.startswith(("http://", "https://", "ssh://", "git@", "file://")):
+        try:
+            subprocess.run(
+                ["git", "clone", "--no-hardlinks", r_tag, str(destination)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=max(timeout * 4, 60),
+            )
+        except subprocess.CalledProcessError as exc:
+            raise StateError(f"state repository clone from {r_tag!r} failed: {exc.stderr.strip() or exc}") from exc
+        return destination
+    # Stage C: no git transport published — reconstruct from the relay bundle.
+    bundle = fetch_state_bundle(relay_url, server_pubkey=server_pubkey, name=name, timeout=timeout)
+    with tempfile.TemporaryDirectory(prefix="nostrhost-bundle-recover-") as tmp:
+        bundle_path = Path(tmp) / "state.bundle"
+        bundle_path.write_bytes(gzip.decompress(bundle))
+        StateRepo.verify_bundle(bundle_path)
+        try:
+            StateRepo.restore_bundle(bundle_path, destination)
+        except StateError as exc:
+            if destination.exists():
+                shutil.rmtree(destination, ignore_errors=True)
+            raise StateError(f"state bundle restore failed: {exc}") from exc
     return destination
 
 
