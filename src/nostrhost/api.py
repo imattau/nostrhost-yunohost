@@ -505,6 +505,53 @@ def build_app(
             state=_State(),
         )
 
+    # -- backup ---------------------------------------------------------------
+
+    @app.get("/package/backup/list")
+    def backup_list() -> Any:
+        with_info = request.query.get("with_info", "").lower() == "true"
+        return _run_tool("backup.list", {"with_info": with_info})
+
+    @app.post("/package/backup/create")
+    def backup_create() -> Any:
+        """Create a local backup archive. Medium-risk: still routed through
+        the signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "backup.create",
+            {
+                "name": body.get("name"),
+                "description": body.get("description"),
+                "apps": body.get("apps", []),
+                "system": body.get("system", []),
+                "output_directory": body.get("output_directory"),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/backup/restore")
+    def backup_restore() -> Any:
+        """Restore a local backup archive. High-risk: routed through the
+        signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "backup.restore",
+            {
+                "name": body.get("name", ""),
+                "apps": body.get("apps", []),
+                "system": body.get("system", []),
+                "force": bool(body.get("force", False)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/backup/delete")
+    def backup_delete() -> Any:
+        """Delete a local backup archive. High-risk/irreversible: routed
+        through the signed operation chain (owner co-signature)."""
+        body = _json_body()
+        return _run_lifecycle("backup.delete", {"name": body.get("name", "")}, state=_State())
+
     # -- service ------------------------------------------------------------
 
     @app.get("/package/service/status")
