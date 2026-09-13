@@ -733,6 +733,7 @@ _INTROSPECTION_JOURNAL_UNITS = frozenset(
         "nostr-portal-api",
         "nostr-operationsd",
         "nostr-identityd",
+        "nostr-permissiond",
         "nostr-certd",
         "nostrhost-control",
         "nostrhost-catalog",

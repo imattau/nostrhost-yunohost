@@ -407,6 +407,7 @@ POSTINSTALL_UNITS = [
     "caddy",
     "nostrhost-control",
     "nostr-identityd",
+    "nostr-permissiond",
     "nostr-operationsd",
     "nostr-securityd",
     "nostr-ddnswatchd",

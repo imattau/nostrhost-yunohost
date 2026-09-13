@@ -6,6 +6,7 @@ bin/nostrhost-restic /usr/bin/
 bin/nostrhost-state /usr/bin/
 bin/nostr-identity-admin /usr/bin/
 bin/nostr-identityd /usr/bin/
+bin/nostr-permissiond /usr/bin/
 bin/nostr-opctl /usr/bin/
 bin/nostr-operationsd /usr/bin/
 bin/nostr-portal-api /usr/bin/
@@ -24,6 +25,7 @@ conf/* /usr/share/yunohost/conf/
 # them after writing /etc/nostrhost/operator.toml so the daemons never
 # crash-loop pre-bootstrap.
 conf/yunohost/nostr-identityd.service /lib/systemd/system/
+conf/yunohost/nostr-permissiond.service /lib/systemd/system/
 conf/yunohost/nostr-operationsd.service /lib/systemd/system/
 conf/yunohost/nostr-securityd.service /lib/systemd/system/
 conf/yunohost/nostr-ddnswatchd.service /lib/systemd/system/
@@ -33,9 +35,6 @@ conf/yunohost/caddy.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.timer /lib/systemd/system/
 locales/* /usr/share/yunohost/locales/
-doc/yunohost.8.gz /usr/share/man/man8/
-doc/bash_completion.d/* /etc/bash_completion.d/
-doc/zsh_completion.d/* /usr/share/zsh/vendor-completions/
 # The historical layout installs the whole src/ tree (including src/nostrhost)
 # into the yunohost package; the live copy of nostrhost ships as a top-level
 # package in python3-nostrhost.
