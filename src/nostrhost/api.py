@@ -238,6 +238,16 @@ def build_app(
         body = _json_body()
         return _run_tool("app.remove", {"app": body.get("app", ""), "purge": bool(body.get("purge", False))})
 
+    # -- catalogue ------------------------------------------------------------
+
+    @app.get("/catalog/list")
+    def catalog_list() -> Any:
+        return _run_tool("catalog.list", {})
+
+    @app.get("/catalog/get/<app_id>")
+    def catalog_get(app_id: str) -> Any:
+        return _run_tool("catalog.get", {"app_id": app_id})
+
     # -- package ------------------------------------------------------------
 
     @app.post("/package/plan")

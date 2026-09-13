@@ -213,6 +213,27 @@ def test_get_service_status_names_query(app, monkeypatch):
     assert captured["names"] == ["caddy", "nginx"]
 
 
+def test_get_catalog_list(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.list", lambda **k: {"apps": [{"id": "immich"}]})
+    status, _, body = wsgi_request(app, "GET", "/catalog/list")
+    assert status == "200"
+    assert json.loads(body)["apps"] == [{"id": "immich"}]
+
+
+def test_get_catalog_get(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"id": kwargs["app_id"], "trusted": True}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.get", fake)
+    status, _, body = wsgi_request(app, "GET", "/catalog/get/immich")
+    assert status == "200"
+    assert captured["app_id"] == "immich"
+    assert json.loads(body)["trusted"] is True
+
+
 def test_post_app_remove_purge(app, monkeypatch):
     captured = {}
 
