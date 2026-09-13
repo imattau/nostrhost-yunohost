@@ -198,6 +198,54 @@ def resolve_usernames(
     return usernames
 
 
+def author_permission_grant(
+    permission: str,
+    pubkeys_or_npubs: list[str],
+    *,
+    public: bool = False,
+    operator_sk: str | None = None,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Author + publish a kind-30000 permission-list event as the operator.
+
+    NIP-51 lists are the full membership, not a delta: this call *replaces*
+    whatever was previously granted for ``permission`` over Nostr with
+    exactly ``pubkeys_or_npubs`` (an empty list clears NIP-51-sourced
+    membership -- see ``author_permission_clear``). It can never remove
+    access granted through LDAP directly; see ``merge_projection``.
+    """
+    from yunohost.nostr_identity import _operator_config, _parse_pubkey, _sign_event, publish_to_relay
+
+    pubkeys = [_parse_pubkey(value) for value in pubkeys_or_npubs]
+    cfg = _operator_config(operator_sk, control_relay)
+    tags = [["d", permission], *(["p", pk] for pk in pubkeys)]
+    if public:
+        tags.append(["public", "true"])
+    event = _sign_event(cfg.operator_sk, cfg.operator_pubkey, PERMISSION_LIST_KIND, "", tags)
+    (transport or publish_to_relay)(cfg.control_relay, event)
+    return event
+
+
+def author_permission_clear(
+    permission: str,
+    *,
+    operator_sk: str | None = None,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish an empty membership list, clearing NIP-51-sourced access to
+    ``permission`` (LDAP-granted access, if any, is unaffected)."""
+    return author_permission_grant(
+        permission,
+        [],
+        public=False,
+        operator_sk=operator_sk,
+        control_relay=control_relay,
+        transport=transport,
+    )
+
+
 def merge_projection(
     permissions: dict[str, Any],
     store: PermissionStore,
