@@ -364,6 +364,25 @@ def list_identities(*, db_path: str | Path | None = None) -> list[Identity]:
     return [_to_identity(r) for r in _store(db_path).list_all()]
 
 
+def is_admin_user(username: str, *, db_path: str | Path | None = None) -> bool:
+    """Whether ``username`` is a NostrHost admin, natively (no LDAP read).
+
+    True when the account has an enabled Nostr identity whose pubkey is in
+    the configured admin set (``_operator_config().admins``, which always
+    includes the operator). Roadmap §25 Phase 2: this is the native
+    replacement for the LDAP `cn=admins,ou=groups` membership check in
+    ``authenticators/ldap_ynhuser.py``'s ``user_is_allowed_on_domain`` --
+    additive, not a cutover: callers should still fall back to the LDAP
+    check for admins who haven't linked a Nostr identity yet. Never raises:
+    an unavailable identity store or config degrades to False.
+    """
+    try:
+        admins = set(_operator_config().admins)
+        return any(identity.pubkey in admins for identity in resolve_username(username, db_path=db_path))
+    except Exception:  # noqa: BLE001 - unavailable store/config must not break authz
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # authoring
 

@@ -19,6 +19,7 @@ from yunohost.nostr_identity import (
     _parse_pubkey,
     _pubkey,
     _store,
+    is_admin_user,
     link_identity,
     resolve_pubkey,
     resolve_username,
@@ -223,6 +224,55 @@ def test_bootstrapped_state(tmp_path, monkeypatch):
     monkeypatch.setenv("NOSTRHOST_OPERATOR_SK", "0" * 64)
     assert is_bootstrapped() is True
     _require_bootstrapped()  # no raise
+
+
+def test_is_admin_user_true_for_linked_admin_pubkey(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    store = _store(tmp_path / "i.db")
+    event = _build_identity_event(admin_sk, admin_pk, admin_pk, "matt", "unknown", None, True)
+    assert handle_identity_event(event, store=store, admin_pubkeys=[admin_pk]) is True
+
+    assert is_admin_user("matt", db_path=tmp_path / "i.db") is True
+
+
+def test_is_admin_user_false_for_non_admin_pubkey(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    _, other_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    store = _store(tmp_path / "i.db")
+    event = _build_identity_event(admin_sk, admin_pk, other_pk, "bob", "unknown", None, True)
+    assert handle_identity_event(event, store=store, admin_pubkeys=[admin_pk]) is True
+
+    assert is_admin_user("bob", db_path=tmp_path / "i.db") is False
+
+
+def test_is_admin_user_false_for_unlinked_username(tmp_path, monkeypatch):
+    admin_sk, admin_pk = new_key()
+    cfg_path = tmp_path / "operator.toml"
+    cfg_path.write_text(
+        f'operator_sk = "{admin_sk}"\ncontrol_relay = "ws://127.0.0.1:4848"\nadmins = ["{admin_pk}"]\n'
+    )
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(cfg_path))
+
+    assert is_admin_user("nobody", db_path=tmp_path / "i.db") is False
+
+
+def test_is_admin_user_degrades_to_false_on_bad_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "nope.toml"))
+    monkeypatch.delenv("NOSTRHOST_OPERATOR_SK", raising=False)
+
+    assert is_admin_user("matt", db_path=tmp_path / "i.db") is False
 
 
 def test_default_auth_degrades_on_unreadable_config(tmp_path, monkeypatch):

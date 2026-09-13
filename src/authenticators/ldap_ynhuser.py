@@ -113,6 +113,18 @@ def user_is_allowed_on_domain(user: str, domain: str) -> bool:
         # A user with explicit permission to an application is certainly welcome
         return True
 
+    # Native admin check first (roadmap §25 Phase 2): no LDAP read at all for
+    # an admin who has linked a Nostr identity. Falls back to the LDAP
+    # admins-group read below for admins who haven't linked one yet, so this
+    # can only add coverage, never regress an existing admin's access.
+    try:
+        from yunohost.nostr_identity import is_admin_user
+
+        if is_admin_user(user):
+            return True
+    except Exception as e:
+        logger.debug(f"native admin check unavailable, falling back to LDAP: {e}")
+
     ADMIN_GROUP = "cn=admins,ou=groups"
     try:
         admins = (
