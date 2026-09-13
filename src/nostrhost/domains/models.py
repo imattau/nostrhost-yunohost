@@ -66,11 +66,3 @@ class DomainResource(BaseModel):
 
 
 _VALID_HOSTNAME_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
-
-
-def is_valid_hostname(value: str) -> bool:
-    try:
-        DomainResource(name=value)
-        return True
-    except Exception:  # noqa: BLE001 - validation check
-        return False

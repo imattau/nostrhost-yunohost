@@ -122,10 +122,6 @@ class CloudflareApi:
         self._call("DELETE", f"/zones/{self.zone_id(zone)}/dns_records/{record_id}")
 
 
-def _resolve_zone_id(api: CloudflareApi, zone: str) -> str:  # pragma: no cover - trivial
-    return api.zone_id(zone)
-
-
 class CloudflareProvider:
     """A Cloudflare zone adapter, ownership-bounded like the manual provider."""
 

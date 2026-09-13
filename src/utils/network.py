@@ -116,16 +116,6 @@ def get_network_interfaces() -> dict[str, dict[str, str]]:
     return devices
 
 
-def get_gateway() -> str | None:
-    output = check_output("ip route show")
-    m = re.search(r"default via (.*) dev ([a-z]+[0-9]?)", output)
-    if not m:
-        return None
-
-    addr = _extract_inet(m.group(1), True)
-    return addr.popitem()[1] if len(addr) == 1 else None
-
-
 def _extract_inet(
     string: str, skip_netmask: bool = False, skip_loopback: bool = True
 ) -> dict[str, str]:

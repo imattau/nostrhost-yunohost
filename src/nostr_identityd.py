@@ -23,12 +23,10 @@ import logging
 import os
 import secrets
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from .nostr_identity import (
-    DEFAULT_IDENTITY_DB,
     IDENTITY_KIND,
     _init_headless_yunohost,
     _operator_config,
@@ -39,6 +37,7 @@ from .nostr_identity import (
     default_auth,
 )
 from nostrhost_auth.identity.mappings import PubkeyAlreadyLinked
+from .nostrhost.events import _d_tag
 
 logger = logging.getLogger("nostr-identityd")
 
@@ -154,13 +153,6 @@ def handle_identity_event(
             store.revoke_identity(existing.identity_id, existing.ynh_username)
             logger.info("revoked identity %s -> %s", d_tag[:16], existing.ynh_username)
     return True
-
-
-def _d_tag(event: dict[str, Any]) -> str | None:
-    for tag in event.get("tags") or []:
-        if tag and tag[0] == "d" and len(tag) > 1:
-            return tag[1]
-    return None
 
 
 # --------------------------------------------------------------------------- #

@@ -46,10 +46,6 @@ CADDY_STORAGE = Path(os.environ.get("NOSTR_CADDY_STORAGE", "/var/lib/caddy"))
 CADDY_CERT_DIR = CADDY_STORAGE / "certificates"
 
 
-class CertdError(RuntimeError):
-    """The exporter failed (bad storage, unreadable cert, permissions, …)."""
-
-
 def _leaf_not_after(crt_path: Path) -> datetime:
     """Not-after of the leaf (first) certificate in a PEM chain, naive-UTC."""
     with crt_path.open("rb") as f:

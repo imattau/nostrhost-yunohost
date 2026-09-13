@@ -44,7 +44,7 @@ from .app_catalog import (  # noqa
     app_catalog,  # Unused but imported because it's exposed via Moulinette
     app_search,  # Unused but imported because it's exposed via Moulinette
 )
-from .log import OperationLogger, is_flash_unit_operation, is_unit_operation
+from .log import OperationLogger, is_unit_operation
 from .utils.app_utils import (
     APPS_SETTING_PATH,
     AppManifest,
@@ -1818,41 +1818,6 @@ def app_remove(
     _assert_system_is_sane_for_app(manifest, "post")
 
 
-@is_unit_operation()
-def app_makedefault(
-    operation_logger: "OperationLogger",
-    app: str,
-    domain: str | None = None,
-    undo: bool = False,
-) -> None:
-    """
-    Redirect domain root to an app
-
-    Keyword argument:
-        app
-        domain
-
-    """
-    from .domain import _assert_domain_exists, domain_config_set
-
-    app_settings = _get_app_settings(app)
-    app_domain = app_settings["domain"]
-
-    if domain is None:
-        domain = app_domain
-
-    _assert_domain_exists(domain)
-
-    operation_logger.related_to.append(("domain", domain))
-
-    operation_logger.start()
-
-    if undo:
-        domain_config_set(domain, "feature.app.default_app", "_none")
-    else:
-        domain_config_set(domain, "feature.app.default_app", app)
-
-
 def app_setting(
     app: str,
     key: str,
@@ -2237,21 +2202,6 @@ def app_ssowatconf() -> None:
                 setting_file.unlink()
 
     logger.debug(tr("ssowat_conf_generated"))
-
-
-@is_flash_unit_operation()
-def app_change_label(app: str, new_label: str) -> None:
-    _assert_is_installed(app)
-
-    app_setting(app, "label", new_label)
-
-    # FIXME: we kinda have redundant stuff between the label key on the main perm, and the label key at top level ...
-    # or at least this operation should also change the label in the main perm to be consistent ...
-
-
-def app_action_list(app: str) -> None:
-    AppConfigPanel, _ = _get_AppConfigPanel()
-    return AppConfigPanel(app).list_actions()
 
 
 def app_action_run(
@@ -2674,16 +2624,6 @@ ynh_app_config_run $1
                         user_permission_remove(f"{self.entity}.{perm}", to_remove)
 
     return AppConfigPanel, AppCoreConfigPanel
-
-
-@is_flash_unit_operation()
-def app_dismiss_notification(app: str, name: Literal["post_install", "post_upgrade"]):
-    assert isinstance(name, str)
-    name_ = name.lower()
-    assert name_ in ["post_install", "post_upgrade"]
-    _assert_is_installed(app)
-
-    app_setting(app, f"_dismiss_notification_{name_}", value="1")
 
 
 def regen_mail_app_user_config_for_dovecot_and_postfix(

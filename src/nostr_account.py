@@ -22,7 +22,7 @@ import os
 import socket
 from pathlib import Path
 
-from .nostr_login import CHALLENGE_TTL, CLOCK_SKEW, LoginError, _challenges
+from .nostr_login import CLOCK_SKEW, LoginError, _challenges
 
 logger = logging.getLogger("nostrhost-account")
 
@@ -149,7 +149,6 @@ def nip05_route():
 
 def identities_route():
     """List the session user's linked Nostr identities (+ policy flag)."""
-    from bottle import HTTPResponse
 
     from .nostr_identity import list_identities_for_username
 

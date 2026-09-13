@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Literal,
     Mapping,
     Optional,
@@ -222,45 +221,6 @@ class DomainInfo(TypedDict):
     apps: list[dict[str, str]]
     main: bool
     topest_parent: str | None
-
-
-def domain_info(domain: str) -> DomainInfo:
-    """
-    Print aggregate data for a specific domain
-
-    Keyword argument:
-        domain     -- Domain to be checked
-    """
-
-    from .certificate import certificate_status
-    from .dns import _get_registar_settings
-    from .utils.app_utils import _get_app_label, _get_app_settings, _installed_apps
-
-    _assert_domain_exists(domain)
-
-    registrar, _ = _get_registar_settings(domain)
-    certificate = certificate_status([domain], full=True)["certificates"][domain]
-
-    apps = []
-    for app in _installed_apps():
-        settings = _get_app_settings(app)
-        if settings.get("domain") == domain:
-            apps.append(
-                {
-                    "id": app,
-                    "name": _get_app_label(app),
-                    "path": settings.get("path", ""),
-                }
-            )
-
-    return {
-        "certificate": certificate,
-        "registrar": registrar,
-        "apps": apps,
-        "main": _get_maindomain() == domain,
-        "topest_parent": _get_parent_domain_of(domain, topest=True),
-        # TODO : add parent / child domains ?
-    }
 
 
 def _assert_domain_exists(domain: str) -> None:
@@ -625,24 +585,6 @@ def domain_dyndns_unsubscribe(*args: Any, **kwargs: Any) -> None:
     dyndns_unsubscribe(*args, **kwargs)
 
 
-def domain_dyndns_list() -> dict[str, list[str]]:
-    """
-    Returns all currently subscribed DynDNS domains
-    """
-    from .dyndns import dyndns_list
-
-    return dyndns_list()
-
-
-def domain_dyndns_update(*args: Any, **kwargs: Any) -> None:
-    """
-    Update a DynDNS domain
-    """
-    from .dyndns import dyndns_update
-
-    dyndns_update(*args, **kwargs)
-
-
 def domain_dyndns_set_recovery_password(*args: Any, **kwargs: Any) -> None:
     """
     Set a recovery password for an already registered dyndns domain
@@ -922,7 +864,7 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
             if _get_parent_domain_of(self.entity, topest=True) is None and any(
                 option in next_settings for option in portal_options
             ):
-                from .portal import PORTAL_SETTINGS_DIR
+                from .app import PORTAL_SETTINGS_DIR
 
                 # Portal options are also saved in a `domain.portal.yml` file
                 # that can be read by the portal API.
@@ -995,21 +937,6 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
     return DomainConfigPanel
 
 
-def domain_action_run(domain: str, action: str, args=None) -> None:
-    import urllib.parse
-
-    action_func: Callable
-    if action == "cert.cert_.cert_install":
-        from .certificate import certificate_install as action_func
-    elif action == "cert.cert_.cert_renew":
-        from .certificate import certificate_renew as action_func
-
-    args = dict(urllib.parse.parse_qsl(args or "", keep_blank_values=True))
-    no_checks = args["cert_no_checks"] in ("y", "yes", "on", "1")
-
-    action_func([domain], force=True, no_checks=no_checks)
-
-
 def _get_domain_settings(domain: str) -> dict:
     _assert_domain_exists(domain)
 
@@ -1032,14 +959,6 @@ def _set_domain_settings(domain: str, settings: dict) -> None:
 #
 
 
-def domain_cert_status(
-    domain_list: list[str], full: bool = False
-) -> dict[str, dict[str, Any]]:
-    from .certificate import certificate_status
-
-    return certificate_status(domain_list, full)
-
-
 def domain_cert_install(
     domain_list: list[str],
     force: bool = False,
@@ -1049,17 +968,6 @@ def domain_cert_install(
     from .certificate import certificate_install
 
     return certificate_install(domain_list, force, no_checks, self_signed)
-
-
-def domain_cert_renew(
-    domain_list: list[str],
-    force: bool = False,
-    no_checks: bool = False,
-    email: bool = False,
-) -> None:
-    from .certificate import certificate_renew
-
-    return certificate_renew(domain_list, force, no_checks, email)
 
 
 def domain_dns_suggest(domain: str) -> str:

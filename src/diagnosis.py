@@ -44,10 +44,6 @@ DIAGNOSIS_CONFIG_FILE = "/etc/yunohost/diagnosis.yml"
 DIAGNOSIS_SERVER = "diagnosis.yunohost.org"
 
 
-def diagnosis_list():
-    return {"categories": _list_diagnosis_categories()}
-
-
 def diagnosis_get(category, item):
     # Get all the categories
     all_categories_names = _list_diagnosis_categories()

@@ -49,10 +49,6 @@ def save_zone_state(state_dir: Path, zone: str, state: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def zone_provider_id(state_dir: Path, zone: str) -> str:
-    return str(load_zone_state(state_dir, zone).get("provider", "manual"))
-
-
 def set_zone_provider(state_dir: Path, zone: str, provider: str) -> None:
     state = load_zone_state(state_dir, zone)
     state["provider"] = provider
@@ -147,17 +143,3 @@ def replace_record_by_diff_key(state_dir: Path, zone: str, record: DnsRecord) ->
             del records[record_id]
     records[record.fingerprint()] = record_entry(record)
     save_zone_state(state_dir, zone, state)
-
-
-def owned_record_ids(state_dir: Path, zone: str) -> set[str]:
-    return set(load_zone_state(state_dir, zone).get("records", {}).keys())
-
-
-def record_id_to_record(state_dir: Path, zone: str, record_id: str) -> DnsRecord | None:
-    raw = load_zone_state(state_dir, zone).get("records", {}).get(record_id)
-    if raw is None:
-        return None
-    try:
-        return DnsRecord(**raw)
-    except Exception:  # noqa: BLE001 - defensive
-        return None

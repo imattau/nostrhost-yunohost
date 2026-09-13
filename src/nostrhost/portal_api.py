@@ -13,9 +13,8 @@ permission projection itself).
 
 from __future__ import annotations
 
-from typing import Any
 
-from bottle import Bottle, HTTPResponse, request
+from bottle import Bottle
 
 
 def build_app() -> Bottle:

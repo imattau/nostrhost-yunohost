@@ -39,7 +39,6 @@ from typing import Any, Callable
 
 from .nostr_notify import (
     SEVERITY_CRITICAL,
-    SEVERITY_INFO,
     SEVERITY_WARNING,
     publish_notice,
 )
