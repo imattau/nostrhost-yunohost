@@ -372,7 +372,20 @@ def _safe_app_list(**args: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - a partially-registered native app must not break the list
         legacy = {}
     if legacy:
-        apps = dict(legacy.get("apps") or {})
+        legacy_apps = legacy.get("apps") or {}
+        if isinstance(legacy_apps, dict):
+            apps = dict(legacy_apps)
+        elif isinstance(legacy_apps, list):
+            # YunoHost's app_list() returns a list of AppInfo objects, while
+            # some adapters expose an id-keyed mapping. Normalize both shapes
+            # before merging the native package registry.
+            apps = {
+                app["id"]: app
+                for app in legacy_apps
+                if isinstance(app, dict) and isinstance(app.get("id"), str)
+            }
+        else:
+            apps = {}
         apps.update(native)
         return {"apps": apps}
     if native:

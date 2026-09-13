@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from nostr_sdk import Keys
@@ -274,6 +275,32 @@ def test_service_status_accepts_the_planner_name_argument(monkeypatch):
         "opendkim": {"status": "running"},
     }
     assert calls == ["opendkim", None]
+
+
+@pytest.mark.parametrize(
+    "legacy_apps",
+    [
+        [{"id": "legacy-app", "version": "1.2"}],
+        {"legacy-app": {"id": "legacy-app", "version": "1.2"}},
+    ],
+)
+def test_app_list_normalizes_legacy_registry_shapes(monkeypatch, legacy_apps):
+    import sys
+    from types import ModuleType
+
+    from yunohost.nostr_operations import _safe_app_list
+
+    legacy_app = ModuleType("yunohost.app")
+    legacy_app.app_list = lambda **_kwargs: {"apps": legacy_apps}
+    native_providers = ModuleType("nostrhost.native_providers")
+    native_providers.installed_package_manifest = lambda _app_id: None
+    monkeypatch.setitem(sys.modules, "yunohost.app", legacy_app)
+    monkeypatch.setitem(sys.modules, "nostrhost.native_providers", native_providers)
+    monkeypatch.setattr(Path, "glob", lambda _path, _pattern: [])
+
+    assert _safe_app_list() == {
+        "apps": {"legacy-app": {"id": "legacy-app", "version": "1.2"}}
+    }
 
 
 def test_request_event_shape():
