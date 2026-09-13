@@ -332,6 +332,106 @@ def test_get_system_version(app, monkeypatch):
     assert json.loads(body)["version"] == "12"
 
 
+def test_get_system_updates(app, monkeypatch):
+    monkeypatch.setitem(
+        api_module._TOOL_HANDLERS,
+        "updates.check",
+        lambda **k: {"system": [], "apps": [], "pending_migrations": []},
+    )
+    status, _, body = wsgi_request(app, "GET", "/package/system/updates")
+    assert status == "200"
+    assert json.loads(body) == {"system": [], "apps": [], "pending_migrations": []}
+
+
+def test_post_system_updates_refresh_defaults_to_apps(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"target": kwargs["target"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "updates.refresh", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/system/updates/refresh", {})
+    assert status == "200"
+    assert captured == {"target": "apps"}
+
+
+def test_post_system_updates_refresh_target(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"target": kwargs["target"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "updates.refresh", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/system/updates/refresh", {"target": "system"})
+    assert status == "200"
+    assert captured == {"target": "system"}
+
+
+def test_post_system_updates_apply_uses_signed_chain(app, monkeypatch):
+    """system.upgrade is high-risk/requires approval: it must go through
+    _run_lifecycle (signed chain + owner co-signature), never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, body = wsgi_request(app, "POST", "/package/system/updates/apply", {"target": "system"})
+    assert status == "200"
+    assert json.loads(body)["request_id"] == "r" * 64
+    assert calls == [("system.upgrade", {"target": "system"})]
+
+
+def test_post_system_updates_apply_defaults_to_system(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True}
+    )
+    status, _, body = wsgi_request(app, "POST", "/package/system/updates/apply", {})
+    assert status == "200"
+    assert calls == [("system.upgrade", {"target": "system"})]
+
+
+def test_get_system_migrations_query_flags(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"migrations": [], "state": {}}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.migrations", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/system/migrations?pending=true&done=false")
+    assert status == "200"
+    assert captured == {"pending": True, "done": False}
+
+
+def test_get_system_migrations_defaults(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"migrations": [], "state": {}}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.migrations", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/system/migrations")
+    assert status == "200"
+    assert captured == {"pending": False, "done": False}
+
+
+def test_post_system_migrate_uses_signed_chain(app, monkeypatch):
+    """system.migrate is high-risk/irreversible: it must go through
+    _run_lifecycle (signed chain + owner co-signature), never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"targets": ["0032_firewall_config"], "accept_disclaimer": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/system/migrate", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("system.migrate", body)]
+
+
 def test_post_service_restart(app, monkeypatch):
     captured = {}
 
