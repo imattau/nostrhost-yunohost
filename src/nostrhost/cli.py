@@ -2344,6 +2344,75 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             )
         _guard(run, output_as)
 
+    # -- MCP endpoint (Caddy route + CA trust) --------------------------------
+
+    mcp = typer.Typer(name="mcp", help="MCP endpoint setup (nostrhost-mcp behind Caddy)", no_args_is_help=True)
+
+    @mcp.command("route")
+    def mcp_route(
+        domain: str = typer.Argument(..., help="domain to serve the MCP endpoint on, e.g. mcp.example.com"),
+        port: int = typer.Option(None, "--port", help="local nostrhost-mcp --http port (default: 8930)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Route DOMAIN to a local nostrhost-mcp (serve --http), reusing the
+        same Caddy admin-API mechanism every native web resource uses. The
+        domain must already resolve/have a certificate the way any other
+        NostrHost domain does (see `nostrhost domain add`); this only adds
+        the MCP app's route on top of it. Safe to re-run to change the port."""
+        from .mcp_endpoint import DEFAULT_PORT, configure_route
+
+        def run() -> Any:
+            route_id = configure_route(domain, port=port or DEFAULT_PORT)
+            return {"route_id": route_id, "domain": domain, "port": port or DEFAULT_PORT}
+        _guard(run, output_as)
+
+    @mcp.command("remove-route")
+    def mcp_remove_route(
+        domain: str = typer.Argument(..., help="domain the MCP endpoint was routed on"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove the MCP endpoint's Caddy route and forget its configuration."""
+        from .mcp_endpoint import remove_route
+
+        def run() -> Any:
+            remove_route(domain)
+            return {"domain": domain, "removed": True}
+        _guard(run, output_as)
+
+    @mcp.command("status")
+    def mcp_status(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Show the configured MCP endpoint (domain/port), if any."""
+        from .mcp_endpoint import read_endpoint_config
+
+        def run() -> Any:
+            config = read_endpoint_config()
+            return config or {"configured": False}
+        _guard(run, output_as)
+
+    @mcp.command("export-ca")
+    def mcp_export_ca(
+        output: Path = typer.Option(None, "--output", "-o", help="write the bundle here instead of stdout"),
+    ) -> None:
+        """Export a CA bundle (system CAs + Caddy's internal root, if used)
+        for a remote MCP client to trust this node's TLS certificate.
+
+        Only needed when the MCP domain uses Caddy's internal CA (a lab/test
+        domain, `tls internal`) rather than a public ACME certificate — a
+        public ACME certificate needs no client-side trust change at all."""
+        from .mcp_endpoint import export_ca_bundle
+
+        bundle = export_ca_bundle()
+        if bundle is None:
+            _print_error(
+                "this node has no Caddy internal CA (/var/lib/caddy/pki/authorities/local/root.crt) — "
+                "if the MCP domain uses a public ACME certificate, no client-side trust change is needed"
+            )
+            raise typer.Exit(EXIT_ERR)
+        if output:
+            output.write_bytes(bundle)
+        else:
+            typer.echo(bundle.decode("utf-8", errors="replace"), nl=False)
+
     # -- operation chain ---------------------------------------------------------
 
     op_group = typer.Typer(name="op", help="operation chain (follow/status)", no_args_is_help=True)
@@ -2423,7 +2492,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, mcp, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app

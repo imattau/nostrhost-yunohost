@@ -1323,3 +1323,33 @@ def test_invalid_json_body_400(app):
 def test_unknown_route_404(app):
     status, _, _ = wsgi_request(app, "GET", "/package/nope")
     assert status == "404"
+
+
+def test_mcp_endpoint_info_reports_unconfigured(app, monkeypatch):
+    monkeypatch.setattr(api_module, "read_endpoint_config", lambda: None)
+    status, _, body = wsgi_request(app, "GET", "/package/mcp/endpoint")
+    assert status == "200"
+    assert json.loads(body) == {"configured": False}
+
+
+def test_mcp_endpoint_info_reports_configured(app, monkeypatch):
+    monkeypatch.setattr(api_module, "read_endpoint_config", lambda: {"domain": "mcp.example.com", "port": 8930})
+    status, _, body = wsgi_request(app, "GET", "/package/mcp/endpoint")
+    assert status == "200"
+    assert json.loads(body) == {"configured": True, "domain": "mcp.example.com", "port": 8930}
+
+
+def test_mcp_ca_bundle_unavailable_when_no_internal_ca(app, monkeypatch):
+    monkeypatch.setattr(api_module, "export_ca_bundle", lambda: None)
+    status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
+    assert status == "200"
+    assert json.loads(body) == {"available": False}
+
+
+def test_mcp_ca_bundle_returns_pem_when_available(app, monkeypatch):
+    monkeypatch.setattr(api_module, "export_ca_bundle", lambda: b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n")
+    status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
+    assert status == "200"
+    data = json.loads(body)
+    assert data["available"] is True
+    assert data["pem"] == "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"

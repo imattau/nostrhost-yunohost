@@ -34,6 +34,7 @@ from .cli import (
 from .core import NostrHostError
 from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
 from .package_engine import PackageError
+from .mcp_endpoint import export_ca_bundle, read_endpoint_config
 from yunohost.nostr_identity import (
     IdentityError,
     _operator_config,
@@ -1114,6 +1115,24 @@ def build_app(
             delegator_sk=_config_operator_sk(),
             control_relay=_config_control_relay(),
         )
+
+    # -- mcp endpoint (Caddy route + CA trust, `nostrhost mcp route`) --------
+
+    @app.get("/package/mcp/endpoint")
+    def mcp_endpoint_info() -> Any:
+        config = read_endpoint_config()
+        return {"configured": config is not None, **(config or {})}
+
+    @app.get("/package/mcp/ca-bundle")
+    def mcp_ca_bundle() -> Any:
+        """The combined CA bundle for a remote MCP client to trust this
+        node's certificate — only meaningful when the MCP domain uses
+        Caddy's internal CA (a lab/test domain); a public ACME certificate
+        needs no client-side trust change, so ``available`` is false."""
+        bundle = export_ca_bundle()
+        if bundle is None:
+            return {"available": False}
+        return {"available": True, "pem": bundle.decode("utf-8", errors="replace")}
 
     return app
 
