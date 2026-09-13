@@ -27,6 +27,7 @@ from yunohost.nostr_operations import (
     build_rejection,
     grant_capability,
     known_tools,
+    list_capabilities,
     reject_operation,
     request_operation,
     tool_spec,
@@ -403,6 +404,57 @@ def test_grant_capability_publishes():
     ev = grant_capability("d" * 64, ["services.read"], admin_sk=admin_sk, transport=transport)
     assert ev["kind"] == KIND_CAPABILITY
     assert ["d", "d" * 64] in ev["tags"]
+
+
+def _capability_event(subject, scopes, *, created_at, type_="agent", event_id=None):
+    return {
+        "id": event_id or f"e-{subject}-{created_at}",
+        "kind": KIND_CAPABILITY,
+        "created_at": created_at,
+        "tags": [["d", subject]],
+        "content": json.dumps({"type": type_, "scopes": scopes}),
+    }
+
+
+def test_list_capabilities_returns_active_grants():
+    admin_sk, _ = new_key()
+    events = [_capability_event("agent-1", ["apps.read", "server.read"], created_at=1000)]
+    grants = list_capabilities(admin_sk=admin_sk, query=lambda *a, **kw: events)
+    assert grants == [
+        {"pubkey": "agent-1", "type": "agent", "scopes": ["apps.read", "server.read"], "granted_at": 1000, "event_id": events[0]["id"]}
+    ]
+
+
+def test_list_capabilities_keeps_only_the_newest_event_per_subject():
+    admin_sk, _ = new_key()
+    events = [
+        _capability_event("agent-1", ["apps.read"], created_at=1000),
+        _capability_event("agent-1", ["services.read"], created_at=2000),
+    ]
+    grants = list_capabilities(admin_sk=admin_sk, query=lambda *a, **kw: events)
+    assert len(grants) == 1
+    assert grants[0]["scopes"] == ["services.read"]
+
+
+def test_list_capabilities_omits_revoked_subjects():
+    """An empty-scope grant is grant_capability's own revoke convention."""
+    admin_sk, _ = new_key()
+    events = [
+        _capability_event("agent-1", ["apps.read"], created_at=1000),
+        _capability_event("agent-1", [], created_at=2000),
+    ]
+    grants = list_capabilities(admin_sk=admin_sk, query=lambda *a, **kw: events)
+    assert grants == []
+
+
+def test_list_capabilities_sorts_newest_first():
+    admin_sk, _ = new_key()
+    events = [
+        _capability_event("agent-1", ["apps.read"], created_at=1000),
+        _capability_event("agent-2", ["services.read"], created_at=2000),
+    ]
+    grants = list_capabilities(admin_sk=admin_sk, query=lambda *a, **kw: events)
+    assert [g["pubkey"] for g in grants] == ["agent-2", "agent-1"]
 
 
 def _sample_plan() -> dict:

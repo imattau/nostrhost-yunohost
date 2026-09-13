@@ -1192,6 +1192,60 @@ def grant_capability(
     return event
 
 
+def list_capabilities(
+    *,
+    admin_sk: str | None = None,
+    control_relay: str | None = None,
+    query: Callable[..., list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Read back the live kind-31100 capability grants from the control relay.
+
+    Grants are parameterized-replaceable (NIP-33 ``d`` tag = subject
+    pubkey) — a well-behaved relay keeps only the latest per subject, but a
+    query can still surface stale copies from a store that doesn't prune,
+    so this dedupes client-side by ``d`` tag on the newest ``created_at``.
+    A grant published with an empty scope list is ``grant_capability``'s own
+    revoke convention (see the admin UI's ``revokeCapability``), so it is
+    filtered out here rather than shown as an active grant with no access.
+    Best-effort like the audit reads: an unreachable relay yields ``[]``.
+    """
+    from .nostrhost.events import query_chain_events
+
+    cfg = _operator_config(admin_sk, control_relay)
+    fetch = query or query_chain_events
+    events = fetch(cfg.control_relay, kinds=(KIND_CAPABILITY,), limit=500)
+    latest: dict[str, dict[str, Any]] = {}
+    for event in events:
+        subject = next((t[1] for t in event.get("tags", []) if len(t) > 1 and t[0] == "d"), None)
+        if not subject:
+            continue
+        current = latest.get(subject)
+        if current is not None and (current.get("created_at") or 0) >= (event.get("created_at") or 0):
+            continue
+        latest[subject] = event
+
+    grants: list[dict[str, Any]] = []
+    for subject, event in latest.items():
+        try:
+            body = json.loads(event.get("content") or "{}")
+        except json.JSONDecodeError:
+            continue
+        scopes = body.get("scopes")
+        if not isinstance(scopes, list) or not scopes:
+            continue  # empty scopes is a revoke, not an active grant
+        grants.append(
+            {
+                "pubkey": subject,
+                "type": body.get("type", "agent"),
+                "scopes": sorted({str(s) for s in scopes if isinstance(s, str)}),
+                "granted_at": event.get("created_at"),
+                "event_id": event.get("id"),
+            }
+        )
+    grants.sort(key=lambda g: g.get("granted_at") or 0, reverse=True)  # newest first
+    return grants
+
+
 def delegate_capability(
     delegate_pubkey: str,
     scopes: list[str],

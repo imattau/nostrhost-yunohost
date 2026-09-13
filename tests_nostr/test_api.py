@@ -1211,6 +1211,19 @@ def test_capability_grant(app, monkeypatch):
     assert captured["scopes"] == ["apps.read"]
 
 
+def test_capability_list(app, monkeypatch):
+    def fake(**kwargs):
+        return [{"pubkey": "ab" * 32, "type": "agent", "scopes": ["apps.read"], "granted_at": 1000, "event_id": "e" * 64}]
+
+    monkeypatch.setattr(api_module, "list_capabilities", fake)
+    monkeypatch.setattr(api_module, "_config_admin_sk", lambda: None)
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    status, _, body = wsgi_request(app, "GET", "/package/capability/list")
+    assert status == "200"
+    grants = json.loads(body)["grants"]
+    assert grants == [{"pubkey": "ab" * 32, "type": "agent", "scopes": ["apps.read"], "granted_at": 1000, "event_id": "e" * 64}]
+
+
 def test_post_system_reboot_uses_signed_chain(app, monkeypatch):
     """system.reboot is high-risk: it must go through _run_lifecycle, never
     _run_tool."""
