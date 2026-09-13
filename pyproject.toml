@@ -19,7 +19,12 @@ dependencies = [
     # execution boundary (free-space, backup, and owner approval tiers).
     "nostrhost-policy @ git+https://github.com/imattau/nostrhost-policy@main",
     "nostr-sdk>=0.45.1",
-    "websockets>=12.0",
+    # >=14.2 required: websockets 13.x sync client races receive_eof() in
+    # close_socket() without the protocol mutex (python-websockets e7a098e,
+    # fixed in 14.2), so an abruptly-dropped relay connection raises
+    # `AssertionError: assert self.protocol.state is CLOSED` in the internal
+    # recv_events thread and wedges operationsd.
+    "websockets>=14.2",
     "bottle",
     "cryptography",
     # "dbus-python",
