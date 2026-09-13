@@ -326,6 +326,16 @@ def build_app(
         body = _json_body()
         return _run_tool("service.control", {"name": body.get("name", ""), "action": body.get("action", "")})
 
+    # -- catalog --------------------------------------------------------------
+
+    @app.get("/package/catalog/list")
+    def catalog_list() -> Any:
+        return _run_tool("catalog.list", {})
+
+    @app.get("/package/catalog/get/<app_id>")
+    def catalog_get(app_id: str) -> Any:
+        return _run_tool("catalog.get", {"app_id": app_id})
+
     # -- app ----------------------------------------------------------------
 
     @app.get("/package/app/list")

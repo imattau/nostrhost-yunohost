@@ -436,6 +436,26 @@ def test_user_delete(app, monkeypatch):
     assert captured == {"username": "alice", "purge": True, "force": False}
 
 
+def test_catalog_list(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.list", lambda **k: {"entries": []})
+    status, _, body = wsgi_request(app, "GET", "/package/catalog/list")
+    assert status == "200"
+    assert json.loads(body) == {"entries": []}
+
+
+def test_catalog_get(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"declaration": {"AppID": kwargs["app_id"]}, "event_id": "abc"}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.get", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/catalog/get/immich")
+    assert status == "200"
+    assert captured == {"app_id": "immich"}
+
+
 def test_identity_list_username(app, monkeypatch):
     captured = {}
 
