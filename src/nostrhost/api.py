@@ -552,6 +552,41 @@ def build_app(
         body = _json_body()
         return _run_lifecycle("backup.delete", {"name": body.get("name", "")}, state=_State())
 
+    # -- diagnosis --------------------------------------------------------------
+
+    @app.post("/package/diagnosis/run")
+    def diagnosis_run() -> Any:
+        """Run diagnosis categories and return the cached report. No-approval,
+        but POST since it runs real checks and mutates the diagnosis cache
+        (same as /package/system/updates/refresh)."""
+        body = _json_body()
+        return _run_tool(
+            "diagnosis.run",
+            {
+                "categories": body.get("categories", []),
+                "force": bool(body.get("force", False)),
+                "full": bool(body.get("full", False)),
+            },
+        )
+
+    @app.get("/package/diagnosis/ignored")
+    def diagnosis_ignored() -> Any:
+        return _run_tool("diagnosis.ignored", {})
+
+    @app.post("/package/diagnosis/ignore")
+    def diagnosis_ignore() -> Any:
+        """Add a diagnosis ignore filter. Routed through the signed operation
+        chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("diagnosis.ignore", {"filter": body.get("filter", [])}, state=_State())
+
+    @app.post("/package/diagnosis/unignore")
+    def diagnosis_unignore() -> Any:
+        """Remove a diagnosis ignore filter. Routed through the signed
+        operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("diagnosis.unignore", {"filter": body.get("filter", [])}, state=_State())
+
     # -- service ------------------------------------------------------------
 
     @app.get("/package/service/status")

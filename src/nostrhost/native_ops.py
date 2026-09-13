@@ -39,6 +39,7 @@ from yunohost.nostr_operations import (
     SCOPE_BACKUPS_READ,
     SCOPE_BACKUPS_RESTORE,
     SCOPE_DIAGNOSIS_READ,
+    SCOPE_DIAGNOSIS_WRITE,
     SCOPE_FIREWALL_READ,
     SCOPE_FIREWALL_WRITE,
     SCOPE_LOGS_READ,
@@ -165,6 +166,24 @@ class FirewallReloadArgs(_Strict):
 class DiagnosisRunArgs(_Strict):
     categories: list[str] = Field(default_factory=list)
     force: bool = False
+    full: bool = Field(
+        default=False,
+        description="keep timestamp/cached_for and per-item meta/ignored fields (needed to build an ignore filter)",
+    )
+
+
+class DiagnosisIgnoredArgs(_Strict):
+    pass
+
+
+class DiagnosisIgnoreArgs(_Strict):
+    filter: list[str] = Field(
+        description="[category, 'key1=value1', 'key2=value2', ...] — the category to ignore, optionally narrowed by criteria matching an existing issue"
+    )
+
+
+class DiagnosisUnignoreArgs(_Strict):
+    filter: list[str] = Field(description="the same [category, 'key=value', ...] filter previously passed to diagnosis.ignore")
 
 
 class CatalogListArgs(_Strict):
@@ -522,7 +541,7 @@ def _safe_firewall_reload(skip_upnp: bool = False, **extra: Any) -> dict[str, An
     return {"reloaded": True}
 
 
-def _safe_diagnosis_run(categories: list[str] | None = None, force: bool = False, **extra: Any) -> dict[str, Any]:
+def _safe_diagnosis_run(categories: list[str] | None = None, force: bool = False, full: bool = False, **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"diagnosis.run does not accept extra args: {sorted(extra)}")
     categories = categories or []
@@ -530,9 +549,41 @@ def _safe_diagnosis_run(categories: list[str] | None = None, force: bool = False
 
     diagnosis_run(categories=categories, force=bool(force))
     try:
-        return diagnosis_show(categories=categories)
+        return diagnosis_show(categories=categories, full=bool(full))
     except Exception:  # noqa: BLE001 - a missing cache is an empty report, not an error
         return {}
+
+
+def _safe_diagnosis_ignored(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"diagnosis.ignored does not accept extra args: {sorted(extra)}")
+    from yunohost.diagnosis import diagnosis_ignore
+
+    return diagnosis_ignore(filter=[], list=True)
+
+
+def _safe_diagnosis_ignore(filter: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+    filter = filter or []
+    if extra:
+        raise OperationError(f"diagnosis.ignore does not accept extra args: {sorted(extra)}")
+    if not filter:
+        raise OperationError("diagnosis.ignore requires a non-empty 'filter'")
+    from yunohost.diagnosis import diagnosis_ignore
+
+    diagnosis_ignore(filter=filter, list=False)
+    return {"filter": filter, "ignored": True}
+
+
+def _safe_diagnosis_unignore(filter: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+    filter = filter or []
+    if extra:
+        raise OperationError(f"diagnosis.unignore does not accept extra args: {sorted(extra)}")
+    if not filter:
+        raise OperationError("diagnosis.unignore requires a non-empty 'filter'")
+    from yunohost.diagnosis import diagnosis_unignore
+
+    diagnosis_unignore(filter=filter)
+    return {"filter": filter, "unignored": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -1576,6 +1627,21 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="diagnosis.run", handler=_safe_diagnosis_run, scope=SCOPE_DIAGNOSIS_READ,
         require_approval=False, input_model=DiagnosisRunArgs,
         description="run YunoHost diagnosis categories and return the cached report",
+    ),
+    "diagnosis.ignored": ToolSpec(
+        name="diagnosis.ignored", handler=_safe_diagnosis_ignored, scope=SCOPE_DIAGNOSIS_READ,
+        require_approval=False, input_model=DiagnosisIgnoredArgs,
+        description="list currently configured diagnosis ignore filters, by category",
+    ),
+    "diagnosis.ignore": ToolSpec(
+        name="diagnosis.ignore", handler=_safe_diagnosis_ignore, scope=SCOPE_DIAGNOSIS_WRITE,
+        input_model=DiagnosisIgnoreArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
+        description="add a diagnosis ignore filter (admin + owner co-signature)",
+    ),
+    "diagnosis.unignore": ToolSpec(
+        name="diagnosis.unignore", handler=_safe_diagnosis_unignore, scope=SCOPE_DIAGNOSIS_WRITE,
+        input_model=DiagnosisUnignoreArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
+        description="remove a diagnosis ignore filter (admin + owner co-signature)",
     ),
     "catalog.list": ToolSpec(
         name="catalog.list", handler=_safe_catalog_list, scope=SCOPE_CATALOG_READ,

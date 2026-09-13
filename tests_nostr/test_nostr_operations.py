@@ -71,7 +71,10 @@ def test_registry_has_the_safe_tools():
         "credential.list",
         "credential.remove",
         "credential.set",
+        "diagnosis.ignore",
+        "diagnosis.ignored",
         "diagnosis.run",
+        "diagnosis.unignore",
         "dns.apply",
         "dns.plan",
         "dns.subscribe",
@@ -147,6 +150,10 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("firewall.open").scope == "firewall.write"
     assert tool_spec("diagnosis.run").scope == "diagnosis.read"
     assert tool_spec("diagnosis.run").require_approval is False
+    assert tool_spec("diagnosis.ignored").scope == "diagnosis.read"
+    assert tool_spec("diagnosis.ignored").require_approval is False
+    assert tool_spec("diagnosis.ignore").scope == "diagnosis.write"
+    assert tool_spec("diagnosis.unignore").scope == "diagnosis.write"
     # Phase 5 backlog surface: scopes, approval posture, and the gated reads.
     assert tool_spec("updates.check").require_approval is False
     assert tool_spec("updates.refresh").scope == "system.update"
@@ -191,6 +198,7 @@ def test_registry_has_the_safe_tools():
             "user.list",
             "firewall.list",
             "diagnosis.run",
+            "diagnosis.ignored",
             "catalog.list",
             "catalog.get",
             "updates.check",

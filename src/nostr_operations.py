@@ -74,6 +74,7 @@ CHAIN_KINDS = (
 # delegations verify against the ops that consume them.
 SCOPE_SERVER_READ = "server.read"
 SCOPE_DIAGNOSIS_READ = "diagnosis.read"
+SCOPE_DIAGNOSIS_WRITE = "diagnosis.write"
 SCOPE_APPS_READ = "apps.read"
 SCOPE_APPS_INSTALL = "apps.install"
 SCOPE_APPS_UPGRADE = "apps.upgrade"
@@ -111,6 +112,7 @@ KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
         SCOPE_DIAGNOSIS_READ,
+        SCOPE_DIAGNOSIS_WRITE,
         SCOPE_APPS_READ,
         SCOPE_APPS_INSTALL,
         SCOPE_APPS_UPGRADE,
