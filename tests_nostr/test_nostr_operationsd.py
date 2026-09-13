@@ -486,6 +486,56 @@ def test_rollback_apply_full_chain_granted_and_approved():
     assert steps[0]["status"] == "executed"
 
 
+def test_package_reconcile_links_restic_snapshot_in_result():
+    """A successful package.reconcile (data-affecting) surfaces the Restic
+    snapshot the StateRecorder took in the 2204 result, so the operator can
+    restore from the exact snapshot that covers the change."""
+
+    class FakeRecorder:
+        """Minimal StateRecorder surface: records calls, reports a snapshot."""
+
+        def __init__(self):
+            self.calls = []
+
+        def pre(self, request_id, tool, args, *, actor=""):
+            self.calls.append(("pre", tool))
+
+        def post(self, request_id, tool, ok, result, *, actor="", args=None):
+            self.calls.append(("post", tool, ok))
+
+        @property
+        def last_restic_snapshot(self):
+            return "snap-abc"
+
+    h = Harness()
+    h.engine._state = FakeRecorder()
+    h.grant(["apps.write"])
+    h.backend.results["package.reconcile"] = {"operations": 1, "results": [], "plan_sha256": "p" * 64}
+
+    plan = {
+        "schema": 1,
+        "package": {"id": "nostrhost-test", "version": "0.1"},
+        "manifest_sha256": "",
+        "plan_sha256": "p" * 64,
+        "operations": [],
+    }
+    ev, handled = h.request("package.reconcile", {"plan": plan})
+    request_id = ev["id"]
+    assert handled
+    assert h.engine.state(request_id) == OpState.REQUESTED  # approval-gated
+    assert h.approve(request_id)
+    assert h.engine.state(request_id) == OpState.SUCCEEDED
+
+    results = h.events_by_kind(2204)
+    assert len(results) == 1
+    body = _content(results[0])
+    assert body["ok"] is True
+    assert body["result"]["restic_snapshot"] == "snap-abc"
+    assert ("pre", "package.reconcile") in h.engine._state.calls
+    assert ("post", "package.reconcile", True) in h.engine._state.calls
+    assert body["result"]["restic_snapshot"] == "snap-abc"
+
+
 def test_delegation_authorizes_subset_and_revocation_removes_access():
     import time
 

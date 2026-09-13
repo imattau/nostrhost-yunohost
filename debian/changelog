@@ -1,3 +1,13 @@
+yunohost (12.1.41.32) stable; urgency=low
+
+  * nostrhost: link the Restic snapshot id into the native plan result.
+    - StateRecorder exposes the last data snapshot id it took; data-affecting
+      operations (package.reconcile) carry `restic_snapshot` in the 2204
+      result and the CLI lifecycle report, so an operator can restore from
+      the exact snapshot covering a change.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 14:20:00 +1000
+
 yunohost (12.1.41.31) stable; urgency=low
 
   * nostrhost: integrate the optional resident agent lifecycle.

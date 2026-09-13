@@ -61,6 +61,7 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
+from .nostr_state import DATA_AFFECTING_TOOLS
 from .nostrhost.events import _d_tag, _e_tag, _tag_value
 
 logger = logging.getLogger("nostr-operationsd")
@@ -422,6 +423,11 @@ class OperationEngine:
             body = {"ok": False, "error": str(exc)}
         if self._state is not None:
             self._state.post(record.request_id, record.tool, body["ok"], body, actor=record.actor, args=record.args)
+            if body.get("ok") and record.tool in DATA_AFFECTING_TOOLS:
+                snapshot = getattr(self._state, "last_restic_snapshot", "") or ""
+                result_body = body.get("result")
+                if snapshot and isinstance(result_body, dict):
+                    result_body["restic_snapshot"] = snapshot
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, actor_pubkey=record.actor, **body))
         record.state = next_state(record.state, KIND_EXECUTION_RESULT, ok=body["ok"])
         record.result = body

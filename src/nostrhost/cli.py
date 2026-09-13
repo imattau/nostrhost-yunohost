@@ -319,6 +319,8 @@ def _lifecycle_report(action: str, envelope: dict[str, Any], body: dict[str, Any
         "request_id": body.get("request_id"),
         "ok": bool(body.get("ok")),
     }
+    if isinstance(result, dict) and result.get("restic_snapshot"):
+        report["restic_snapshot"] = result["restic_snapshot"]
     if health is not None:
         report["health"] = health.get("result")
     if previous is not None:

@@ -300,6 +300,7 @@ def test_native_reconcile_pre_snapshot_requests_restic_link(tmp_path: Path):
     recorder = StateRecorder(repo, FakeBackend(), restic_hook=lambda: calls.append("snapshot") or "snap-1")
     recorder.pre("e" * 64, "package.reconcile", {"plan": {"plan_sha256": "p" * 64}})
     assert calls == ["snapshot"]
+    assert recorder.last_restic_snapshot == "snap-1"
     manifest = tomllib.loads((tmp_path / "state" / "manifest.toml").read_text())
     assert manifest["backup"]["restic_snapshot"] == "snap-1"
     assert manifest["operation"]["plan_sha256"] == "p" * 64

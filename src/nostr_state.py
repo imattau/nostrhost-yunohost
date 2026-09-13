@@ -834,6 +834,14 @@ class StateRecorder:
         self.backend = backend or YunohostBackend()
         self._capabilities = capabilities
         self._restic_hook = restic_hook
+        self._last_restic_snapshot = ""
+
+    @property
+    def last_restic_snapshot(self) -> str:
+        """The most recent Restic snapshot id this recorder took ("" when
+        none). Exposed so the operation result can link the snapshot that
+        covers a data-affecting change."""
+        return self._last_restic_snapshot
 
     def _caps(self) -> dict[str, list[str]]:
         if self._capabilities is None:
@@ -884,6 +892,7 @@ class StateRecorder:
         restic = ""
         if data_affecting and self._restic_hook is not None:
             restic = str(self._restic_hook() or "")
+            self._last_restic_snapshot = restic
         return self.repo.commit(
             tree,
             op_event_id=op_event_id,
