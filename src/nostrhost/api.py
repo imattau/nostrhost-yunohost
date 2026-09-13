@@ -215,7 +215,8 @@ def build_app(
 
     @app.get("/service/status")
     def service_status() -> Any:
-        return _run_tool("service.status", {"names": _optional_list(request.query.get("names"))})
+        names = _optional_list(request.query.get("names"))
+        return _run_tool("service.status", {"names": names} if names else {})
 
     @app.post("/service/restart")
     def service_restart() -> Any:

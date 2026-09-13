@@ -213,6 +213,34 @@ def test_get_service_status_names_query(app, monkeypatch):
     assert captured["names"] == ["caddy", "nginx"]
 
 
+def test_get_service_status_no_query(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"caddy": {"status": "running"}}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.status", fake)
+    status, _, body = wsgi_request(app, "GET", "/service/status")
+    assert status == "200"
+    assert captured == {}
+    assert json.loads(body)["caddy"]["status"] == "running"
+
+
+def test_post_service_control(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"service": kwargs["name"], "action": kwargs["action"], "status": "running"}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.control", fake)
+    status, _, body = wsgi_request(app, "POST", "/service/control", {"name": "caddy", "action": "restart"})
+    assert status == "200"
+    assert captured == {"name": "caddy", "action": "restart"}
+    assert json.loads(body)["status"] == "running"
+
+
 def test_get_catalog_list(app, monkeypatch):
     monkeypatch.setitem(api_module._TOOL_HANDLERS, "catalog.list", lambda **k: {"apps": [{"id": "immich"}]})
     status, _, body = wsgi_request(app, "GET", "/catalog/list")
