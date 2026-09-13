@@ -618,6 +618,90 @@ def test_post_credential_remove_uses_signed_chain(app, monkeypatch):
     assert calls == [("credential.remove", {"provider": "cloudflare", "name": "primary"})]
 
 
+def test_get_backup_list(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"archives": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/backup/list?with_info=true")
+    assert status == "200"
+    assert captured == {"with_info": True}
+    assert json.loads(body) == {"archives": []}
+
+
+def test_get_backup_list_defaults(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"archives": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/backup/list")
+    assert status == "200"
+    assert captured == {"with_info": False}
+
+
+def test_post_backup_create_uses_signed_chain(app, monkeypatch):
+    """backup.create is medium-risk: it must still go through
+    _run_lifecycle (signed chain + owner co-signature), never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"name": "before-upgrade", "description": "manual snapshot"}
+    status, _, resp = wsgi_request(app, "POST", "/package/backup/create", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [
+        (
+            "backup.create",
+            {
+                "name": "before-upgrade",
+                "description": "manual snapshot",
+                "apps": [],
+                "system": [],
+                "output_directory": None,
+            },
+        )
+    ]
+
+
+def test_post_backup_restore_uses_signed_chain(app, monkeypatch):
+    """backup.restore is high-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"name": "before-upgrade", "apps": ["myapp"], "force": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/backup/restore", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [
+        (
+            "backup.restore",
+            {"name": "before-upgrade", "apps": ["myapp"], "system": [], "force": True},
+        )
+    ]
+
+
+def test_post_backup_delete_uses_signed_chain(app, monkeypatch):
+    """backup.delete is high-risk/irreversible: it must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/backup/delete", {"name": "before-upgrade"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("backup.delete", {"name": "before-upgrade"})]
+
+
 def test_post_service_restart(app, monkeypatch):
     captured = {}
 
