@@ -1,71 +1,195 @@
 #!/usr/bin/env python3
+"""Scaffold, validate, and explain native NostrHost package declarations."""
 
-import os as _os
-import sys as _sys
-from pathlib import Path as _Path
-
-# Prefer the bundled runtime venv: the runtime's wheels (nostr-sdk, ...) are
-# only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
-# for nodes where the runtime has not been installed yet. The venv's python
-# binary is a symlink to the system interpreter, so detect it via sys.prefix
-# rather than the executable path.
-_VENV = _Path("/opt/nostrhost/venv")
-if (_VENV / "bin/python3").is_file() and _Path(_sys.prefix) != _VENV:
-    _os.execv(str(_VENV / "bin/python3"), [str(_VENV / "bin/python3"), _sys.argv[0]] + _sys.argv[1:])
-
-
-import os as _os
-import sys as _sys
-from pathlib import Path as _Path
-
-# Prefer the bundled runtime venv: the runtime's wheels (nostr-sdk, ...) are
-# only guaranteed inside /opt/nostrhost/venv; the system python is a fallback
-# for nodes where the runtime has not been installed yet.
-_VENV_PY = _Path("/opt/nostrhost/venv/bin/python3")
-if _VENV_PY.is_file() and _os.path.realpath(_sys.executable) != _os.path.realpath(str(_VENV_PY)):
-    _os.execv(str(_VENV_PY), [str(_VENV_PY), _sys.argv[0]] + _sys.argv[1:])
-
-"""Validate, plan, and migrate native NostrHost packages."""
-
-import argparse
 import json
+import os
+import sys
+import tomllib
 from pathlib import Path
+from typing import Any, Optional
+
+_VENV_PY = Path("/opt/nostrhost/venv/bin/python3")
+if _VENV_PY.is_file() and os.path.realpath(sys.executable) != os.path.realpath(str(_VENV_PY)):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), sys.argv[0], *sys.argv[1:]])
+
+import typer  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 try:
-    from yunohost.nostrhost.package_engine import PackageError, load_package, migrate_manifest_file, plan_package, schema
+    from yunohost.nostrhost.package_engine import PackageError, PackageManifest, load_package, plan_package, schema as package_schema, validate_package
 except ModuleNotFoundError:  # source checkout; Debian installs this below yunohost/
-    from nostrhost.package_engine import PackageError, load_package, migrate_manifest_file, plan_package, schema
+    from nostrhost.package_engine import PackageError, PackageManifest, load_package, plan_package, schema as package_schema, validate_package
+
+app = typer.Typer(name="nostrhost-package", help="Create and inspect declarative NostrHost packages.", no_args_is_help=True)
+
+_MINIMAL_TEMPLATE = '''\
+[app]
+id = "{package_id}"
+version = "0.1.0"
+'''
+
+_WEB_TEMPLATE = '''\
+[app]
+id = "{package_id}"
+version = "0.1.0"
+
+# Replace the URL and digest with a verified upstream release.
+[source.main]
+url = "https://example.invalid/{package_id}-0.1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[runtime]
+type = "python"
+version = "3.11"
+
+[packages]
+apt = []
+
+[user]
+system = true
+
+[directories.install]
+path = "/opt/{package_id}"
+
+[directories.data]
+path = "/var/lib/{package_id}"
+backup = true
+
+[service]
+exec = "/opt/{package_id}/bin/server"
+working_directory = "/var/lib/{package_id}"
+
+[web]
+upstream = "127.0.0.1:8080"
+auth = "nostrhost"
+https = "automatic"
+
+[health]
+type = "http"
+path = "/health"
+
+[backup]
+paths = ["/var/lib/{package_id}"]
+database = false
+'''
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(prog="nostrhost-package")
-    sub = parser.add_subparsers(dest="command", required=True)
-    plan_parser = sub.add_parser("plan")
-    plan_parser.add_argument("package", type=Path)
-    plan_parser.add_argument("--json", action="store_true", dest="as_json")
-    schema_parser = sub.add_parser("schema")
-    schema_parser.add_argument("--json", action="store_true", dest="as_json")
-    migrate = sub.add_parser("migrate")
-    migrate.add_argument("manifest", type=Path)
-    migrate.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    try:
-        if args.command == "schema":
-            print(json.dumps(schema(), indent=2, sort_keys=True))
-        elif args.command == "migrate":
-            migrate_manifest_file(args.manifest, args.output)
+def _diagnostic_path(location: tuple[Any, ...]) -> str:
+    path = ""
+    for part in location:
+        if isinstance(part, int):
+            path += f"[{part}]"
         else:
-            operations = [operation.json_dict() for operation in plan_package(load_package(args.package), template_root=args.package.parent)]
-            if args.as_json:
-                print(json.dumps(operations, indent=2, sort_keys=True, default=str))
-            else:
-                for index, operation in enumerate(operations, 1):
-                    deps = f" (after {', '.join(operation['depends_on'])})" if operation["depends_on"] else ""
-                    print(f"{index:02d} {operation['name']} {operation['resource']}: {operation['summary']}{deps}")
+            path += ("." if path else "") + str(part)
+    return path or "$"
+
+
+def _validate(path: Path) -> list[dict[str, str]]:
+    try:
+        with path.open("rb") as stream:
+            raw = tomllib.load(stream)
+        package = PackageManifest.parse_obj(raw)
+        validate_package(package)
+    except ValidationError as exc:
+        return [{"code": str(error.get("type", "invalid")), "path": _diagnostic_path(tuple(error.get("loc", ()))), "message": str(error.get("msg", "Invalid value"))} for error in exc.errors()]
+    except (OSError, tomllib.TOMLDecodeError, PackageError, ValueError) as exc:
+        return [{"code": "invalid_package", "path": "$", "message": str(exc)}]
+    return []
+
+
+def _plan(path: Path) -> dict[str, Any]:
+    package = load_package(path)
+    operations = [operation.json_dict() for operation in plan_package(package, template_root=path.parent)]
+    return {"package": {"id": package.app.id, "version": package.app.version}, "operation_count": len(operations), "operations": operations}
+
+
+@app.command()
+def init(
+    package_id: str = typer.Argument(..., help="Lowercase package id."),
+    directory: Path = typer.Option(Path.cwd(), "--directory", help="Parent directory for the new package."),
+    template: str = typer.Option("minimal", "--template", help="Package starter: minimal or web."),
+) -> None:
+    """Create a minimal or web-service package skeleton."""
+    if template not in {"minimal", "web"}:
+        typer.echo("template must be 'minimal' or 'web'", err=True)
+        raise typer.Exit(code=2)
+    if not package_id or not package_id[0].islower() or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for char in package_id):
+        typer.echo("package id must start with a lowercase letter and contain only lowercase letters, digits, '_' or '-'", err=True)
+        raise typer.Exit(code=2)
+    target = directory / package_id
+    if target.exists():
+        typer.echo(f"refusing to overwrite existing path: {target}", err=True)
+        raise typer.Exit(code=2)
+    target.mkdir(parents=True)
+    content = (_WEB_TEMPLATE if template == "web" else _MINIMAL_TEMPLATE).format(package_id=package_id)
+    (target / "package.toml").write_text(content, encoding="utf-8")
+    typer.echo(str(target / "package.toml"))
+
+
+@app.command()
+def validate(
+    package_file: Path = typer.Argument(..., help="Path to package.toml."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable diagnostics."),
+) -> None:
+    """Validate a package and return path-scoped diagnostics."""
+    diagnostics = _validate(package_file)
+    result = {"valid": not diagnostics, "diagnostics": diagnostics}
+    if as_json:
+        typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    elif diagnostics:
+        for item in diagnostics:
+            typer.echo(f"{item['path']}: {item['message']}", err=True)
+    else:
+        typer.echo(f"Valid package: {package_file}")
+    if diagnostics:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def plan(
+    package_file: Path = typer.Argument(..., help="Path to package.toml."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable plan."),
+) -> None:
+    """Validate and render the package's deterministic resource plan."""
+    try:
+        result = _plan(package_file)
     except PackageError as exc:
-        parser.error(str(exc))
-    return 0
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    if as_json:
+        typer.echo(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return
+    typer.echo(f"{result['operation_count']} operations for {result['package']['id']} {result['package']['version']}")
+    for index, operation in enumerate(result["operations"], 1):
+        deps = f" (after {', '.join(operation['depends_on'])})" if operation["depends_on"] else ""
+        typer.echo(f"{index:02d} {operation['name']} {operation['resource']}: {operation['summary']}{deps}")
+
+
+@app.command()
+def explain(package_file: Path = typer.Argument(..., help="Path to package.toml.")) -> None:
+    """Explain planned changes, risk, reversibility, and dependencies."""
+    try:
+        result = _plan(package_file)
+    except PackageError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Package {result['package']['id']} {result['package']['version']}: {result['operation_count']} operations")
+    for index, operation in enumerate(result["operations"], 1):
+        dependencies = ", ".join(operation["depends_on"]) or "none"
+        reversible = "yes" if operation["reversible"] else "no"
+        typer.echo(f"{index:02d} {operation['name']} ({operation['resource']})\n    change: {operation['summary']}\n    risk: {operation['risk']}; reversible: {reversible}; depends on: {dependencies}")
+
+
+@app.command("schema")
+def emit_schema(output: Optional[Path] = typer.Option(None, "--output", help="Write the schema to this file.")) -> None:
+    """Print or write the JSON Schema for package.toml."""
+    body = json.dumps(package_schema(), indent=2, sort_keys=True) + "\n"
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(body, encoding="utf-8")
+    else:
+        typer.echo(body, nl=False)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    app()

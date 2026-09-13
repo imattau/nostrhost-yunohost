@@ -951,7 +951,45 @@ def load_package(path: Path) -> PackageManifest:
 
 
 def schema() -> dict[str, Any]:
-    return PackageManifest.schema()
+    """Return the versioned authoring schema used by docs and CLI tooling."""
+    result = PackageManifest.schema(by_alias=True)
+    result.update(
+        {
+            "$id": "https://github.com/imattau/nostrhost/blob/main/schema/package.schema.json",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "description": (
+                "Declarative NostrHost package manifest. Validation is read-only; "
+                "privileged changes require a separately approved plan."
+            ),
+        }
+    )
+    descriptions = {
+        "access": "Filesystem ownership and mode changes on existing paths; declare an owner or group explicitly.",
+        "app": "Required package identity and version. Keep the id stable across releases.",
+        "backup": "Filesystem paths and database inputs registered with the backup plane.",
+        "config": "Managed configuration files with exactly one content or template source.",
+        "database": "A package-owned database and its users/grants. State explicitly whether database data is backed up.",
+        "directories": "Absolute package-owned paths, access modes, and backup intent.",
+        "dns": "Records owned by this app inside the zone for the declared web domain.",
+        "fpm": "PHP-FPM pool configuration. Declare a matching PHP runtime as well.",
+        "health": "A bounded HTTP health check used to verify the resulting service or web route.",
+        "hooks": "Restricted Python hook references for behavior not expressible as a resource; hooks are not shell snippets.",
+        "packages": "APT dependencies owned by the host package manager; shared packages are retained on app removal.",
+        "permissions": "Portal access policy for the package's web routes; this is distinct from filesystem access.",
+        "policies": "Typed host security/log rotation policies rendered through registered providers.",
+        "ports": "Named, unique TCP/UDP port allocations requested by the package.",
+        "runtime": "A host-managed language runtime and version; use an explicit prefix only for an isolated runtime.",
+        "secrets": "Generated secret resources; never embed secret values in the manifest.",
+        "service": "A systemd service with an absolute executable path and an optional declared system user.",
+        "settings": "Typed non-secret package settings and defaults. Store credentials with secrets instead.",
+        "source": "Verified upstream archives. Every source requires a SHA-256 digest, including each platform variant.",
+        "timer": "A systemd timer and absolute executable for recurring package work.",
+        "user": "Optional system account owned by this package. Services should use this declared identity.",
+        "web": "A Caddy route to an upstream or static file root. Use a registered domain and package route.",
+    }
+    for name, description in descriptions.items():
+        result["properties"][name]["description"] = description
+    return result
 
 
 def migrate_manifest(raw: dict[str, Any]) -> dict[str, Any]:

@@ -117,6 +117,34 @@ def build_nip05_route(domain: str, upstream: str = "127.0.0.1:6788") -> dict[str
     }
 
 
+def _spa_static_handle(root: str, prefix: str) -> list[dict[str, Any]]:
+    """Serve real SPA assets, falling back to index.html only for app routes."""
+    return [
+        {
+            "handler": "subroute",
+            "routes": [
+                {"handle": [{"handler": "rewrite", "strip_path_prefix": prefix}]},
+                {"handle": [{"handler": "vars", "root": root}]},
+                {
+                    "match": [
+                        {
+                            "file": {
+                                "try_files": [
+                                    "{http.request.uri.path}",
+                                    "{http.request.uri.path}/",
+                                    "/index.html",
+                                ]
+                            }
+                        }
+                    ],
+                    "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
+                },
+                {"handle": [{"handler": "file_server"}]},
+            ],
+        }
+    ]
+
+
 def build_portal_routes(domain: str) -> list[dict[str, Any]]:
     """The per-domain portal/SSO surface an auth-required app needs.
 
@@ -146,17 +174,17 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
             "terminal": True,
         },
     ]
-    for root, tag in (("/usr/share/nostrhost/portal", "sso"), ("/usr/share/nostrhost/admin", "admin")):
+    for root, tag, prefix in (
+        ("/usr/share/nostrhost/portal", "sso", "/yunohost/sso"),
+        ("/usr/share/nostrhost/admin", "admin", "/admin"),
+    ):
         if os.path.isdir(root):
-            # The portal/admin bundles are SPAs: serve the bundle's
-            # index.html for every /yunohost/<tag>/* path (the JSON
-            # equivalent of the Caddyfile `try_files {path} {path}/
-            # /index.html` fallback).
+            path = f"{prefix}/*"
             routes.append(
                 {
                     "@id": f"nostrhost-{tag}:{domain}",
-                    "match": [{"host": [domain], "path": [f"/yunohost/{tag}/*"]}],
-                    "handle": [{"handler": "rewrite", "uri": "/index.html"}, {"handler": "file_server", "root": root}],
+                    "match": [{"host": [domain], "path": [path]}],
+                    "handle": _spa_static_handle(root, prefix),
                     "terminal": True,
                 }
             )

@@ -2037,7 +2037,7 @@ def app_ssowatconf() -> None:
             "users": [],
             "auth_header": False,
             "public": True,
-            "uris": [domain + "/yunohost/admin" for domain in domains]
+            "uris": [domain + "/admin" for domain in domains]
             + [domain + "/yunohost/api" for domain in domains]
             + [domain + "/yunohost/portalapi" for domain in domains]
             + [

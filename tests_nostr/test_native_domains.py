@@ -275,18 +275,32 @@ def test_nip05_caddy_route():
     assert route["handle"][0]["handler"] == "reverse_proxy"
 
 
-def test_portal_routes_host_and_path_anded():
+def test_portal_routes_host_and_path_anded(monkeypatch):
+    import nostrhost.caddy_admin as caddy_admin
+
     from nostrhost.caddy_admin import build_portal_routes
 
+    monkeypatch.setattr(caddy_admin.os.path, "isdir", lambda _path: True)
     routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
-    # YunoHost and native API endpoints are unconditional reverse proxies
+    # Platform and portal API endpoints are unconditional reverse proxies.
     assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/yunohost/api/*"]}]
     assert routes["nostrhost-portalapi:w4.test"]["handle"][0]["handler"] == "reverse_proxy"
     native_api = routes["nostrhost-native-api:w4.test"]
     assert native_api["match"] == [{"host": ["w4.test"], "path": ["/package/*"]}]
     assert native_api["handle"][0]["upstreams"] == [{"dial": "127.0.0.1:8190"}]
-    # sso/admin only when the static dirs exist
-    assert "nostrhost-sso:w4.test" in routes or True
+    # SPA paths keep the portal prefix and use the native admin root.
+    assert routes["nostrhost-sso:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/yunohost/sso/*"]}]
+    assert routes["nostrhost-admin:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/admin/*"]}]
+    for name, prefix in (("sso", "/yunohost/sso"), ("admin", "/admin")):
+        static_route = routes[f"nostrhost-{name}:w4.test"]["handle"][0]["routes"]
+        assert static_route[0]["handle"][0]["strip_path_prefix"] == prefix
+        file_match = static_route[2]["match"][0]["file"]
+        assert file_match["try_files"] == [
+            "{http.request.uri.path}",
+            "{http.request.uri.path}/",
+            "/index.html",
+        ]
+        assert static_route[2]["handle"][0]["uri"] == "{http.matchers.file.relative}"
     for route in routes.values():
         assert all(set(m) == {"host", "path"} for m in route["match"])
         assert route["terminal"] is True
@@ -297,6 +311,15 @@ def test_nip05_endpoint_wired():
 
     app = build_app()
     assert any(route.rule == "/.well-known/nostr.json" for route in app.routes)
+
+
+def test_generated_domain_caddy_template_serves_admin_at_root_path():
+    from pathlib import Path
+
+    template = (Path(__file__).parents[1] / "conf/caddy/caddy_domain.conf").read_text()
+
+    assert "handle_path /admin/*" in template
+    assert "/yunohost/admin" not in template
 
 
 def test_nip05_body_builder(monkeypatch, tmp_path):
