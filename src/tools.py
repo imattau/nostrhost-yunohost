@@ -34,7 +34,7 @@ from typing_extensions import TypedDict
 
 from .log import OperationLogger, is_unit_operation
 from .utils.error import YunohostError, YunohostValidationError
-from .utils.file_utils import chown, cp, mkdir, read_yaml, rm, write_to_yaml
+from .utils.file_utils import read_yaml, write_to_yaml
 from .utils.process import call_async_output
 from .utils.system import (
     _apt_log_line_is_relevant,
@@ -1053,55 +1053,17 @@ class Migration:
     @staticmethod
     def ldap_migration(run: Callable[[Any, str], None]) -> Callable[[Any], None]:
         def func(self: "Migration") -> None:
-            # Backup LDAP before the migration
-            logger.info(tr("migration_ldap_backup_before_migration"))
+            # LDAP is retired (roadmap §25): there is no slapd to back up or
+            # roll back. The wrapper still exists so historical migrations
+            # decorated with @ldap_migration keep a stable signature, but the
+            # LDAP backup/rollback is gone.
             try:
-                backup_folder = "/home/yunohost.backup/premigration/" + time.strftime(
-                    "%Y%m%d-%H%M%S", time.gmtime()
-                )
-                mkdir(backup_folder, 0o750, parents=True)
-                os.system("systemctl stop slapd")
-                cp("/etc/ldap", f"{backup_folder}/ldap_config", recursive=True)
-                cp("/var/lib/ldap", f"{backup_folder}/ldap_db", recursive=True)
-                cp(
-                    "/etc/yunohost/apps",
-                    f"{backup_folder}/apps_settings",
-                    recursive=True,
-                )
-            except Exception as e:
-                raise YunohostError(
-                    "migration_ldap_can_not_backup_before_migration", error=str(e)
-                )
-            finally:
-                os.system("systemctl start slapd")
-
-            try:
-                run(self, backup_folder)
+                run(self, "")
             except Exception:
                 if self.ldap_migration_started:
                     logger.warning(
                         tr("migration_ldap_migration_failed_trying_to_rollback")
                     )
-                    os.system("systemctl stop slapd")
-                    # To be sure that we don't keep some part of the old config
-                    rm("/etc/ldap", force=True, recursive=True)
-                    cp(f"{backup_folder}/ldap_config", "/etc/ldap", recursive=True)
-                    chown("/etc/ldap/schema/", "openldap", "openldap", recursive=True)
-                    chown("/etc/ldap/slapd.d/", "openldap", "openldap", recursive=True)
-                    rm("/var/lib/ldap", force=True, recursive=True)
-                    cp(f"{backup_folder}/ldap_db", "/var/lib/ldap", recursive=True)
-                    rm("/etc/yunohost/apps", force=True, recursive=True)
-                    chown("/var/lib/ldap/", "openldap", recursive=True)
-                    cp(
-                        f"{backup_folder}/apps_settings",
-                        "/etc/yunohost/apps",
-                        recursive=True,
-                    )
-                    os.system("systemctl start slapd")
-                    rm(backup_folder, force=True, recursive=True)
-                    logger.info(tr("migration_ldap_rollback_success"))
                 raise
-            else:
-                rm(backup_folder, force=True, recursive=True)
 
         return func

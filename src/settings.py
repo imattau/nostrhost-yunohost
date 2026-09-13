@@ -211,12 +211,9 @@ class SettingsConfigPanel(ConfigPanel):
 
         # Specific logic for virtual setting "passwordless_sudo"
         try:
-            from .utils.ldap import _get_ldap_interface
+            from .nostrhost.accounts import passwordless_sudo
 
-            ldap = _get_ldap_interface()
-            raw_settings["passwordless_sudo"] = "!authenticate" in ldap.search(
-                "ou=sudo", "cn=admins", ["sudoOption"]
-            )[0].get("sudoOption", [])
+            raw_settings["passwordless_sudo"] = passwordless_sudo()
         except Exception:
             raw_settings["passwordless_sudo"] = False
 
@@ -242,13 +239,9 @@ class SettingsConfigPanel(ConfigPanel):
             tools_rootpw(root_password, check_strength=True)
 
         if passwordless_sudo is not None:
-            from .utils.ldap import _get_ldap_interface
+            from .nostrhost.accounts import set_passwordless_sudo
 
-            ldap = _get_ldap_interface()
-            ldap.update(
-                "cn=admins,ou=sudo",
-                {"sudoOption": "!authenticate" if passwordless_sudo else []},
-            )
+            set_passwordless_sudo(bool(passwordless_sudo))
 
         # First save settings except virtual + default ones
         super()._apply(form, config, previous_settings, exclude=self.virtual_settings)

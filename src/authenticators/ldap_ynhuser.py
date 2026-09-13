@@ -36,7 +36,6 @@ from nostrhost.auth.authenticator import BaseAuthenticator
 
 from ..utils.error import YunohostAuthenticationError
 from ..utils.file_utils import read_json
-from ..utils.ldap import _get_ldap_interface
 from ..utils.misc import random_ascii
 
 logger = logging.getLogger("yunohostportal.authenticators.ldap_ynhuser")
@@ -113,49 +112,32 @@ def user_is_allowed_on_domain(user: str, domain: str) -> bool:
         # A user with explicit permission to an application is certainly welcome
         return True
 
-    # Native admin check first (roadmap §25 Phase 2): no LDAP read at all for
-    # an admin who has linked a Nostr identity. Falls back to the LDAP
-    # admins-group read below for admins who haven't linked one yet, so this
-    # can only add coverage, never regress an existing admin's access.
+    # Native admin check (roadmap §25): no LDAP read. An admin (native
+    # account with an enabled Nostr identity whose pubkey is in the operator
+    # admin set, or an account store record flagged admin) can access every
+    # domain.
     try:
         from yunohost.nostr_identity import is_admin_user
 
         if is_admin_user(user):
             return True
     except Exception as e:
-        logger.debug(f"native admin check unavailable, falling back to LDAP: {e}")
+        logger.debug(f"native admin check unavailable: {e}")
 
-    ADMIN_GROUP = "cn=admins,ou=groups"
     try:
-        admins = (
-            _get_ldap_interface()
-            .search(ADMIN_GROUP, attrs=["memberUid"])[0]
-            .get("memberUid", [])
-        )
+        from yunohost.nostrhost.accounts import user_is_admin as native_admin
+
+        if native_admin(user):
+            return True
     except Exception as e:
-        logger.error(f"Failed to list admin users: {e}")
-        return False
-    if user in admins:
-        # Admins can access everything
-        return True
+        logger.debug(f"native account admin check unavailable: {e}")
 
     try:
-        user_result = _get_ldap_interface().search("ou=users", f"uid={user}", ["mail"])
-        if len(user_result) != 1:
-            logger.error(
-                f"User not found or many users found for {user}. How is this possible after so much validation?"
-            )
-            return False
+        from yunohost.nostrhost.accounts import user_mail_domains
 
-        # Check all the user's email aliases: if one matches the domain, they can access it.
-        user_mail_list = user_result[0]["mail"]
-        for user_mail in user_mail_list:
-            if "@" not in user_mail:
-                logger.error(f"Invalid email address for {user}: {user_mail}")
-                continue
-            if user_mail.split("@")[1] == domain:
-                # A user from that domain is welcome
-                return True
+        if domain in user_mail_domains(user):
+            # A user from that domain is welcome
+            return True
 
         # Users from other domains don't belong here
         return False

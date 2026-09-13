@@ -1,3 +1,25 @@
+yunohost (12.1.41.30) stable; urgency=low
+
+  * nostrhost: LDAP fully retired (roadmap §25, Phases 3-5).
+    - Native account store (`nostrhost/accounts.py`): real Unix accounts via
+      useradd/userdel/groupadd/gpasswd (no libnss-ldapd/libpam-ldapd) plus a
+      root-owned JSON metadata store (fullname/mail/quota/groups) at
+      /etc/nostrhost/accounts.json; SSH keys at ssh-keys.json.
+    - user.py user/group CRUD, user_is_allowed_on_domain, nostr_login session
+      infos, ssh.py and settings.py passwordless_sudo all read the native
+      store instead of LDAP.
+    - _sync_permissions_with_ldap now regenerates the native permission
+      projection (/etc/nostrhost/permissions.json) the Caddy authd reads.
+    - Deleted slapd infra: python3-ldap/slapd/ldap-utils/sudo-ldap/
+      libnss-ldapd/unscd/libpam-ldapd dropped from debian/control;
+      conf/slapd, conf/nslcd, 06-slapd/09-nslcd hooks, 05-conf_ldap
+      backup/restore hooks, dovecot/postfix LDAP configs, slapd service
+      registration and certd restart removed; nsswitch.conf uses plain files.
+    - utils/ldap.py deleted; @Migration.ldap_migration is a no-op; migration
+      0033 reduced to a safe no-op.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 12:00:00 +0000
+
 yunohost (12.1.41.29) stable; urgency=low
 
   * nostrhost: LDAP retirement §25 + Stage C ngit DR + cleanup.

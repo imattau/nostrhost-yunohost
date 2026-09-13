@@ -31,7 +31,6 @@ import argparse
 import logging
 import os
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -129,20 +128,13 @@ def _run_post_cert_update_hook(domain: str) -> None:
 
 
 def _reload_consumers(domain: str) -> None:
-    """Restart the non-web TLS consumers; slapd is the only one today.
+    """Notify the non-web TLS consumers of a rotated certificate.
 
-    slapd loads its TLS certificate/key at process start: ``systemctl reload``
-    re-reads the LDAP config but not the cert material, so a restart is
-    required for a rotated certificate to take effect.
+    slapd used to require a restart here; with LDAP retired (roadmap §25)
+    there is no slapd to reload. The ``post_cert_update`` hook is still
+    fired so future consumers (or apps) can react the same way they did
+    under the legacy cert-manager.
     """
-    try:
-        subprocess.run(
-            ["systemctl", "restart", "slapd"],
-            check=False,
-            capture_output=True,
-        )
-    except OSError as e:
-        logger.warning("could not restart slapd: %s", e)
     _run_post_cert_update_hook(domain)
 
 

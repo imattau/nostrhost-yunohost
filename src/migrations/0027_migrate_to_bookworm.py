@@ -26,7 +26,6 @@ import subprocess
 from datetime import date
 from time import sleep
 
-import _ldap  # noqa: F401
 from nostrhost.core import Moulinette
 from nostrhost.i18n import tr
 

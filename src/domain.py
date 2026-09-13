@@ -27,7 +27,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Mapping,
     Optional,
     TypedDict,
     Union,
@@ -35,7 +34,6 @@ from typing import (
 
 from nostrhost.core import Moulinette
 from nostrhost.i18n import tr
-from nostrhost.core import NostrHostError
 
 from .log import OperationLogger, is_unit_operation
 from .regenconf import regen_conf
@@ -112,13 +110,9 @@ def _get_domains(exclude_subdomains: bool = False) -> list[str]:
         not domain_list_cache
         or abs(domain_list_cache_timestamp - time.time()) > DOMAIN_CACHE_DURATION
     ):
-        from .utils.ldap import _get_ldap_interface
+        from .nostrhost.domains.service import native_domain_names
 
-        ldap = _get_ldap_interface()
-        result = [
-            entry["virtualdomain"][0]
-            for entry in ldap.search("ou=domains", "virtualdomain=*", ["virtualdomain"])
-        ]
+        result = native_domain_names()
 
         def cmp_domain(domain: str) -> list[str]:
             # Keep the main part of the domain and the extension together
@@ -286,18 +280,16 @@ def domain_add(
         certificate_status,
     )
     from .hook import hook_callback
+    from .nostrhost.domains.models import DomainResource
+    from .nostrhost.domains.service import save_domain
     from .utils.dns import is_yunohost_dyndns_domain
-    from .utils.ldap import _get_ldap_interface
     from .utils.password import assert_password_is_strong_enough
 
     if dyndns_recovery_password:
         operation_logger.data_to_redact.append(dyndns_recovery_password)
 
-    ldap = _get_ldap_interface()
-
-    try:
-        ldap.validate_uniqueness({"virtualdomain": domain})
-    except NostrHostError:
+    # Validate uniqueness in the native domain store (no LDAP)
+    if domain in _get_domains():
         raise YunohostValidationError("domain_exists")
 
     # Lower domain to avoid some edge cases issues
@@ -339,18 +331,15 @@ def domain_add(
     _certificate_install_selfsigned([domain], force=True)
 
     try:
-        attr_dict: Mapping[str, str | list[str]] = {
-            "objectClass": ["mailDomain", "top"],
-            "virtualdomain": domain,
-        }
+        from .nostr_state import state_dir_from_env
 
-        try:
-            ldap.add(f"virtualdomain={domain},ou=domains", attr_dict)
-        except Exception as e:
-            raise YunohostError("domain_creation_failed", domain=domain, error=e)
-        finally:
-            global domain_list_cache
-            domain_list_cache = []
+        save_domain(
+            state_dir_from_env(),
+            DomainResource(name=domain, primary=(domain == _get_maindomain())),
+        )
+
+        global domain_list_cache
+        domain_list_cache = []
 
         # Don't regen these conf if we're still in postinstall
         if os.path.exists("/etc/yunohost/installed"):
@@ -438,9 +427,9 @@ def domain_remove(
 
     from .app import app_remove
     from .hook import hook_callback
+    from .nostrhost.domains.service import unlink_domain
     from .utils.app_utils import _get_app_label, _get_app_settings, _installed_apps
     from .utils.dns import is_yunohost_dyndns_domain
-    from .utils.ldap import _get_ldap_interface
 
     if dyndns_recovery_password:
         operation_logger.data_to_redact.append(dyndns_recovery_password)
@@ -516,9 +505,10 @@ def domain_remove(
 
     operation_logger.start()
 
-    ldap = _get_ldap_interface()
     try:
-        ldap.remove("virtualdomain=" + domain + ",ou=domains")
+        from .nostr_state import state_dir_from_env
+
+        unlink_domain(state_dir_from_env(), domain)
     except Exception as e:
         raise YunohostError("domain_deletion_failed", domain=domain, error=e)
     finally:

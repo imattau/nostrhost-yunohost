@@ -64,12 +64,16 @@ def issue_challenge(domain: str) -> str:
 # session minting + login
 
 def _user_infos_for_session(username: str) -> dict:
-    from .utils.ldap import _get_ldap_interface
+    from .nostrhost.accounts import user_get, user_mail
 
-    result = _get_ldap_interface().search("ou=users", f"uid={username}", ["cn", "mail"])
-    if not result:
+    record = user_get(username)
+    mails = user_mail(username)
+    if record is None or not mails:
         raise LoginError("no such user")
-    return {"cn": result[0]["cn"][0], "mail": result[0]["mail"][0]}
+    return {
+        "cn": str(record.get("fullname", username)),
+        "mail": mails[0],
+    }
 
 
 def create_portal_session(username: str, *, domain: str | None = None) -> None:

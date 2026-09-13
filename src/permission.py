@@ -19,16 +19,13 @@
 #
 
 import copy
-import grp
 import os
-import random
 import re
 from logging import getLogger
 from typing import (
     TYPE_CHECKING,
     BinaryIO,
     Literal,
-    Mapping,
     NotRequired,
     TypedDict,
     cast,
@@ -615,108 +612,28 @@ def permission_delete(
 
 def _sync_permissions_with_ldap() -> None:
     """
-    Sychronize the 'memberUid' / 'inheritPermission' attributes in the ldap permission object
-    according to the group members and permission "allowed" info from app settings (from user_permission_list)
+    Regenerate the native permission projection (roadmap §25).
+
+    Historically this wrote ``memberUid``/``inheritPermission`` into LDAP's
+    ``ou=permission`` objects so libnss-ldapd/libpam-ldapd could resolve
+    permission membership for the authd. With LDAP retired, the projection
+    the Caddy authd reads is ``/etc/nostrhost/permissions.json``, which is
+    derived from the same ``user_permission_list()`` data. This function
+    regenerates that projection after any membership change.
     """
 
     _garbarge_collect_permissions_for_nonexistent_users()
 
-    from .utils.ldap import _get_ldap_interface
+    try:
+        from .nostrhost.permissions import write_permissions_projection
 
-    ldap = _get_ldap_interface()
+        write_permissions_projection()
+    except Exception as e:  # noqa: BLE001 - projection regen is best-effort
+        logger.warning(f"failed to regenerate native permission projection: {e}")
 
-    permissions_wanted = {
-        perm: set(infos["corresponding_users"])
-        for perm, infos in user_permission_list(full=True)["permissions"].items()
-    }
-    permissions_current = {
-        entry["cn"][0]: set(entry.get("memberUid", []))
-        for entry in ldap.search(
-            "ou=permission", "(objectclass=permissionYnh)", ["cn", "memberUid"]
-        )
-    }
+    logger.debug("Permissions were resynchronized to the native projection")
 
-    # Compute the todolist by comparing the current state vs. the wanted state for each perm
-    todos_create: dict[str, set[str]] = {}
-    todos_delete: list[str] = []
-    todos_update: dict[str, set[str]] = {}
-
-    for perm in permissions_current.keys():
-        if perm not in permissions_wanted:
-            todos_delete.append(perm)
-    for perm, members_wanted in permissions_wanted.items():
-        if perm not in permissions_current:
-            todos_create[perm] = members_wanted
-        elif members_wanted != permissions_current[perm]:
-            todos_update[perm] = members_wanted
-
-    # Actually perform the delete / create / update operations
-
-    for perm in todos_delete:
-        logger.debug(f"Removing LDAP perm {perm}")
-        try:
-            ldap.remove(f"cn={perm},ou=permission")
-        except Exception as e:
-            raise YunohostError("permission_deletion_failed", permission=perm, error=e)
-
-    all_gids = {str(x.gr_gid) for x in grp.getgrall()}
-    for perm in todos_create:
-        logger.debug(f"Creating LDAP perm {perm}")
-        app = perm.split(".")[0]
-        if app in SYSTEM_PERMS:
-            gid = str(SYSTEM_PERMS[app]["gid"])
-        else:
-            while True:
-                gid = str(random.randint(200, 99999))
-                if gid not in all_gids:
-                    break
-
-        # Save the gid to the list of existing gid, to avoid picking the same gid twice in the unlikely case where we would be creating several perm at the same time
-        all_gids.add(gid)
-
-        attr_dict: Mapping[str, str | list[str]] = {
-            "objectClass": ["top", "permissionYnh", "posixGroup"],
-            "cn": perm,
-            "gidNumber": gid,
-            # NB: the "inheritPermission" and "memberUid" info is redundant
-            # but is needed because "memberUid" corresponds to the posixGroup object
-            # whereas inheritPermission automatically creates the symetric link
-            # from user to perm (cf the "permission" key on users)
-            # (cf the olcOverlay={2}memberof )
-            "inheritPermission": list(
-                sorted(
-                    f"uid={u},ou=users,dc=yunohost,dc=org"
-                    for u in permissions_wanted[perm]
-                )
-            ),
-            "memberUid": list(sorted(permissions_wanted[perm])),
-        }
-        try:
-            ldap.add(f"cn={perm},ou=permission", attr_dict)
-        except Exception as e:
-            raise YunohostError("permission_creation_failed", permission=perm, error=e)
-    for perm in todos_update:
-        logger.debug(f"Updating LDAP perm {perm}")
-        try:
-            # Same note about redundant memberUid vs inheritPermission as before
-            ldap.update(
-                f"cn={perm},ou=permission",
-                {
-                    "inheritPermission": list(
-                        sorted(
-                            f"uid={u},ou=users,dc=yunohost,dc=org"
-                            for u in permissions_wanted[perm]
-                        )
-                    ),
-                    "memberUid": list(sorted(permissions_wanted[perm])),
-                },
-            )
-        except Exception as e:
-            raise YunohostError("permission_update_failed", permission=perm, error=e)
-
-    logger.debug("Permissions were resynchronized to LDAP")
-
-    # Reload/invalidate unscd cache to full propagate the changes
+    # Reload/invalidate unscd cache to fully propagate the changes
     os.system("nscd --invalidate=passwd")
     os.system("nscd --invalidate=group")
 
