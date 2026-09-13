@@ -40,6 +40,20 @@ def _e_tag(event: dict[str, Any]) -> str | None:
     return None
 
 
+def _d_tag(event: dict[str, Any]) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == "d" and len(tag) > 1:
+            return tag[1]
+    return None
+
+
+def _tag_value(event: dict[str, Any], name: str) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == name and len(tag) > 1:
+            return str(tag[1])
+    return None
+
+
 def stream_operation_events(
     request_id: str,
     *,

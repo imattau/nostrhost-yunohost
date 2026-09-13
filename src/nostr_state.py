@@ -1295,13 +1295,3 @@ def default_repo() -> StateRepo:
     _require_bootstrapped()
     cfg = _operator_config()
     return StateRepo(state_dir_from_env(), cfg.server_pubkey)
-
-
-def default_recorder(repo: StateRepo | None = None) -> StateRecorder:
-    """The production recorder: semantic snapshots plus, when a restic config
-    exists, an automatic data snapshot before data-affecting operations. A
-    missing/empty restic config degrades to a config-only recorder (the hook
-    returns ""), so backups are additive, never a hard dependency."""
-    from .nostr_restic import restic_snapshot_hook
-
-    return StateRecorder(repo or default_repo(), restic_hook=restic_snapshot_hook())

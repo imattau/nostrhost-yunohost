@@ -1506,22 +1506,6 @@ def user_group_remove(
     )
 
 
-def user_group_add_mailalias(
-    groupname: str, aliases: list[str], force: bool = False
-) -> dict[str, Any] | None:
-    return user_group_update(
-        groupname, add_mailalias=aliases, force=force, sync_perm=False
-    )
-
-
-def user_group_remove_mailalias(
-    groupname: str, aliases: list[str], force: bool = False
-) -> dict[str, Any] | None:
-    return user_group_update(
-        groupname, remove_mailalias=aliases, force=force, sync_perm=False
-    )
-
-
 #
 # Permission subcategory
 #
@@ -1621,12 +1605,6 @@ def user_permission_info(permission: str) -> "PermInfos":
     from .permission import user_permission_info
 
     return user_permission_info(permission)
-
-
-def user_permission_ldapsync() -> None:
-    from .permission import _sync_permissions_with_ldap
-
-    _sync_permissions_with_ldap()
 
 
 #

@@ -34,9 +34,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from .nostr_restic import ResticClient, ResticError
+from .nostr_restic import ResticClient
 from .nostr_state import StateRepo
 
 ROLLBACK_SCHEMA = 1

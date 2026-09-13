@@ -13,14 +13,13 @@ from collections.abc import Iterator
 from typing import Any, Callable
 
 from .nostr_operations import (
+    KIND_EXECUTION_PROGRESS,
+    KIND_EXECUTION_RESULT,
     approve_operation_nip46,
     build_operation_request,
     known_tools,
     tool_spec,
 )
-
-KIND_EXECUTION_RESULT = 2204
-KIND_EXECUTION_PROGRESS = 2205
 
 
 class MCPAdapterError(ValueError):

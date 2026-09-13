@@ -29,6 +29,8 @@ import os
 import re
 import time
 
+from .nostr_identity import _is_hex64
+
 logger = logging.getLogger("nostrhost-login")
 
 LOGIN_ACTION = "yunohost-login"
@@ -142,10 +144,6 @@ def _notice_signer() -> tuple[str, str] | None:
         return None
     pk = Keys.parse(sk).public_key().to_hex()
     return sk, pk
-
-
-def _is_hex64(s: str) -> bool:
-    return len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s)
 
 
 def _publish_login_notice(pubkey: str, username: str) -> None:

@@ -1005,11 +1005,6 @@ def _get_description_from_name(name):
         return name
 
 
-@is_unit_operation(flash=True)
-def log_share(path):
-    return log_show(path, share=True)
-
-
 def _guess_who_started_process(process: psutil.Process) -> str:
     if "SUDO_USER" in process.environ():
         return process.environ()["SUDO_USER"]

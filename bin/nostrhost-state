@@ -229,7 +229,7 @@ def cmd_reconcile(args) -> int:
 
 
 def cmd_rollback_plan(args) -> int:
-    from yunohost.nostr_rollback import RollbackError, build_rollback_plan, render_plan, write_plan
+    from yunohost.nostr_rollback import RollbackError, build_rollback_plan, render_plan
 
     repo = default_repo()
     try:

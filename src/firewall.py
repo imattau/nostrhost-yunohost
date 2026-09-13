@@ -30,7 +30,7 @@ import yaml
 from nostrhost.i18n import tr
 
 from .regenconf import regen_conf
-from .utils.error import YunohostError, YunohostValidationError
+from .utils.error import YunohostError
 
 logger: Any = getLogger("yunohost.firewall")
 
@@ -567,53 +567,6 @@ def firewall_reload(skip_upnp: bool = False) -> None:
         logger.success(tr("firewall_reloaded"))
     else:
         logger.error(tr("firewall_reload_failed"))
-
-
-def firewall_upnp(action: str = "status", no_refresh: bool = False) -> dict[str, bool]:
-    """
-    Manage port forwarding using UPnP
-
-    Available actions are status, enable, disable.
-    All actions will refresh port forwarding unless 'no_refresh' is False.
-
-    Keyword argument:
-        action -- Action to perform
-        no_refresh -- Do not refresh port forwarding
-    """
-    if action not in ["status", "enable", "disable"]:
-        raise YunohostValidationError("action_invalid", action=action)
-
-    firewall = YunoFirewall()
-    upnp = YunoUPnP(firewall)
-
-    if action == "enable":
-        upnp.enable()
-    if action == "disable":
-        upnp.disable()
-        no_refresh = True
-    if no_refresh:
-        # Only return current state
-        return {"enabled": upnp.enabled()}
-
-    if upnp.refresh(firewall):
-        # Display success message if needed
-        logger.success(
-            tr("upnp_enabled") if upnp.enabled() else tr("upnp_disabled")
-        )
-    else:
-        # FIXME: Do not update the config file to let a refresh handle the failure?
-        raise YunohostError("upnp_port_open_failed")
-
-    return {"enabled": upnp.enabled()}
-
-
-def firewall_stop() -> None:
-    """
-    Stop nftables
-    """
-    if os.system("nft list ruleset") != 0:
-        raise YunohostError("nftables_unavailable")
-    YunoFirewall().clear()
 
 
 def _get_ssh_port(default: int = 22) -> int:

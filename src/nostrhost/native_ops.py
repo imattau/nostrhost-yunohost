@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from yunohost.nostr_operations import (
     OperationError,
@@ -57,11 +57,8 @@ from yunohost.nostr_operations import (
     SCOPE_SERVICES_READ,
     KIND_CAPABILITY,
     ToolSpec,
+    _Strict,
 )
-
-
-class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 class SystemStatusArgs(_Strict):

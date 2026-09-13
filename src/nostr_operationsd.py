@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from .nostr_identity import (
     _init_headless_yunohost,
+    _is_hex64,
     _operator_config,
     _require_bootstrapped,
     _sign_auth_event,
@@ -60,6 +61,7 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
+from .nostrhost.events import _d_tag, _e_tag, _tag_value
 
 logger = logging.getLogger("nostr-operationsd")
 
@@ -460,31 +462,6 @@ class OperationEngine:
     def state(self, request_id: str) -> OpState | None:
         rec = self.records.get(request_id)
         return rec.state if rec else None
-
-
-def _d_tag(event: dict[str, Any]) -> str | None:
-    for tag in event.get("tags") or []:
-        if tag and tag[0] == "d" and len(tag) > 1:
-            return tag[1]
-    return None
-
-
-def _e_tag(event: dict[str, Any]) -> str | None:
-    for tag in event.get("tags") or []:
-        if tag and tag[0] == "e" and len(tag) > 1:
-            return tag[1]
-    return None
-
-
-def _tag_value(event: dict[str, Any], name: str) -> str | None:
-    for tag in event.get("tags") or []:
-        if tag and tag[0] == name and len(tag) > 1:
-            return str(tag[1])
-    return None
-
-
-def _is_hex64(s: str) -> bool:
-    return len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s)
 
 
 def _verify_delegation_event(event: dict[str, Any], *, revocation: bool = False) -> None:

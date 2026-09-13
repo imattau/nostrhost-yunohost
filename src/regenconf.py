@@ -34,7 +34,6 @@ from .hook import hook_callback, hook_list
 from .log import is_unit_operation
 from .utils.error import YunohostError
 from .utils.file_utils import mkdir
-from .utils.process import check_output
 
 BASE_CONF_PATH = "/var/cache/yunohost/regenconf"
 BACKUP_CONF_DIR = os.path.join(BASE_CONF_PATH, "backup")
@@ -731,26 +730,3 @@ def manually_modified_files():
                 output.append(path)
 
     return output
-
-
-def manually_modified_files_compared_to_debian_default(
-    ignore_handled_by_regenconf=False,
-):
-    # from https://serverfault.com/a/90401
-    files = check_output(
-        "dpkg-query -W -f='${Conffiles}\n' '*' \
-                        | awk 'OFS=\"  \"{print $2,$1}' \
-                        | md5sum -c 2>/dev/null \
-                        | awk -F': ' '$2 !~ /OK/{print $1}'"
-    )
-    files = files.strip().split("\n")
-
-    if ignore_handled_by_regenconf:
-        regenconf_categories = _get_regenconf_infos()
-        regenconf_files = []
-        for infos in regenconf_categories.values():
-            regenconf_files.extend(infos["conffiles"].keys())
-
-        files = [f for f in files if f not in regenconf_files]
-
-    return files

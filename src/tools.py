@@ -87,20 +87,6 @@ def tools_rootpw(new_password: str, check_strength: bool = True) -> None:
         logger.warning(tr("root_password_desynchronized"))
 
 
-def tools_maindomain(new_main_domain: str | None = None) -> dict[str, str] | None:
-    from .domain import domain_main_domain
-
-    logger.warning(
-        tr(
-            "deprecated_command_alias",
-            prog="yunohost",
-            old="tools maindomain",
-            new="domain main-domain",
-        )
-    )
-    return domain_main_domain(new_main_domain=new_main_domain)
-
-
 def _set_hostname(hostname: str, pretty_hostname: str | None = None) -> None:
     """
     Change the machine hostname using hostnamectl
@@ -699,65 +685,6 @@ def tools_reboot(operation_logger: OperationLogger, force: bool = False) -> None
         subprocess.check_call(["systemctl", "reboot"])
 
 
-def tools_shell(command: str | None = None) -> None:
-    """
-    Launch an (i)python shell in the YunoHost context.
-
-    This is entirely aim for development.
-    """
-
-    from .utils.ldap import _get_ldap_interface
-
-    ldap = _get_ldap_interface()
-
-    if command:
-        exec(command)
-        return
-
-    logger.warning("The \033[1;34mldap\033[0m interface is available in this context")
-    try:
-        from IPython import embed
-
-        embed()
-    except (ImportError, ModuleNotFoundError):
-        logger.warning(
-            "You don't have IPython installed, consider installing it as it is way better than the standard shell."
-        )
-        logger.warning("Falling back on the standard shell.")
-
-        import readline  # will allow Up/Down/History in the console
-
-        readline  # to please pyflakes
-        import code
-
-        vars = globals().copy()
-        vars.update(locals())
-        shell = code.InteractiveConsole(vars)
-        shell.interact()
-
-
-def tools_basic_space_cleanup() -> None:
-    """
-    Basic space cleanup.
-
-    apt autoremove
-    apt autoclean
-    journalctl vacuum (leaves 50M of logs)
-    archived logs removal
-    yunohost logs removal
-    """
-    subprocess.run("apt autoremove && apt autoclean", shell=True)
-    subprocess.run("journalctl --vacuum-size=50M", shell=True)
-    subprocess.run("rm /var/log/*.gz", shell=True)
-    subprocess.run("rm /var/log/*/*.gz", shell=True)
-    subprocess.run("rm /var/log/*.?", shell=True)
-    subprocess.run("rm /var/log/*/*.?", shell=True)
-    subprocess.run(
-        "find /var/log/yunohost/operations/ -type f,l -mtime +90 -execdir rm {} +",
-        shell=True,
-    )
-
-
 # ############################################ #
 #                                              #
 #            Migrations management             #
@@ -994,30 +921,6 @@ def _get_migrations_list() -> list["Migration"]:
         migrations.append(m)
 
     return sorted(migrations, key=lambda m: m.id)
-
-
-def _get_migration_by_name(migration_name):
-    """
-    Low-level / "private" function to find a migration by its name
-    """
-
-    try:
-        from . import migrations
-    except ImportError:
-        raise AssertionError(f"Unable to find migration with name {migration_name}")
-
-    migrations_path = migrations.__path__[0]
-    migrations_found = [
-        x
-        for x in os.listdir(migrations_path)
-        if re.match(r"^\d+_%s\.py$" % migration_name, x)
-    ]
-
-    assert len(migrations_found) == 1, (
-        f"Unable to find migration with name {migration_name}"
-    )
-
-    return _load_migration(migrations_found[0])
 
 
 def _load_migration(migration_file: str) -> "Migration":
