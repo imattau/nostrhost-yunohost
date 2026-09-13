@@ -1,3 +1,19 @@
+yunohost (12.1.41.40) stable; urgency=low
+
+  * nostrhost: operation executor + catalogue publish fixes.
+    - catalog.publish passes --relay before the publish subcommand (Go
+      flag.Parse stops at the first non-flag token), so publishes no longer
+      fail with "publish requires --relay URL".
+    - require websockets>=14.2: the 13.x sync client races receive_eof() in
+      close_socket() without the protocol mutex, crashing the operationsd
+      recv_events thread with AssertionError when a relay connection drops
+      abruptly.
+    - add kind-2205 (execution.progress) to the relay allowlist so progress
+      publishes are acknowledged (allowlist mode silently drops disallowed
+      kinds, stalling every op on the unacknowledged publish).
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 23:03:00 +0000 
+
 yunohost (12.1.41.39) stable; urgency=low
 
   * nostrhost: native API contract fixes for the admin console.
