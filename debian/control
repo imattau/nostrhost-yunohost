@@ -32,14 +32,14 @@ Depends: python3-all (>= 3.11),
  , xz-utils, zstd
 Recommends: yunohost-admin (>= 12.1), yunohost-portal (>= 12.1)
  , ntp, inetutils-ping | iputils-ping
-, bash-completion, rsyslog
+ , bash-completion, rsyslog
   , unattended-upgrades
 Conflicts: iptables-persistent
  , apache2
  , bind9
  , openresolv
  , systemd-resolved
-, openssl (>= 3.1)
+ , openssl (>= 3.1)
   , dovecot-core (>= 1:2.4)
  , nftables (>= 1.1)
  , yunohost (<< 12.1.41.28)
