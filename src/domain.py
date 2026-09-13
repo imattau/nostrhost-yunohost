@@ -320,7 +320,6 @@ def domain_add(
         ignore_dyndns -- If we want to just add the DynDNS domain to the list, without subscribing
         install_letsencrypt_cert -- If adding a subdomain of an already added domain, try to install a Let's Encrypt certificate
     """
-    from .app import app_ssowatconf
     from .certificate import (
         _certificate_install_letsencrypt,
         _certificate_install_selfsigned,
@@ -477,7 +476,7 @@ def domain_remove(
     """
     import glob
 
-    from .app import app_remove, app_ssowatconf
+    from .app import app_remove
     from .hook import hook_callback
     from .utils.app_utils import _get_app_label, _get_app_settings, _installed_apps
     from .utils.dns import is_yunohost_dyndns_domain
