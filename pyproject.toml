@@ -70,7 +70,7 @@ follow_imports = "skip"
 exclude = [
     "acme_tiny",
     "migrations",
-    "tests"
+    "tests",
 ]
 
 [[tool.mypy.overrides]]
@@ -104,7 +104,7 @@ environment.root = ["."]
 # for --cov-config see https://github.com/nedbat/coveragepy/issues/512
 addopts = "-v --cov-config=pyproject.toml"
 norecursedirs = ["dist", "doc", "build", ".tox", ".eggs"]
-testpaths = ["tests/"]
+testpaths = ["tests_nostr/"]
 markers = [
     "with_system_archive_from_3p8",
     "with_backup_recommended_app_installed",
@@ -164,8 +164,8 @@ commands = [["mypy", "--install-types", "--non-interactive", "src/",]]
 
 [tool.tox.env.py311-black-check]
 deps = ["flake8"]
-commands = [["black", "bin", "src", "doc", "maintenance", "tests", "--check", "--diff"]]
+commands = [["black", "bin", "src", "doc", "maintenance", "tests", "tests_nostr", "--check", "--diff"]]
 
 [tool.tox.env.py311-black-run]
 deps = ["black"]
-commands = [["black", "bin", "src", "doc", "maintenance", "tests"]]
+commands = [["black", "bin", "src", "doc", "maintenance", "tests", "tests_nostr"]]
