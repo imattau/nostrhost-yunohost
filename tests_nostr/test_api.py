@@ -371,6 +371,71 @@ def test_post_app_remove_purge(app, monkeypatch):
     assert captured == {"app": "immich", "purge": True}
 
 
+def test_user_list(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.list", lambda **k: {"users": {"alice": {}}})
+    status, _, body = wsgi_request(app, "GET", "/package/user/list")
+    assert status == "200"
+    assert json.loads(body) == {"users": {"alice": {}}}
+
+
+def test_user_create(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"username": kwargs["username"], "domain": kwargs["domain"], "admin": kwargs["admin"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.create", fake)
+    status, _, body = wsgi_request(
+        app,
+        "POST",
+        "/package/user/create",
+        {
+            "username": "alice",
+            "domain": "example.com",
+            "password": "hunter2",
+            "fullname": "Alice Example",
+        },
+    )
+    assert status == "200"
+    assert captured == {
+        "username": "alice",
+        "domain": "example.com",
+        "password": "hunter2",
+        "fullname": "Alice Example",
+        "mailbox_quota": "0",
+        "admin": False,
+    }
+
+
+def test_user_update(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"username": kwargs["username"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.update", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/user/update", {"username": "alice", "fullname": "Alice B"})
+    assert status == "200"
+    assert captured["username"] == "alice"
+    assert captured["fullname"] == "Alice B"
+    assert captured["mail"] is None
+
+
+def test_user_delete(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"username": kwargs["username"], "purge": kwargs["purge"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "user.delete", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/user/delete", {"username": "alice", "purge": True})
+    assert status == "200"
+    assert captured == {"username": "alice", "purge": True, "force": False}
+
+
 def test_identity_list_username(app, monkeypatch):
     captured = {}
 
