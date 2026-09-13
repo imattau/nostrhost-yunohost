@@ -339,6 +339,40 @@ def build_app(
     def system_version() -> Any:
         return _run_tool("system.version", {})
 
+    @app.get("/package/system/updates")
+    def system_updates() -> Any:
+        """Cached apt/app updates + pending-migrations flag (no network refresh)."""
+        return _run_tool("updates.check", {})
+
+    @app.post("/package/system/updates/refresh")
+    def system_updates_refresh() -> Any:
+        body = _json_body()
+        return _run_tool("updates.refresh", {"target": body.get("target", "apps")})
+
+    @app.post("/package/system/updates/apply")
+    def system_updates_apply() -> Any:
+        """Apply pending apt/app upgrades. High-risk/require-approval: routed
+        through the signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("system.upgrade", {"target": body.get("target", "system")}, state=_State())
+
+    @app.get("/package/system/migrations")
+    def system_migrations() -> Any:
+        return _run_tool(
+            "system.migrations",
+            {
+                "pending": request.query.get("pending", "").lower() == "true",
+                "done": request.query.get("done", "").lower() == "true",
+            },
+        )
+
+    @app.post("/package/system/migrate")
+    def system_migrate() -> Any:
+        """Run/skip/force-rerun migrations. High-risk/irreversible: routed
+        through the signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("system.migrate", body, state=_State())
+
     # -- service ------------------------------------------------------------
 
     @app.get("/package/service/status")
