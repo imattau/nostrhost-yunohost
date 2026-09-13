@@ -373,6 +373,138 @@ def build_app(
         body = _json_body()
         return _run_lifecycle("system.migrate", body, state=_State())
 
+    # -- domain / dns ---------------------------------------------------------
+
+    @app.get("/package/domain/list")
+    def domain_list() -> Any:
+        return _run_tool("domain.list", {})
+
+    @app.get("/package/domain/<domain>/inspect")
+    def domain_inspect(domain: str) -> Any:
+        """Intent, desired/actual DNS, diff, and routes for a native domain."""
+        return _run_tool("domain.inspect", {"domain": domain})
+
+    @app.post("/package/domain/add")
+    def domain_add() -> Any:
+        """Register a native domain: plan DNS, apply, stand up Caddy routes,
+        record state. High-risk: routed through the signed operation chain
+        (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "domain.add",
+            {
+                "domain": body.get("domain", ""),
+                "provider_type": body.get("provider_type", "manual"),
+                "provider_zone": body.get("provider_zone"),
+                "credential": body.get("credential"),
+                "primary": bool(body.get("primary", False)),
+                "ipv4": bool(body.get("ipv4", True)),
+                "ipv6": bool(body.get("ipv6", True)),
+                "wildcard": bool(body.get("wildcard", True)),
+                "nip05": bool(body.get("nip05", False)),
+                "tls_caa": body.get("tls_caa"),
+                "apply_dns": bool(body.get("apply_dns", True)),
+                "verify": bool(body.get("verify", True)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/domain/remove")
+    def domain_remove() -> Any:
+        """Remove a native domain (blocks while apps use it; deletes owned
+        DNS only). High-risk: routed through the signed operation chain."""
+        body = _json_body()
+        return _run_lifecycle(
+            "domain.remove",
+            {"domain": body.get("domain", ""), "force": bool(body.get("force", False))},
+            state=_State(),
+        )
+
+    @app.get("/package/dns/plan/<domain>")
+    def dns_plan(domain: str) -> Any:
+        """Desired-vs-actual DNS plan for a domain (no changes)."""
+        return _run_tool("dns.plan", {"domain": domain})
+
+    @app.post("/package/dns/apply")
+    def dns_apply() -> Any:
+        """Apply the DNS plan for a domain through its provider. High-risk:
+        routed through the signed operation chain (owner co-signature)."""
+        body = _json_body()
+        return _run_lifecycle("dns.apply", {"domain": body.get("domain", "")}, state=_State())
+
+    @app.get("/package/dns/verify/<domain>")
+    def dns_verify(domain: str) -> Any:
+        return _run_tool("dns.verify", {"domain": domain})
+
+    @app.get("/package/dns/watch")
+    def dns_watch() -> Any:
+        """DDNS watcher status: last-seen public IPs and dynamic-IP domains."""
+        return _run_tool("dns.watch", {})
+
+    @app.post("/package/dns/subscribe")
+    def dns_subscribe() -> Any:
+        """Claim a nostr-native free hostname (identity-backed Dynette).
+        High-risk: routed through the signed operation chain (owner
+        co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "dns.subscribe",
+            {
+                "hostname": body.get("hostname", ""),
+                "secret": body.get("secret"),
+                "rotate": bool(body.get("rotate", False)),
+            },
+            state=_State(),
+        )
+
+    @app.get("/package/dns/subscriptions")
+    def dns_subscriptions() -> Any:
+        return _run_tool("dns.subscriptions", {})
+
+    @app.post("/package/dns/unsubscribe")
+    def dns_unsubscribe() -> Any:
+        """Release a nostr-native free-hostname subscription and drop its
+        broker secret. High-risk: routed through the signed operation chain."""
+        body = _json_body()
+        return _run_lifecycle("dns.unsubscribe", {"hostname": body.get("hostname", "")}, state=_State())
+
+    # -- network / dns credentials --------------------------------------------
+
+    @app.get("/package/network/public-ip")
+    def network_public_ip() -> Any:
+        return _run_tool("network.public_ip", {})
+
+    @app.get("/package/credential/list")
+    def credential_list() -> Any:
+        """Configured DNS credential references (names only, never values)."""
+        return _run_tool("credential.list", {})
+
+    @app.post("/package/credential/set")
+    def credential_set() -> Any:
+        """Store a DNS provider token in the credential broker. High-risk:
+        routed through the signed operation chain (owner co-signature)."""
+        body = _json_body()
+        return _run_lifecycle(
+            "credential.set",
+            {
+                "provider": body.get("provider", ""),
+                "name": body.get("name", ""),
+                "value": body.get("value", ""),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/credential/remove")
+    def credential_remove() -> Any:
+        """Remove a DNS provider token from the credential broker. High-risk:
+        routed through the signed operation chain (owner co-signature)."""
+        body = _json_body()
+        return _run_lifecycle(
+            "credential.remove",
+            {"provider": body.get("provider", ""), "name": body.get("name", "")},
+            state=_State(),
+        )
+
     # -- service ------------------------------------------------------------
 
     @app.get("/package/service/status")
