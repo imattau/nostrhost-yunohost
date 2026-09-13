@@ -75,12 +75,21 @@ def test_agent_enable_validates_adds_writer_and_starts_only_on_explicit_command(
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    real_stat = type(config).stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == config:
+            return SimpleNamespace(st_mode=result.st_mode, st_uid=0)
+        return result
+
     monkeypatch.setattr(cli_module.os, "geteuid", lambda: 0)
     monkeypatch.setattr(cli_module, "AGENT_CONFIG", str(config))
     monkeypatch.setattr(cli_module, "AGENT_BINARY", str(binary))
     monkeypatch.setattr(cli_module, "RELAY_CONFIG", str(relay))
     monkeypatch.setattr(cli_module, "_pubkey", lambda _secret: "a" * 64)
     monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(type(config), "stat", fake_stat)
 
     result = cli_module._agent_service("enable")
 

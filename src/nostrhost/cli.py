@@ -576,7 +576,10 @@ def _agent_service(action: str) -> dict[str, Any]:
     if action == "enable":
         if config_path.is_symlink() or not config_path.is_file():
             raise NostrHostError("agent config is missing or is not a regular file; run `nostrhost agent init` first")
-        mode = config_path.stat().st_mode & 0o777
+        config_stat = config_path.stat()
+        mode = config_stat.st_mode & 0o777
+        if config_stat.st_uid != 0:
+            raise NostrHostError("agent config must be owned by root")
         if mode & 0o077:
             raise NostrHostError("agent config must not be accessible to group or other users")
         validator = AGENT_BINARY
