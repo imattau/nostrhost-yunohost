@@ -1,3 +1,26 @@
+yunohost (12.1.41.29) stable; urgency=low
+
+  * nostrhost: LDAP retirement §25 + Stage C ngit DR + cleanup.
+    - §25: dead moulinette LDAP-bind auth removed; NIP-51 permission-list
+      projection (`nostr_permissiond`, kind-30000 projector), CLI grant/clear
+      authoring, and a native admin check ahead of LDAP in
+      user_is_allowed_on_domain. The email-domain LDAP read, Admin (web) UI,
+      and actual LDAP cutover remain.
+    - Stage C: kind-30617 repository announcement + kind-2214 chunked,
+      gzip-compressed, server-signed git-bundle events replicate the state
+      repository outbound to control + external relays (`nostrhost-state
+      publish`; auto-publish on postinstall --new/--restore);
+      `clone_state_repository` reconstructs the repo from relays + identity
+      with no central forge.
+    - cleanup: removed dead modules (storage/disk/udisks2, portal) and
+      dead functions; consolidated duplicated nostr tag/hex helpers, kind
+      constants, and pydantic base; fixed unused imports.
+    - restored the native package-authoring CLI (schema/init/validate/plan/
+      explain) and the admin SPA route at /admin/ to match the packaging
+      contract.
+
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 10:00:00 +0000
+
 yunohost (12.1.41.28) stable; urgency=low
 
   * nostrhost: W4 Phase E — nostr-native free hostname (identity-backed Dynette).
