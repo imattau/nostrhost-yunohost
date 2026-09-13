@@ -721,7 +721,7 @@ def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> d
     cfg = _operator_config()
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
 
-    result = _catalog_cli(["publish", "--relay", relays or "ws://127.0.0.1:4848"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
     ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
     return {
         "app_id": app_id,

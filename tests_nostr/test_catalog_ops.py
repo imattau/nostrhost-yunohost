@@ -60,7 +60,7 @@ def cli_fake(monkeypatch):
 
     def fake(sub: list[str], stdin_data: bytes | None = None):
         calls.append((sub, stdin_data))
-        if sub[0] == "publish":
+        if "publish" in sub:
             assert stdin_data is not None
             return {"event_id": json.loads(stdin_data)["id"], "published": 1, "failed": 0, "relays": [{"relay": "ws://127.0.0.1:4848"}]}
         if sub[0] == "ingest":
@@ -116,7 +116,7 @@ def test_catalog_publish_signs_with_publisher_key(boot, cli_fake):
     result = no._safe_catalog_publish(app_id="nostrhost-test", relays="ws://127.0.0.1:4848")
     assert result["publisher_pubkey"] == boot["publisher_pubkey"]
 
-    pub_call = next(c for c in cli_fake if c[0][0] == "publish")
+    pub_call = next(c for c in cli_fake if "publish" in c[0])
     event = json.loads(pub_call[1])
     assert event["pubkey"] == boot["publisher_pubkey"]
     assert event["pubkey"] != boot["operator_pubkey"]
@@ -138,7 +138,9 @@ def test_catalog_publish_signs_with_publisher_key(boot, cli_fake):
 
     assert Event.from_json(json.dumps(event)).verify()
 
-    assert [c[0][0] for c in cli_fake] == ["publish", "ingest"]
+    # publish passes --relay before the subcommand (Go's flag.Parse stops at the
+    # first non-flag token, so flags must precede `publish`), then ingests back.
+    assert [c[0][0] for c in cli_fake] == ["--relay", "ingest"]
 
 
 def test_catalog_publish_unknown_app_rejected(boot, cli_fake):
