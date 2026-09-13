@@ -431,8 +431,8 @@ NOTIFY_CONFIG = os.environ.get("NOSTRHOST_NOTIFY_CONFIG", "/etc/nostrhost/notify
 CATALOGUE_ENV = os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env")
 KEYS_RECOVERY = os.environ.get("NOSTRHOST_KEYS_RECOVERY", "/etc/nostrhost/keys.recovery")
 NOTIFY_STATE_DIR = os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", "/var/lib/nostrhost/state/notifications")
-AGENT_CONFIG = os.environ.get("NOSTRHOST_AGENT_CONFIG", "/etc/nostrhost-agent/config.json")
-AGENT_STATE_DIR = os.environ.get("NOSTRHOST_AGENT_STATE_DIR", "/var/lib/nostrhost-agent")
+AGENT_CONFIG = "/etc/nostrhost-agent/config.json"
+AGENT_STATE_DIR = "/var/lib/nostrhost-agent"
 AGENT_BINARY = "/usr/bin/nostrhost-agent"
 AGENT_SERVICE = "nostrhost-agent.service"
 
