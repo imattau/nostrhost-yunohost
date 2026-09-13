@@ -432,6 +432,192 @@ def test_post_system_migrate_uses_signed_chain(app, monkeypatch):
     assert calls == [("system.migrate", body)]
 
 
+def test_get_domain_list(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "domain.list", lambda **k: {"domains": []})
+    status, _, body = wsgi_request(app, "GET", "/package/domain/list")
+    assert status == "200"
+    assert json.loads(body) == {"domains": []}
+
+
+def test_get_domain_inspect(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"domain": kwargs["domain"]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "domain.inspect", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/domain/example.com/inspect")
+    assert status == "200"
+    assert captured == {"domain": "example.com"}
+
+
+def test_post_domain_add_uses_signed_chain(app, monkeypatch):
+    """domain.add is high-risk (registers a domain + DNS + Caddy routes): it
+    must go through _run_lifecycle (signed chain + owner co-signature),
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"domain": "example.com", "provider_type": "manual"}
+    status, _, resp = wsgi_request(app, "POST", "/package/domain/add", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [
+        (
+            "domain.add",
+            {
+                "domain": "example.com",
+                "provider_type": "manual",
+                "provider_zone": None,
+                "credential": None,
+                "primary": False,
+                "ipv4": True,
+                "ipv6": True,
+                "wildcard": True,
+                "nip05": False,
+                "tls_caa": None,
+                "apply_dns": True,
+                "verify": True,
+            },
+        )
+    ]
+
+
+def test_post_domain_remove_uses_signed_chain(app, monkeypatch):
+    """domain.remove is high-risk: it must go through _run_lifecycle, never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/domain/remove", {"domain": "example.com", "force": True})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("domain.remove", {"domain": "example.com", "force": True})]
+
+
+def test_get_dns_plan(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"plan": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "dns.plan", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/dns/plan/example.com")
+    assert status == "200"
+    assert captured == {"domain": "example.com"}
+
+
+def test_post_dns_apply_uses_signed_chain(app, monkeypatch):
+    """dns.apply is high-risk (mutates DNS through the provider): it must go
+    through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/dns/apply", {"domain": "example.com"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("dns.apply", {"domain": "example.com"})]
+
+
+def test_get_dns_verify(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"verified": True}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "dns.verify", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/dns/verify/example.com")
+    assert status == "200"
+    assert captured == {"domain": "example.com"}
+
+
+def test_get_dns_watch(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "dns.watch", lambda **k: {"watchers": []})
+    status, _, body = wsgi_request(app, "GET", "/package/dns/watch")
+    assert status == "200"
+    assert json.loads(body) == {"watchers": []}
+
+
+def test_post_dns_subscribe_uses_signed_chain(app, monkeypatch):
+    """dns.subscribe claims a free hostname and provisions a broker secret:
+    high-risk, must go through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/dns/subscribe", {"hostname": "myhost"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("dns.subscribe", {"hostname": "myhost", "secret": None, "rotate": False})]
+
+
+def test_get_dns_subscriptions(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "dns.subscriptions", lambda **k: {"subscriptions": []})
+    status, _, body = wsgi_request(app, "GET", "/package/dns/subscriptions")
+    assert status == "200"
+    assert json.loads(body) == {"subscriptions": []}
+
+
+def test_post_dns_unsubscribe_uses_signed_chain(app, monkeypatch):
+    """dns.unsubscribe drops a broker secret: high-risk, must go through
+    _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/dns/unsubscribe", {"hostname": "myhost"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("dns.unsubscribe", {"hostname": "myhost"})]
+
+
+def test_get_network_public_ip(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "network.public_ip", lambda **k: {"ipv4": "203.0.113.1"})
+    status, _, body = wsgi_request(app, "GET", "/package/network/public-ip")
+    assert status == "200"
+    assert json.loads(body) == {"ipv4": "203.0.113.1"}
+
+
+def test_get_credential_list(app, monkeypatch):
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "credential.list", lambda **k: {"credentials": []})
+    status, _, body = wsgi_request(app, "GET", "/package/credential/list")
+    assert status == "200"
+    assert json.loads(body) == {"credentials": []}
+
+
+def test_post_credential_set_uses_signed_chain(app, monkeypatch):
+    """credential.set stores a DNS provider token: high-risk, must go
+    through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"provider": "cloudflare", "name": "primary", "value": "secret-token"}
+    status, _, resp = wsgi_request(app, "POST", "/package/credential/set", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("credential.set", body)]
+
+
+def test_post_credential_remove_uses_signed_chain(app, monkeypatch):
+    """credential.remove deletes a DNS provider token: high-risk, must go
+    through _run_lifecycle, never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/credential/remove", {"provider": "cloudflare", "name": "primary"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("credential.remove", {"provider": "cloudflare", "name": "primary"})]
+
+
 def test_post_service_restart(app, monkeypatch):
     captured = {}
 
