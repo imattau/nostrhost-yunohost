@@ -766,6 +766,91 @@ def test_post_diagnosis_unignore_uses_signed_chain(app, monkeypatch):
     assert calls == [("diagnosis.unignore", {"filter": ["dnsrecords", "domain=yolo.test"]})]
 
 
+def test_get_firewall_list(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"tcp": [22, 80, 443]}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "firewall.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/firewall/list")
+    assert status == "200"
+    assert captured == {"protocol": "tcp", "forwarded": False}
+    assert json.loads(body) == {"tcp": [22, 80, 443]}
+
+
+def test_get_firewall_list_udp_forwarded(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"udp": []}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "firewall.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/firewall/list?protocol=udp&forwarded=true")
+    assert status == "200"
+    assert captured == {"protocol": "udp", "forwarded": True}
+
+
+def test_post_firewall_open_uses_signed_chain(app, monkeypatch):
+    """firewall.open is high-risk: it must go through _run_lifecycle, never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"port": "8080", "protocol": "tcp", "comment": "custom app", "upnp": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/firewall/open", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [
+        ("firewall.open", {"port": "8080", "protocol": "tcp", "comment": "custom app", "upnp": True})
+    ]
+
+
+def test_post_firewall_open_defaults_comment(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/firewall/open", {"port": "8080", "protocol": "tcp"})
+    assert status == "200"
+    assert calls == [
+        (
+            "firewall.open",
+            {"port": "8080", "protocol": "tcp", "comment": "opened via native operation", "upnp": False},
+        )
+    ]
+
+
+def test_post_firewall_close_uses_signed_chain(app, monkeypatch):
+    """firewall.close is high-risk: it must go through _run_lifecycle, never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"port": "8080", "protocol": "tcp", "upnp_only": True}
+    status, _, resp = wsgi_request(app, "POST", "/package/firewall/close", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("firewall.close", {"port": "8080", "protocol": "tcp", "upnp_only": True})]
+
+
+def test_post_firewall_reload_uses_signed_chain(app, monkeypatch):
+    """firewall.reload is high-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/firewall/reload", {"skip_upnp": True})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("firewall.reload", {"skip_upnp": True})]
+
+
 def test_post_service_restart(app, monkeypatch):
     captured = {}
 

@@ -587,6 +587,52 @@ def build_app(
         body = _json_body()
         return _run_lifecycle("diagnosis.unignore", {"filter": body.get("filter", [])}, state=_State())
 
+    # -- firewall ---------------------------------------------------------------
+
+    @app.get("/package/firewall/list")
+    def firewall_list() -> Any:
+        protocol = request.query.get("protocol", "tcp")
+        forwarded = request.query.get("forwarded", "").lower() == "true"
+        return _run_tool("firewall.list", {"protocol": protocol, "forwarded": forwarded})
+
+    @app.post("/package/firewall/open")
+    def firewall_open() -> Any:
+        """Open a firewall port. High-risk: routed through the signed
+        operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "firewall.open",
+            {
+                "port": body.get("port", ""),
+                "protocol": body.get("protocol", ""),
+                "comment": body.get("comment", "opened via native operation"),
+                "upnp": bool(body.get("upnp", False)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/firewall/close")
+    def firewall_close() -> Any:
+        """Close a firewall port. High-risk: routed through the signed
+        operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle(
+            "firewall.close",
+            {
+                "port": body.get("port", ""),
+                "protocol": body.get("protocol", ""),
+                "upnp_only": bool(body.get("upnp_only", False)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/firewall/reload")
+    def firewall_reload() -> Any:
+        """Re-apply the current firewall rule set. High-risk: routed through
+        the signed operation chain (owner co-signature), not _run_tool."""
+        body = _json_body()
+        return _run_lifecycle("firewall.reload", {"skip_upnp": bool(body.get("skip_upnp", False))}, state=_State())
+
     # -- service ------------------------------------------------------------
 
     @app.get("/package/service/status")
