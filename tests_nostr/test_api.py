@@ -1211,6 +1211,100 @@ def test_capability_grant(app, monkeypatch):
     assert captured["scopes"] == ["apps.read"]
 
 
+def test_post_system_reboot_uses_signed_chain(app, monkeypatch):
+    """system.reboot is high-risk: it must go through _run_lifecycle, never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/system/reboot", {})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("system.reboot", {})]
+
+
+def test_post_system_shutdown_uses_signed_chain(app, monkeypatch):
+    """system.shutdown is high-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/system/shutdown", {})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("system.shutdown", {})]
+
+
+def test_get_settings_list(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"settings": {"ssowat.panel_overlay.enabled": True}}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "settings.list", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/settings/list?full=true")
+    assert status == "200"
+    assert captured == {"full": True}
+    assert json.loads(body) == {"settings": {"ssowat.panel_overlay.enabled": True}}
+
+
+def test_get_settings_get(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"key": "ssowat.panel_overlay.enabled", "value": True}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "settings.get", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/settings/get/ssowat.panel_overlay.enabled")
+    assert status == "200"
+    assert captured == {"key": "ssowat.panel_overlay.enabled"}
+    assert json.loads(body) == {"key": "ssowat.panel_overlay.enabled", "value": True}
+
+
+def test_post_settings_set_uses_signed_chain(app, monkeypatch):
+    """settings.set is medium-risk: it must go through _run_lifecycle, never
+    _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"key": "ssowat.panel_overlay.enabled", "value": False}
+    status, _, resp = wsgi_request(app, "POST", "/package/settings/set", body)
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("settings.set", {"key": "ssowat.panel_overlay.enabled", "value": False})]
+
+
+def test_post_settings_reset_uses_signed_chain(app, monkeypatch):
+    """settings.reset is medium-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/settings/reset", {"key": "ssowat.panel_overlay.enabled"})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("settings.reset", {"key": "ssowat.panel_overlay.enabled"})]
+
+
+def test_post_settings_reset_all_uses_signed_chain(app, monkeypatch):
+    """settings.reset_all is high-risk: it must go through _run_lifecycle,
+    never _run_tool."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    status, _, resp = wsgi_request(app, "POST", "/package/settings/reset_all", {})
+    assert status == "200"
+    assert json.loads(resp)["request_id"] == "r" * 64
+    assert calls == [("settings.reset_all", {})]
+
+
 def test_handler_error_maps_to_400(app, monkeypatch):
     def boom(**kwargs):
         raise ApiError(400, "operation_failed", "boom")

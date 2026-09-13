@@ -176,6 +176,13 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "user.permission.update": native_ops._safe_user_permission_update,
     "audit.list": native_ops._safe_audit_list,
     "audit.get": native_ops._safe_audit_get,
+    "system.reboot": native_ops._safe_system_reboot,
+    "system.shutdown": native_ops._safe_system_shutdown,
+    "settings.list": native_ops._safe_settings_list,
+    "settings.get": native_ops._safe_settings_get,
+    "settings.set": native_ops._safe_settings_set,
+    "settings.reset": native_ops._safe_settings_reset,
+    "settings.reset_all": native_ops._safe_settings_reset_all,
 }
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")

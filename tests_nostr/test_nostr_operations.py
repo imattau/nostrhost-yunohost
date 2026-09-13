@@ -102,9 +102,16 @@ def test_registry_has_the_safe_tools():
         "service.history",
         "service.restart",
         "service.status",
+        "settings.get",
+        "settings.list",
+        "settings.reset",
+        "settings.reset_all",
+        "settings.set",
         "state.reconcile",
         "system.migrate",
         "system.migrations",
+        "system.reboot",
+        "system.shutdown",
         "system.status",
         "system.upgrade",
         "system.version",
@@ -177,6 +184,15 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("catalog.verify").require_approval is False
     assert tool_spec("audit.list").scope == "audit.read"
     assert tool_spec("audit.get").scope == "audit.read"
+    assert tool_spec("system.reboot").scope == "system.power"
+    assert tool_spec("system.shutdown").scope == "system.power"
+    assert tool_spec("settings.list").scope == "settings.read"
+    assert tool_spec("settings.list").require_approval is False
+    assert tool_spec("settings.get").scope == "settings.read"
+    assert tool_spec("settings.get").require_approval is False
+    assert tool_spec("settings.set").scope == "settings.write"
+    assert tool_spec("settings.reset").scope == "settings.write"
+    assert tool_spec("settings.reset_all").scope == "settings.write"
     for name, spec in TOOLS.items():
         assert spec.handler is not None
         if name not in (
@@ -212,6 +228,8 @@ def test_registry_has_the_safe_tools():
             "user.permission.list",
             "user.permission.info",
             "catalog.verify",
+            "settings.list",
+            "settings.get",
         ):
             assert spec.require_approval is True
     assert tool_spec("app.upgrade") is not None

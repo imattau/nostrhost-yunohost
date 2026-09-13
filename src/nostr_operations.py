@@ -108,6 +108,9 @@ SCOPE_LOGS_READ = "logs.read"
 SCOPE_BACKUPS_DELETE = "backups.delete"
 SCOPE_SYSTEM_MIGRATE = "system.migrate"
 SCOPE_AUDIT_READ = "audit.read"
+SCOPE_SYSTEM_POWER = "system.power"
+SCOPE_SETTINGS_READ = "settings.read"
+SCOPE_SETTINGS_WRITE = "settings.write"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -146,6 +149,9 @@ KNOWN_SCOPES = frozenset(
         SCOPE_BACKUPS_DELETE,
         SCOPE_SYSTEM_MIGRATE,
         SCOPE_AUDIT_READ,
+        SCOPE_SYSTEM_POWER,
+        SCOPE_SETTINGS_READ,
+        SCOPE_SETTINGS_WRITE,
     }
 )
 
