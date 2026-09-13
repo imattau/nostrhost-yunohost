@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -7,6 +9,8 @@ import pytest
 from nostrhost.nip51_permissions import (
     PERMISSION_LIST_KIND,
     PermissionStore,
+    author_permission_clear,
+    author_permission_grant,
     merge_projection,
     resolve_usernames,
 )
@@ -142,6 +146,75 @@ def test_merge_projection_sets_public_but_never_unsets_it(tmp_path):
     merge_projection(permissions, store, resolve_pubkey=lambda pk: None)
 
     assert permissions["myapp.main"]["public"] is True
+
+
+class FakeTransport:
+    def __init__(self):
+        self.sent = []
+
+    def __call__(self, relay, event):
+        self.sent.append((relay, event))
+
+
+def _new_key():
+    nostr_sdk = pytest.importorskip("nostr_sdk", reason="requires nostr-sdk (real signing round-trip)")
+    sk = os.urandom(32).hex()
+    pk = nostr_sdk.Keys.parse(sk).public_key().to_hex()
+    return sk, pk
+
+
+def test_author_permission_grant_publishes_valid_event():
+    sk, pk = _new_key()
+    _, member_pk = _new_key()
+    transport = FakeTransport()
+
+    event = author_permission_grant(
+        "myapp.main",
+        [member_pk],
+        public=True,
+        operator_sk=sk,
+        control_relay="ws://127.0.0.1:4848",
+        transport=transport,
+    )
+
+    assert transport.sent == [("ws://127.0.0.1:4848", event)]
+    assert event["kind"] == PERMISSION_LIST_KIND
+    assert event["pubkey"] == pk
+    assert ["d", "myapp.main"] in event["tags"]
+    assert ["p", member_pk] in event["tags"]
+    assert ["public", "true"] in event["tags"]
+
+    from nostr_sdk import Event as NsEvent
+
+    assert NsEvent.from_json(json.dumps(event)).verify()
+
+
+def test_author_permission_grant_replaces_prior_membership(tmp_path):
+    sk, pk = _new_key()
+    _, member_1 = _new_key()
+    _, member_2 = _new_key()
+    transport = FakeTransport()
+    store = PermissionStore(tmp_path / "grants.json")
+
+    first = author_permission_grant("myapp.main", [member_1], operator_sk=sk, control_relay="ws://r", transport=transport)
+    first["created_at"] = 100
+    store.apply_event(first, admin_pubkeys=(pk,))
+
+    second = author_permission_grant("myapp.main", [member_2], operator_sk=sk, control_relay="ws://r", transport=transport)
+    second["created_at"] = 200
+    store.apply_event(second, admin_pubkeys=(pk,))
+
+    assert store.get("myapp.main").pubkeys == (member_2,)
+
+
+def test_author_permission_clear_publishes_empty_membership():
+    sk, _ = _new_key()
+    transport = FakeTransport()
+
+    event = author_permission_clear("myapp.main", operator_sk=sk, control_relay="ws://127.0.0.1:4848", transport=transport)
+
+    assert [t for t in event["tags"] if t[0] == "p"] == []
+    assert ["public", "true"] not in event["tags"]
 
 
 def test_merge_projection_skips_permissions_not_in_ldap_projection(tmp_path):

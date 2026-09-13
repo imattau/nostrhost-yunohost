@@ -1650,6 +1650,46 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return body.get("result") or body
         _guard(run, output_as)
 
+    @user_permission.command("grant-nostr")
+    def user_permission_grant_nostr(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        pubkeys: list[str] = typer.Argument(..., help="member pubkeys/npubs (replaces the full NIP-51 membership for this permission)"),
+        public: bool = typer.Option(False, "--public", help="mark the permission visitor-accessible"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Grant NIP-51 (kind 30000) access to an app permission (roadmap §25 phase 2).
+
+        Publishes as the operator; nostr-permissiond projects it into the
+        permission map alongside (not replacing) any LDAP-granted access.
+        """
+        def run() -> Any:
+            from nostrhost.nip51_permissions import author_permission_grant
+
+            return author_permission_grant(
+                permission,
+                pubkeys,
+                public=public,
+                operator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
+    @user_permission.command("clear-nostr")
+    def user_permission_clear_nostr(
+        permission: str = typer.Argument(..., help="permission name (e.g. myapp.main)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Clear NIP-51-sourced access to a permission (LDAP-granted access, if any, is unaffected)."""
+        def run() -> Any:
+            from nostrhost.nip51_permissions import author_permission_clear
+
+            return author_permission_clear(
+                permission,
+                operator_sk=state.operator_sk,
+                control_relay=state.control_relay,
+            )
+        _guard(run, output_as)
+
     user.add_typer(user_group, name="group")
     user.add_typer(user_permission, name="permission")
 
