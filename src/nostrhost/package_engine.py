@@ -180,6 +180,7 @@ class ConfigFileResource(BaseModel):
     destination: Path
     content: str | None = None
     template: str | None = None
+    template_content: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
     mode: int = Field(0o640, ge=0, le=0o7777)
     owner: str | None = None
@@ -193,14 +194,12 @@ class ConfigFileResource(BaseModel):
 
     @root_validator
     def valid_source(cls, values: dict[str, Any]) -> dict[str, Any]:
-        content = values.get("content")
+        sources = [values.get("content"), values.get("template"), values.get("template_content")]
+        if sum(source is not None for source in sources) != 1:
+            raise ValueError("config file requires exactly one of content, template, or template_content")
         template = values.get("template")
-        if (content is None) == (template is None):
-            raise ValueError("config file requires exactly one of content or template")
         if template and (template.startswith("/") or ".." in PurePosixPath(template).parts):
             raise ValueError("config templates must be relative and cannot contain '..'")
-        if content is None and template is None:
-            raise ValueError("config file requires content or template")
         return values
 
 
@@ -394,6 +393,9 @@ class PolicyResource(BaseModel):
 
 class SettingField(BaseModel):
     type: Literal["string", "integer", "number", "boolean", "enum"]
+    label: str | None = None
+    description: str = ""
+    group: str | None = None
     default: Any = None
     choices: list[str] = Field(default_factory=list)
     secret: bool = False
@@ -609,7 +611,7 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
     # without re-fetching the catalogue. Reverse is the manifest delete.
     plan.append(_op(
         "package.manifest.ensure",
-        app,
+        f"{app}:manifest",
         {"id": app, "version": package.app.version, "manifest": json.loads(package.json(by_alias=True))},
         deps=(package_op.resource,),
         reverse="package.manifest.remove",
@@ -642,6 +644,9 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("source.fetch", f"{app}:source:{name}", {"url": selected.url, "sha256": selected.sha256, "extract": selected.extract, "destination": str(selected.destination) if selected.destination else None, "format": selected.format, "rename": selected.rename, "strip_components": selected.strip_components, "platform": selected.platform}, deps=(package_op.resource,), risk="medium", reverse="source.remove", summary=f"fetch and verify source {name}"))
     for name, config in package.config.items():
         config_args = {**config.dict(), "destination": str(config.destination)}
+        # `settings` is reserved so app values remain authoritative in config
+        # templates instead of being shadowed by arbitrary manifest context.
+        config_args["context"] = {**config.context, "settings": package.settings.values}
         if template_root is not None:
             config_args["_template_root"] = str(template_root)
         plan.append(_op("config.ensure", f"{app}:config:{name}", config_args, deps=(package_op.resource,), reverse="config.remove", summary=f"render config {config.destination}"))
@@ -707,6 +712,17 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("policy.ensure", f"{app}:policy:{name}", policy.dict(), deps=(package_op.resource,), risk="medium", reverse="policy.remove", summary=f"install {policy.type} policy {policy.name}"))
     for name, hook in package.hooks.items():
         plan.append(_op("hook.python.ensure", f"{app}:hook:{name}", {"name": f"{app}-{name}", "reference": hook.python}, deps=(package_op.resource,), risk="medium", reversible=False, summary=f"register {name} hook"))
+    # Record the installed desired state only after every resource succeeds.
+    # Otherwise a failed config render could leave state claiming the new
+    # manifest was applied and make later reconciliation skip needed work.
+    manifest_index = next(index for index, operation in enumerate(plan) if operation.name == "package.manifest.ensure")
+    manifest_operation = plan[manifest_index]
+    plan[manifest_index] = Operation(
+        **{
+            **manifest_operation.__dict__,
+            "depends_on": tuple(operation.resource for operation in plan if operation is not manifest_operation),
+        }
+    )
     return plan
 
 
@@ -859,8 +875,8 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
         return (
             actual.get("exists") is True
             and actual.get("mode") == operation.args.get("mode")
-            and operation.args.get("content") is not None
-            and actual.get("sha256") == hashlib.sha256(operation.args["content"].encode()).hexdigest()
+            and actual.get("desired_sha256") is not None
+            and actual.get("sha256") == actual.get("desired_sha256")
         )
     if operation.name == "service.ensure":
         return actual.get("exists") is True and actual.get("sha256") == actual.get("desired_sha256")

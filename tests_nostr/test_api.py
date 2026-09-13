@@ -103,6 +103,77 @@ def test_missing_auth_header_401():
     assert json.loads(body)["code"] == "authentication_required"
 
 
+def test_app_management_combines_catalogue_and_installations(monkeypatch):
+    def fake_run_tool(name, args):
+        if name == "catalog.list":
+            return {"entries": [{"declaration": {"AppID": "available", "Version": "2", "Name": "Available"}}]}
+        if name == "app.list":
+            return {"apps": {"orphan": {"version": "1", "name": {"en": "Orphan"}}}}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(api_module, "_run_tool", fake_run_tool)
+    app = build_app(authorizer=lambda: "admin")
+    status, _, body = wsgi_request(app, "GET", "/app/management")
+    assert status == "200"
+    rows = {row["id"]: row for row in json.loads(body)["apps"]}
+    assert rows["available"]["status"] == "available"
+    assert rows["orphan"]["status"] == "installed-unlisted"
+
+
+def test_native_settings_plan_and_apply_are_bound_to_reviewed_digest(monkeypatch, tmp_path):
+    manifest = {
+        "app": {"id": "example", "version": "1.0.0"},
+        "settings": {"fields": {"mode": {"type": "enum", "choices": ["safe", "fast"], "default": "safe"}}, "values": {"mode": "safe"}},
+        "config": {"main": {"destination": "/etc/example.conf", "template_content": "mode={{ settings.mode }}\n"}},
+        "service": {"name": "example", "exec": "/usr/bin/example"},
+    }
+    from nostrhost import native_providers
+
+    monkeypatch.setattr(native_providers, "installed_package_manifest", lambda app_id, state_dir=None: manifest if app_id == "example" else None)
+    app = build_app(authorizer=lambda: "admin")
+    values = {"mode": "fast"}
+    status, _, body = wsgi_request(app, "POST", "/app/example/settings/plan", {"values": values})
+    assert status == "200"
+    plan = json.loads(body)
+    lifecycle_calls = []
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle_calls.append((tool, args, state)) or {"ok": True, "request_id": "r" * 64})
+
+    status, _, stale = wsgi_request(app, "POST", "/app/example/settings/apply", {"values": values, "plan_sha256": "0" * 64})
+    assert status == "409"
+    assert json.loads(stale)["code"] == "plan_changed"
+    assert lifecycle_calls == []
+
+    status, _, result = wsgi_request(app, "POST", "/app/example/settings/apply", {"values": values, "plan_sha256": plan["plan_sha256"]})
+    assert status == "200"
+    assert json.loads(result)["operation"]["request_id"] == "r" * 64
+    assert lifecycle_calls[0][0] == "package.reconcile"
+    assert "settings_diff" not in lifecycle_calls[0][1]["plan"]
+
+
+def test_catalogue_lifecycle_apply_revalidates_plan_and_uses_signed_chain(monkeypatch):
+    plan = {
+        "schema": 1,
+        "package": {"id": "example", "version": "1.2.0"},
+        "manifest_sha256": "m" * 64,
+        "plan_sha256": "p" * 64,
+        "operations": [],
+    }
+    monkeypatch.setattr(api_module, "catalogue_lifecycle_plan", lambda app_id, action: plan)
+    calls = []
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
+    app = build_app(authorizer=lambda: "admin")
+
+    status, _, stale = wsgi_request(app, "POST", "/app/example/install/apply", {"plan_sha256": "x" * 64})
+    assert status == "409"
+    assert json.loads(stale)["code"] == "plan_changed"
+    assert calls == []
+
+    status, _, result = wsgi_request(app, "POST", "/app/example/install/apply", {"plan_sha256": plan["plan_sha256"]})
+    assert status == "200"
+    assert json.loads(result)["action"] == "install"
+    assert calls[0][0] == "package.reconcile"
+
+
 def test_malformed_auth_header_401():
     app = build_app()
     status, _, body = wsgi_request(app, "GET", "/system/version", headers={"Authorization": "Nostr !!!not-base64!!!"})

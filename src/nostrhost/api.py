@@ -23,8 +23,10 @@ from typing import Any, Callable
 
 from bottle import Bottle, HTTPResponse, request
 
-from .cli import _TOOL_HANDLERS
+from .cli import _TOOL_HANDLERS, _State, _run_lifecycle
 from .core import NostrHostError
+from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
+from .package_engine import PackageError
 from yunohost.nostr_identity import (
     IdentityError,
     _operator_config,
@@ -232,6 +234,132 @@ def build_app(
     @app.get("/app/list")
     def app_list() -> Any:
         return _run_tool("app.list", {})
+
+    @app.get("/app/management")
+    def app_management() -> Any:
+        catalogue_error = None
+        try:
+            catalogue = _run_tool("catalog.list", {})
+        except ApiError as exc:
+            # Keep the local inventory useful while the optional catalogue
+            # service is unavailable, and make the degraded state explicit.
+            catalogue = {"entries": []}
+            catalogue_error = exc.message
+        installed = _run_tool("app.list", {})
+        result = {"apps": merge_catalogue_and_installed(catalogue, installed)}
+        if catalogue_error:
+            result["catalogue_error"] = catalogue_error
+        return result
+
+    @app.get("/app/<app_id>/settings")
+    def app_settings(app_id: str) -> Any:
+        try:
+            return native_app_settings(app_id)
+        except PackageError as exc:
+            raise ApiError(404 if "not installed" in str(exc) else 400, "app_settings_unavailable", str(exc)) from exc
+
+    def apply_catalogue_lifecycle(app_id: str, action: str, body: dict[str, Any]) -> Any:
+        if set(body) != {"plan_sha256"}:
+            raise ApiError(400, "invalid_request", "lifecycle apply requires plan_sha256")
+        try:
+            envelope = catalogue_lifecycle_plan(app_id, action)
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "The app or catalogue changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
+        if not result.get("ok"):
+            return HTTPResponse(
+                json.dumps({"error": result.get("reason") or result.get("state") or f"{action} was rejected", "code": "operation_rejected", "operation": result}),
+                status=409,
+                headers={"Content-Type": "application/json"},
+            )
+        return {"operation": result, "action": action, "package": envelope.get("package")}
+
+    @app.post("/app/<app_id>/install/plan")
+    def app_install_plan(app_id: str) -> Any:
+        if _json_body():
+            raise ApiError(400, "invalid_request", "install plan does not accept a request body")
+        try:
+            return catalogue_lifecycle_plan(app_id, "install")
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+
+    @app.post("/app/<app_id>/install/apply")
+    def app_install_apply(app_id: str) -> Any:
+        return apply_catalogue_lifecycle(app_id, "install", _json_body())
+
+    @app.post("/app/<app_id>/upgrade/plan")
+    def app_upgrade_plan(app_id: str) -> Any:
+        if _json_body():
+            raise ApiError(400, "invalid_request", "upgrade plan does not accept a request body")
+        try:
+            return catalogue_lifecycle_plan(app_id, "upgrade")
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+
+    @app.post("/app/<app_id>/upgrade/apply")
+    def app_upgrade_apply(app_id: str) -> Any:
+        return apply_catalogue_lifecycle(app_id, "upgrade", _json_body())
+
+    @app.post("/app/<app_id>/remove/plan")
+    def app_remove_plan(app_id: str) -> Any:
+        if _json_body():
+            raise ApiError(400, "invalid_request", "remove plan does not accept a request body")
+        try:
+            return native_app_removal_plan(app_id)
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+
+    @app.post("/app/<app_id>/remove/apply")
+    def app_remove_apply(app_id: str) -> Any:
+        body = _json_body()
+        if set(body) != {"plan_sha256"}:
+            raise ApiError(400, "invalid_request", "remove apply requires plan_sha256")
+        try:
+            envelope = native_app_removal_plan(app_id)
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "Installed app state changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
+        if not result.get("ok"):
+            return HTTPResponse(
+                json.dumps({"error": result.get("reason") or result.get("state") or "removal was rejected", "code": "operation_rejected", "operation": result}),
+                status=409,
+                headers={"Content-Type": "application/json"},
+            )
+        return {"operation": result, "action": "remove", "package": envelope.get("package")}
+
+    @app.post("/app/<app_id>/settings/plan")
+    def app_settings_plan(app_id: str) -> Any:
+        body = _json_body()
+        if set(body) != {"values"}:
+            raise ApiError(400, "invalid_request", "settings plan accepts only a values object")
+        try:
+            return plan_native_settings_update(app_id, body.get("values"))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_settings", str(exc)) from exc
+
+    @app.post("/app/<app_id>/settings/apply")
+    def app_settings_apply(app_id: str) -> Any:
+        body = _json_body()
+        if set(body) != {"values", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "settings apply requires values and plan_sha256")
+        try:
+            envelope = plan_native_settings_update(app_id, body.get("values"))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_settings", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "The app or its settings changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": {key: value for key, value in envelope.items() if key != "settings_diff"}}, state=_State())
+        if not result.get("ok"):
+            return HTTPResponse(
+                json.dumps({"error": result.get("reason") or result.get("state") or "settings change was rejected", "code": "operation_rejected", "operation": result}),
+                status=409,
+                headers={"Content-Type": "application/json"},
+            )
+        return {"operation": result, "settings_diff": envelope["settings_diff"]}
 
     @app.post("/app/remove")
     def app_remove() -> Any:

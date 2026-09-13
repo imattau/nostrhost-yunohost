@@ -436,6 +436,12 @@ class ConfigFileProvider:
             result["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
         if desired.get("content") is not None:
             result["desired_sha256"] = hashlib.sha256(desired["content"].encode()).hexdigest()
+        elif desired.get("template_content") is not None:
+            import jinja2
+
+            environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False, keep_trailing_newline=True)
+            rendered = environment.from_string(desired["template_content"]).render(desired.get("context", {}))
+            result["desired_sha256"] = hashlib.sha256(rendered.encode()).hexdigest()
         return result
 
     def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
@@ -456,6 +462,11 @@ class ConfigFileProvider:
             return {"destination": str(target), "changed": True}
         if args.get("content") is not None:
             content = args["content"]
+        elif args.get("template_content") is not None:
+            import jinja2
+
+            environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False, keep_trailing_newline=True)
+            content = environment.from_string(args["template_content"]).render(args.get("context", {}))
         else:
             template_root = Path(args.get("_template_root")) if args.get("_template_root") else self.template_root
             if template_root is None:
