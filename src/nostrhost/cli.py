@@ -829,6 +829,28 @@ def _provision_restic() -> Path:
     return conf
 
 
+def _trust_caddy_internal_ca() -> Path | None:
+    """Add Caddy's internal root CA to the system trust store so package
+    health checks against .test/local HTTPS routes verify.
+
+    Caddy provisions ``/var/lib/caddy/pki/authorities/local/root.crt`` the
+    first time it issues an internal certificate. Copy it into
+    ``update-ca-certificates``'s store so httpx/requests trust it; return the
+    target path (None when Caddy has not provisioned a root yet — e.g. no
+    internal cert has been issued). Non-fatal on failure.
+    """
+    root = Path("/var/lib/caddy/pki/authorities/local/root.crt")
+    if not root.exists():
+        return None
+    target = Path("/usr/local/share/ca-certificates/caddy-internal.crt")
+    try:
+        target.write_bytes(root.read_bytes())
+        subprocess.run(["update-ca-certificates"], check=False, capture_output=True)
+    except OSError:
+        return None
+    return target
+
+
 def _systemctl(*args: str) -> None:
     subprocess.run(["systemctl", *args], check=False, capture_output=True, text=True)
 
@@ -908,6 +930,7 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
         restic_error = ""
 
     failed = _enable_postinstall_daemons()
+    _trust_caddy_internal_ca()
     grant = _publish_initial_capability(boot["operator_pubkey"])
 
     repo = StateRepo(state_dir_from_env(), boot["server_pubkey"])
@@ -1068,6 +1091,7 @@ def _postinstall_restore(
             data_restore["error"] = str(exc)
 
     failed = _enable_postinstall_daemons()
+    _trust_caddy_internal_ca()
     grant = _publish_initial_capability(boot["operator_pubkey"])
 
     # reconcile: converge live state to the restored desired state (bounded)

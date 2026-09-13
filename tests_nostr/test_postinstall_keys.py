@@ -157,3 +157,11 @@ def test_provision_restic_is_idempotent(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cli_module.subprocess, "run", lambda *a, **k: ran.append(a))
     assert _provision_restic() == conf
     assert ran == []  # existing config is never re-initialised
+
+
+def test_trust_caddy_internal_ca_none_when_no_root():
+    from nostrhost.cli import _trust_caddy_internal_ca
+
+    # No Caddy root provisioned (host or test env) -> None, no crash.
+    result = _trust_caddy_internal_ca()
+    assert result is None or Path("/var/lib/caddy/pki/authorities/local/root.crt").exists()
