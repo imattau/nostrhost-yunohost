@@ -146,17 +146,20 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
             "terminal": True,
         },
     ]
-    for root, tag in (("/usr/share/nostrhost/portal", "sso"), ("/usr/share/nostrhost/admin", "admin")):
+    for root, tag, prefix in (
+        ("/usr/share/nostrhost/portal", "sso", "/yunohost/sso"),
+        ("/usr/share/nostrhost/admin", "admin", "/admin"),
+    ):
         if os.path.isdir(root):
-            # The portal/admin bundles are SPAs: serve the bundle's
-            # index.html for every /yunohost/<tag>/* path (the JSON
-            # equivalent of the Caddyfile `try_files {path} {path}/
-            # /index.html` fallback).
+            path = f"{prefix}/*"
             routes.append(
                 {
                     "@id": f"nostrhost-{tag}:{domain}",
-                    "match": [{"host": [domain], "path": [f"/yunohost/{tag}/*"]}],
-                    "handle": [{"handler": "rewrite", "uri": "/index.html"}, {"handler": "file_server", "root": root}],
+                    "match": [{"host": [domain], "path": [path]}],
+                    "handle": [
+                        {"handler": "rewrite", "uri": "/index.html"},
+                        {"handler": "file_server", "root": root},
+                    ],
                     "terminal": True,
                 }
             )
