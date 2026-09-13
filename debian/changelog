@@ -1,11 +1,14 @@
-yunohost (12.1.41.35) stable; urgency=low
+yunohost (12.1.41.36) stable; urgency=low
 
-  * nostrhost: portal boot routes + bare-prefix redirects (browser fixes).
-    - Bare /nostrhost/admin and /nostrhost/sso 301 to the trailing-slash form
-      so they reach the SPAs instead of the domain root responder.
-    - The portal-api now serves /public (portal boot settings) and /me (the
-      signed-in user), which the retired moulinette portal.py used to provide;
-      the nuxt portal SPA boots from these and previously got a 404.
+  * nostrhost: unified single sign-in for the admin console (portal session).
+    - The native API authorizer now accepts the nostrhost.portal session
+      cookie as an alternative to NIP-98: the portal login authenticates the
+      admin console too. GET /package/session reports the session identity +
+      admin status so the SPA can decide to show the console or redirect.
+    - All native API routes now live under /package/* (matching the Caddy
+      /package/* route and the admin SPA's API base), so the console's data
+      calls actually reach the API instead of the domain root responder.
+    - /session and /healthz are the only public routes.
 
- -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 16:54:08 
+ -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 17:44:05 
 

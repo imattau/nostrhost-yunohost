@@ -74,40 +74,108 @@ def _run_tool(name: str, args: dict[str, Any]) -> Any:
         raise ApiError(400, "operation_failed", str(exc)) from exc
 
 
+def _build_admin_set(
+    *,
+    admin_pubkeys: tuple[str, ...] = (),
+    operator_pubkey: str | None = None,
+) -> set[str]:
+    """The admin pubkey set: configured admin pubkeys + the operator."""
+    admins = set(admin_pubkeys)
+    if operator_pubkey:
+        admins.add(operator_pubkey)
+    return admins
+
+
+def _session_username() -> str | None:
+    """The session user from the ``nostrhost.portal`` cookie, or None.
+
+    Reuses the portal session validation (Authenticator.get_session_cookie)
+    so the native API shares the portal's sign-in state: once a user signs in
+    at the portal, the same cookie authenticates the admin console — no second
+    login or NIP-07 signer needed.
+    """
+    try:
+        from yunohost.nostr_account import _session_username as portal_session_user
+    except Exception:  # pragma: no cover - import fallback
+        portal_session_user = None
+    if portal_session_user is None:
+        return None
+    try:
+        return portal_session_user()
+    except Exception:  # pragma: no cover - session store hiccup
+        return None
+
+
+def _session_admin_pubkey(admins: set[str]) -> str | None:
+    """If a valid portal session exists whose linked identity is an admin,
+    return that identity's pubkey, else None."""
+    username = _session_username()
+    if not username:
+        return None
+    try:
+        identities = resolve_username(username)
+    except Exception:  # pragma: no cover - identity store unavailable
+        identities = []
+    for identity in identities:
+        if identity.pubkey in admins:
+            return identity.pubkey
+    return None
+
+
 def default_authorizer(
     *,
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
 ) -> Callable[[], str]:
-    """NIP-98 authorizer: verify the Authorization header, resolve the linked
-    identity, and require the pubkey to be an admin (operator or configured)."""
+    """NIP-98 / session authorizer: verify the request identity and require an
+    admin (operator or configured).
 
-    admins = set(admin_pubkeys)
-    if operator_pubkey:
-        admins.add(operator_pubkey)
+    Two mutually-exclusive authentication paths:
+
+    - NIP-98 ``Authorization: Nostr <base64 event>`` (the existing signer
+      path): verify the event, resolve the signer pubkey to a linked identity,
+      and require the pubkey to be an admin.
+    - Portal session cookie (``nostrhost.portal``): validate the portal
+      session, resolve the session user's linked identity, and require one of
+      its pubkeys to be an admin. This is the admin-console path: the user
+      signs in once at the portal and the same cookie authorizes the console.
+    """
+
+    admins = _build_admin_set(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
 
     def authorize() -> str:
         header = request.headers.get("Authorization", "")
-        if not header.startswith("Nostr "):
-            raise ApiError(401, "authentication_required", "missing NIP-98 Authorization header")
-        try:
-            event_json = base64.b64decode(header[6:], validate=True).decode("utf-8")
-        except Exception as exc:  # noqa: BLE001 - malformed base64
-            raise ApiError(401, "invalid_auth", f"malformed NIP-98 header: {exc}") from exc
-        try:
-            event = parse_and_verify_event(event_json)
-            pubkey = event.author().to_hex()
-        except Exception as exc:  # noqa: BLE001 - signature/timestamp failure
-            raise ApiError(401, "invalid_signature", f"NIP-98 event rejected: {exc}") from exc
-        try:
-            identity = resolve_pubkey(pubkey)
-        except Exception:  # noqa: BLE001 - unlinked/unknown or unavailable store
-            identity = None
-        if identity is None:
-            raise ApiError(403, "identity_not_linked", "pubkey is not a linked identity")
-        if pubkey not in admins:
-            raise ApiError(403, "not_authorized", "pubkey is not an admin")
-        return pubkey
+        if header.startswith("Nostr "):
+            try:
+                event_json = base64.b64decode(header[6:], validate=True).decode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - malformed base64
+                raise ApiError(401, "invalid_auth", f"malformed NIP-98 header: {exc}") from exc
+            try:
+                event = parse_and_verify_event(event_json)
+                pubkey = event.author().to_hex()
+            except Exception as exc:  # noqa: BLE001 - signature/timestamp failure
+                raise ApiError(401, "invalid_signature", f"NIP-98 event rejected: {exc}") from exc
+            try:
+                identity = resolve_pubkey(pubkey)
+            except Exception:  # noqa: BLE001 - unlinked/unknown or unavailable store
+                identity = None
+            if identity is None:
+                raise ApiError(403, "identity_not_linked", "pubkey is not a linked identity")
+            if pubkey not in admins:
+                raise ApiError(403, "not_authorized", "pubkey is not an admin")
+            return pubkey
+
+        # Portal-session path: no NIP-98 header, use the portal login cookie.
+        pubkey = _session_admin_pubkey(admins)
+        if pubkey is not None:
+            return pubkey
+        if _session_username() is not None:
+            raise ApiError(403, "not_authorized", "session user is not an admin")
+        raise ApiError(
+            401,
+            "authentication_required",
+            "missing NIP-98 Authorization header or portal session",
+        )
 
     return authorize
 
@@ -127,13 +195,12 @@ class _AuthErrorsPlugin:
 
     def apply(self, callback: Callable[..., Any], route: Any) -> Callable[..., Any]:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # bottle 0.12's Route is a dict subclass: `.rule` is a key, not
-            # an attribute. Accept both layouts so /healthz stays public.
+            # Accept both layouts so /healthz and /session stay public.
             if isinstance(route, dict):
                 rule = route.get("rule", "")
             else:
                 rule = getattr(route, "rule", "")
-            if str(rule) != "/healthz":
+            if str(rule) not in ("/package/healthz", "/package/session"):
                 try:
                     self.authorizer()
                 except ApiError as exc:
@@ -187,11 +254,41 @@ def build_app(
     app.install(_AuthErrorsPlugin(auth))
     stream = event_stream or _default_event_stream
 
-    @app.get("/healthz")
+    @app.get("/package/healthz")
     def healthz() -> dict[str, Any]:
         return {"ok": True, "version": API_VERSION}
 
-    @app.get("/events/<request_id>")
+    @app.get("/package/session")
+    def session() -> dict[str, Any]:
+        """Public session probe for the admin SPA: whether a portal session
+        exists, who it is, and whether that identity is an admin.
+
+        Unlike every other route this is intentionally NOT admin-gated: the
+        console uses it to decide whether to show the console, redirect to the
+        portal login, or refuse non-admin access. It never leaks secrets —
+        only the session user's username + admin flag.
+        """
+        username = _session_username()
+        pubkey = None
+        if username is not None:
+            try:
+                identities = resolve_username(username)
+            except Exception:  # pragma: no cover - identity store unavailable
+                identities = []
+            for identity in identities:
+                pubkey = identity.pubkey
+                break
+        admin = pubkey is not None and pubkey in _build_admin_set(
+            admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey
+        )
+        return {
+            "authenticated": username is not None,
+            "username": username,
+            "pubkey": pubkey,
+            "admin": admin,
+        }
+
+    @app.get("/package/events/<request_id>")
     def events(request_id: str) -> Any:
         """Server-Sent Events: live progress/result for one operation."""
         from nostrhost import events as events_module
@@ -209,33 +306,33 @@ def build_app(
 
     # -- system -------------------------------------------------------------
 
-    @app.get("/system/version")
+    @app.get("/package/system/version")
     def system_version() -> Any:
         return _run_tool("system.version", {})
 
     # -- service ------------------------------------------------------------
 
-    @app.get("/service/status")
+    @app.get("/package/service/status")
     def service_status() -> Any:
         return _run_tool("service.status", {"names": _optional_list(request.query.get("names"))})
 
-    @app.post("/service/restart")
+    @app.post("/package/service/restart")
     def service_restart() -> Any:
         body = _json_body()
         return _run_tool("service.restart", {"name": body.get("name", "")})
 
-    @app.post("/service/control")
+    @app.post("/package/service/control")
     def service_control() -> Any:
         body = _json_body()
         return _run_tool("service.control", {"name": body.get("name", ""), "action": body.get("action", "")})
 
     # -- app ----------------------------------------------------------------
 
-    @app.get("/app/list")
+    @app.get("/package/app/list")
     def app_list() -> Any:
         return _run_tool("app.list", {})
 
-    @app.get("/app/management")
+    @app.get("/package/app/management")
     def app_management() -> Any:
         catalogue_error = None
         try:
@@ -251,7 +348,7 @@ def build_app(
             result["catalogue_error"] = catalogue_error
         return result
 
-    @app.get("/app/<app_id>/settings")
+    @app.get("/package/app/<app_id>/settings")
     def app_settings(app_id: str) -> Any:
         try:
             return native_app_settings(app_id)
@@ -276,7 +373,7 @@ def build_app(
             )
         return {"operation": result, "action": action, "package": envelope.get("package")}
 
-    @app.post("/app/<app_id>/install/plan")
+    @app.post("/package/app/<app_id>/install/plan")
     def app_install_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "install plan does not accept a request body")
@@ -285,11 +382,11 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/app/<app_id>/install/apply")
+    @app.post("/package/app/<app_id>/install/apply")
     def app_install_apply(app_id: str) -> Any:
         return apply_catalogue_lifecycle(app_id, "install", _json_body())
 
-    @app.post("/app/<app_id>/upgrade/plan")
+    @app.post("/package/app/<app_id>/upgrade/plan")
     def app_upgrade_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "upgrade plan does not accept a request body")
@@ -298,11 +395,11 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/app/<app_id>/upgrade/apply")
+    @app.post("/package/app/<app_id>/upgrade/apply")
     def app_upgrade_apply(app_id: str) -> Any:
         return apply_catalogue_lifecycle(app_id, "upgrade", _json_body())
 
-    @app.post("/app/<app_id>/remove/plan")
+    @app.post("/package/app/<app_id>/remove/plan")
     def app_remove_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "remove plan does not accept a request body")
@@ -311,7 +408,7 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/app/<app_id>/remove/apply")
+    @app.post("/package/app/<app_id>/remove/apply")
     def app_remove_apply(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"plan_sha256"}:
@@ -331,7 +428,7 @@ def build_app(
             )
         return {"operation": result, "action": "remove", "package": envelope.get("package")}
 
-    @app.post("/app/<app_id>/settings/plan")
+    @app.post("/package/app/<app_id>/settings/plan")
     def app_settings_plan(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"values"}:
@@ -341,7 +438,7 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_settings", str(exc)) from exc
 
-    @app.post("/app/<app_id>/settings/apply")
+    @app.post("/package/app/<app_id>/settings/apply")
     def app_settings_apply(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"values", "plan_sha256"}:
@@ -361,7 +458,7 @@ def build_app(
             )
         return {"operation": result, "settings_diff": envelope["settings_diff"]}
 
-    @app.post("/app/remove")
+    @app.post("/package/app/remove")
     def app_remove() -> Any:
         body = _json_body()
         return _run_tool("app.remove", {"app": body.get("app", ""), "purge": bool(body.get("purge", False))})
@@ -380,21 +477,21 @@ def build_app(
 
     # -- identity (npub user model) ------------------------------------------
 
-    @app.get("/identity/list")
+    @app.get("/package/identity/list")
     def identity_list() -> Any:
         username = request.query.get("username")
         if username:
             return [_identity_dict(i) for i in list_identities_for_username(username)]
         return [_identity_dict(i) for i in list_identities()]
 
-    @app.get("/identity/resolve/<value>")
+    @app.get("/package/identity/resolve/<value>")
     def identity_resolve(value: str) -> Any:
         if value.startswith("npub1") or (len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)):
             identity = resolve_pubkey(_parse_pubkey(value))
             return _identity_dict(identity) if identity else None
         return [_identity_dict(i) for i in resolve_username(value)]
 
-    @app.post("/identity/link")
+    @app.post("/package/identity/link")
     def identity_link() -> Any:
         body = _json_body()
         return link_identity(
@@ -407,7 +504,7 @@ def build_app(
             enabled=bool(body.get("enabled", True)),
         )
 
-    @app.post("/identity/revoke")
+    @app.post("/package/identity/revoke")
     def identity_revoke() -> Any:
         body = _json_body()
         return revoke_identity(
@@ -418,7 +515,7 @@ def build_app(
 
     # -- capability -----------------------------------------------------------
 
-    @app.post("/capability/grant")
+    @app.post("/package/capability/grant")
     def capability_grant() -> Any:
         body = _json_body()
         return grant_capability(
@@ -429,7 +526,7 @@ def build_app(
             control_relay=_config_control_relay(),
         )
 
-    @app.post("/capability/delegate")
+    @app.post("/package/capability/delegate")
     def capability_delegate() -> Any:
         body = _json_body()
         return delegate_capability(
@@ -440,7 +537,7 @@ def build_app(
             control_relay=_config_control_relay(),
         )
 
-    @app.post("/capability/revoke")
+    @app.post("/package/capability/revoke")
     def capability_revoke() -> Any:
         body = _json_body()
         return revoke_delegation(
