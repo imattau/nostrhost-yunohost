@@ -326,6 +326,16 @@ def build_app(
         body = _json_body()
         return _run_tool("service.control", {"name": body.get("name", ""), "action": body.get("action", "")})
 
+    # -- catalog --------------------------------------------------------------
+
+    @app.get("/package/catalog/list")
+    def catalog_list() -> Any:
+        return _run_tool("catalog.list", {})
+
+    @app.get("/package/catalog/get/<app_id>")
+    def catalog_get(app_id: str) -> Any:
+        return _run_tool("catalog.get", {"app_id": app_id})
+
     # -- app ----------------------------------------------------------------
 
     @app.get("/package/app/list")
@@ -462,6 +472,57 @@ def build_app(
     def app_remove() -> Any:
         body = _json_body()
         return _run_tool("app.remove", {"app": body.get("app", ""), "purge": bool(body.get("purge", False))})
+
+    # -- user (YunoHost accounts) ---------------------------------------------
+
+    @app.get("/package/user/list")
+    def user_list() -> Any:
+        return _run_tool("user.list", {})
+
+    @app.post("/package/user/create")
+    def user_create() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "user.create",
+            {
+                "username": body.get("username", ""),
+                "domain": body.get("domain", ""),
+                "password": body.get("password", ""),
+                "fullname": body.get("fullname", ""),
+                "mailbox_quota": body.get("mailbox_quota", "0"),
+                "admin": bool(body.get("admin", False)),
+            },
+        )
+
+    @app.post("/package/user/update")
+    def user_update() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "user.update",
+            {
+                "username": body.get("username", ""),
+                "mail": body.get("mail"),
+                "change_password": body.get("change_password"),
+                "add_mailforward": body.get("add_mailforward"),
+                "remove_mailforward": body.get("remove_mailforward"),
+                "add_mailalias": body.get("add_mailalias"),
+                "remove_mailalias": body.get("remove_mailalias"),
+                "mailbox_quota": body.get("mailbox_quota"),
+                "fullname": body.get("fullname"),
+            },
+        )
+
+    @app.post("/package/user/delete")
+    def user_delete() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "user.delete",
+            {
+                "username": body.get("username", ""),
+                "purge": bool(body.get("purge", False)),
+                "force": bool(body.get("force", False)),
+            },
+        )
 
     # -- package ------------------------------------------------------------
 
