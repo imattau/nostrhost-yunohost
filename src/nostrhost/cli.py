@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -447,6 +448,19 @@ AGENT_CONFIG = "/etc/nostrhost-agent/config.json"
 AGENT_STATE_DIR = "/var/lib/nostrhost-agent"
 AGENT_BINARY = "/usr/bin/nostrhost-agent"
 AGENT_SERVICE = "nostrhost-agent.service"
+AGENT_MODEL_BINARY = "/usr/bin/nostrhost-agent-model"
+AGENT_EXPORT_BINARY = "/usr/bin/nostrhost-agent-export"
+AGENT_CONTRIBUTE_BINARY = "/usr/bin/nostrhost-agent-contribute"
+AGENT_MODELS_DIR = "/var/lib/nostrhost-agent/models"
+AGENT_RUNTIME_DIR = "/var/lib/nostrhost-agent/runtime"
+AGENT_EXPORTS_DIR = "/var/lib/nostrhost-agent/exports"
+AGENT_LLM_ENV = "/etc/nostrhost-agent/llm.env"
+AGENT_LLM_SERVICE = "nostrhost-agent-llm.service"
+AGENT_INFERENCE_HOST = "127.0.0.1"
+AGENT_INFERENCE_PORT = 18080
+AGENT_CONTRIBUTION_CONFIG = "/etc/nostrhost-agent/contribution.toml"
+AGENT_HF_TOKEN_PATH = "/etc/nostrhost-agent/hf_token"
+AGENT_MODE_LEVELS = ("observe", "assist", "maintain", "autonomous")
 
 
 def _set_agent_relay_writer(pubkey: str, *, allowed: bool) -> bool:
@@ -648,6 +662,338 @@ def _agent_status() -> dict[str, Any]:
         "service_enabled": enabled.returncode == 0,
         "service_active": active.returncode == 0,
     }
+
+
+def _run_agent_tool_raw(binary: str, args: list[str]) -> str:
+    """Run one of the optional nostrhost-agent helper binaries and return its
+    raw stdout. These tools are never invoked by the running daemon; only
+    explicit root-side admin actions call them."""
+    if not Path(binary).exists():
+        raise NostrHostError(f"{binary} is not installed; install the optional nostrhost-agent package first")
+    result = subprocess.run([binary, *args], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise NostrHostError(result.stderr.strip() or f"{binary} failed")
+    return result.stdout
+
+
+def _run_agent_tool(binary: str, args: list[str]) -> Any:
+    """Like _run_agent_tool_raw, but parses the output as JSON -- only for
+    subcommands that are documented to print a single JSON value."""
+    stdout = _run_agent_tool_raw(binary, args)
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise NostrHostError(f"{binary} did not return valid JSON") from exc
+
+
+def _read_agent_config() -> dict[str, Any]:
+    config_path = Path(AGENT_CONFIG)
+    if not config_path.is_file() or config_path.is_symlink():
+        raise NostrHostError("agent is not configured; run `nostrhost agent init` first")
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise NostrHostError("agent config is missing or not valid JSON") from exc
+
+
+def _write_agent_config(config: dict[str, Any]) -> None:
+    config_path = Path(AGENT_CONFIG)
+    temp_path = config_path.with_name(config_path.name + f".{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(config, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, config_path)
+        os.chown(config_path, 0, 0)
+        os.chmod(config_path, 0o600)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _restart_agent_if_active() -> None:
+    active = subprocess.run(["systemctl", "is-active", AGENT_SERVICE], capture_output=True, text=True, check=False)
+    if active.returncode == 0:
+        subprocess.run(["systemctl", "restart", AGENT_SERVICE], check=True)
+
+
+def _ensure_dir(path: str, mode: int = 0o750) -> None:
+    directory = Path(path)
+    if directory.is_symlink():
+        raise NostrHostError(f"{path} must be a real directory, not a symlink")
+    directory.mkdir(parents=True, mode=mode, exist_ok=True)
+    os.chown(directory, 0, 0)
+    os.chmod(directory, mode)
+
+
+def _agent_model_profile() -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent model profile must be run as root")
+    _ensure_dir(AGENT_MODELS_DIR, mode=0o755)
+    return _run_agent_tool(AGENT_MODEL_BINARY, ["profile", "--models-dir", AGENT_MODELS_DIR])
+
+
+def _agent_model_recommend() -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent model recommend must be run as root")
+    _ensure_dir(AGENT_MODELS_DIR, mode=0o755)
+    return _run_agent_tool(AGENT_MODEL_BINARY, ["recommend", "--models-dir", AGENT_MODELS_DIR])
+
+
+def _agent_model_download(model_id: str, evaluation_only: bool) -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent model download must be run as root")
+    if not model_id:
+        raise NostrHostError("model_id is required")
+    _ensure_dir(AGENT_MODELS_DIR, mode=0o755)
+    args = ["download", "--models-dir", AGENT_MODELS_DIR, "--model-id", model_id]
+    if evaluation_only:
+        args.append("--evaluation-only")
+    result = _run_agent_tool(AGENT_MODEL_BINARY, args)
+    # The model weights are a public download, not a secret -- make them
+    # readable by the unprivileged account that actually serves them.
+    import pwd
+
+    agent_user = pwd.getpwnam("nostrhost-agent")
+    downloaded_path = Path(result["path"])
+    os.chown(downloaded_path, agent_user.pw_uid, agent_user.pw_gid)
+    os.chmod(downloaded_path, 0o644)
+    return result
+
+
+def _agent_runtime_ensure() -> Any:
+    """Idempotent: fetches and unpacks the pinned llama.cpp CPU build only if
+    it is not already present under AGENT_RUNTIME_DIR."""
+    if os.geteuid() != 0:
+        raise NostrHostError("agent runtime setup must be run as root")
+    _ensure_dir(AGENT_RUNTIME_DIR, mode=0o755)
+    status = _run_agent_tool(AGENT_MODEL_BINARY, ["runtime", "status", "--runtime-dir", AGENT_RUNTIME_DIR])
+    if status.get("installed"):
+        return status
+    return _run_agent_tool(AGENT_MODEL_BINARY, ["runtime", "download", "--runtime-dir", AGENT_RUNTIME_DIR])
+
+
+def _agent_model_select(model_id: str) -> dict[str, Any]:
+    """Point the agent's inference config at a downloaded model and start the
+    local llama.cpp server for it. Never changes the policy level."""
+    if os.geteuid() != 0:
+        raise NostrHostError("agent model select must be run as root")
+    recommendation = None
+    for entry in _agent_model_recommend().get("models", []):
+        if entry["model"]["id"] == model_id:
+            recommendation = entry["model"]
+            break
+    if recommendation is None:
+        raise NostrHostError(f"unknown model id {model_id!r}")
+    model_path = Path(AGENT_MODELS_DIR) / recommendation["filename"]
+    if not model_path.is_file() or model_path.is_symlink():
+        raise NostrHostError(f"model {model_id!r} is not downloaded yet")
+    digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    if digest != recommendation["sha256"]:
+        raise NostrHostError("downloaded model file no longer matches the catalog checksum")
+    runtime = _agent_runtime_ensure()
+    server_path = runtime.get("server_path")
+    if not server_path or not Path(server_path).is_file():
+        raise NostrHostError("local inference runtime is not installed correctly")
+    runtime_dir = str(Path(server_path).parent)
+    env_path = Path(AGENT_LLM_ENV)
+    temp_path = env_path.with_name(env_path.name + f".{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(f"MODEL_PATH={model_path}\n")
+            stream.write(f"RUNTIME_SERVER_PATH={server_path}\n")
+            stream.write(f"LD_LIBRARY_PATH={runtime_dir}\n")
+        os.replace(temp_path, env_path)
+        os.chown(env_path, 0, 0)
+        os.chmod(env_path, 0o600)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", AGENT_LLM_SERVICE], check=True)
+    config = _read_agent_config()
+    config["inference"] = {
+        "base_url": f"http://{AGENT_INFERENCE_HOST}:{AGENT_INFERENCE_PORT}/v1",
+        "model": model_id,
+    }
+    _write_agent_config(config)
+    _restart_agent_if_active()
+    return {
+        "model_id": model_id,
+        "deployment_eligible": recommendation["deployment_eligible"],
+        "evaluation_status": recommendation["evaluation_status"],
+        "llm_service": AGENT_LLM_SERVICE,
+    }
+
+
+def _agent_model_status() -> dict[str, Any]:
+    config_path = Path(AGENT_CONFIG)
+    selected_model = None
+    if config_path.is_file() and not config_path.is_symlink():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            selected_model = (config.get("inference") or {}).get("model")
+        except (OSError, json.JSONDecodeError):
+            selected_model = None
+    enabled = subprocess.run(["systemctl", "is-enabled", AGENT_LLM_SERVICE], capture_output=True, text=True, check=False)
+    active = subprocess.run(["systemctl", "is-active", AGENT_LLM_SERVICE], capture_output=True, text=True, check=False)
+    return {
+        "selected_model": selected_model,
+        "llm_service_enabled": enabled.returncode == 0,
+        "llm_service_active": active.returncode == 0,
+    }
+
+
+def _agent_mode_get() -> dict[str, Any]:
+    config = _read_agent_config()
+    return {"level": (config.get("policy") or {}).get("level", "observe")}
+
+
+def _agent_mode_set(level: str, confirm: bool) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent mode must be set as root")
+    if level not in AGENT_MODE_LEVELS:
+        raise NostrHostError(f"level must be one of {', '.join(AGENT_MODE_LEVELS)}")
+    if level in ("maintain", "autonomous") and not confirm:
+        raise NostrHostError(
+            "maintain/autonomous require an explicit confirm=true acknowledgement; "
+            "the agent's own operation policy still gates every write behind approval, "
+            "but this level changes what it is allowed to attempt"
+        )
+    config = _read_agent_config()
+    config.setdefault("policy", {})["level"] = level
+    _write_agent_config(config)
+    _restart_agent_if_active()
+    return {"level": level}
+
+
+def _agent_export_list() -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent export list must be run as root")
+    journal = str(Path(AGENT_STATE_DIR) / "audit.jsonl")
+    return _run_agent_tool(AGENT_EXPORT_BINARY, ["--journal", journal, "--list"])
+
+
+_CANDIDATE_ID_PATTERN = re.compile(r"^[a-f0-9-]{1,80}$")
+
+
+def _agent_export_run(cycle_id: str) -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("agent export must be run as root")
+    if not cycle_id:
+        raise NostrHostError("cycle_id is required")
+    _ensure_dir(AGENT_EXPORTS_DIR, mode=0o700)
+    journal = str(Path(AGENT_STATE_DIR) / "audit.jsonl")
+    candidate_id = secrets.token_hex(16)
+    output_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_id}.json"
+    _run_agent_tool_raw(AGENT_EXPORT_BINARY, ["--journal", journal, "--cycle-id", cycle_id, "--output", str(output_path)])
+    return json.loads(output_path.read_text(encoding="utf-8")) | {"candidate_file_id": candidate_id}
+
+
+def _agent_export_get(candidate_file_id: str) -> Any:
+    if not _CANDIDATE_ID_PATTERN.match(candidate_file_id or ""):
+        raise NostrHostError("invalid candidate id")
+    path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.json"
+    if not path.is_file() or path.is_symlink():
+        raise NostrHostError("no prepared candidate with that id")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _agent_contribution_settings_get() -> dict[str, Any]:
+    path = Path(AGENT_CONTRIBUTION_CONFIG)
+    enabled, dataset_repo = False, ""
+    if path.is_file() and not path.is_symlink():
+        try:
+            with path.open("rb") as handle:
+                conf = tomllib.load(handle)
+            enabled = bool(conf.get("enabled", False))
+            dataset_repo = str(conf.get("dataset_repo", ""))
+        except (OSError, tomllib.TOMLDecodeError):
+            enabled, dataset_repo = False, ""
+    return {
+        "enabled": enabled,
+        "dataset_repo": dataset_repo,
+        "token_configured": Path(AGENT_HF_TOKEN_PATH).is_file(),
+    }
+
+
+def _agent_contribution_settings_set(enabled: bool, dataset_repo: str, token: str | None) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise NostrHostError("contribution settings must be set as root")
+    if enabled and not dataset_repo:
+        raise NostrHostError("dataset_repo is required to enable Hugging Face sharing")
+    path = Path(AGENT_CONTRIBUTION_CONFIG)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# NostrHost agent Hugging Face contribution settings.\n"
+        "# Off by default; nothing is ever uploaded automatically or by the\n"
+        "# resident agent daemon -- only an explicit `nostrhost-agent-contribute`\n"
+        "# invocation, triggered by an explicit admin action, ever uploads data,\n"
+        "# and only the one locally-prepared, redacted candidate file chosen.\n"
+        f"enabled = {'true' if enabled else 'false'}\n"
+        f'dataset_repo = "{dataset_repo}"\n'
+    )
+    temp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        os.replace(temp_path, path)
+        os.chown(path, 0, 0)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    if token:
+        token_path = Path(AGENT_HF_TOKEN_PATH)
+        token_temp = token_path.with_name(token_path.name + f".{os.getpid()}.tmp")
+        fd = os.open(token_temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(token.strip() + "\n")
+            os.replace(token_temp, token_path)
+            os.chown(token_path, 0, 0)
+            os.chmod(token_path, 0o600)
+        except Exception:
+            try:
+                token_temp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+    return _agent_contribution_settings_get()
+
+
+def _agent_contribution_submit(candidate_file_id: str) -> Any:
+    if os.geteuid() != 0:
+        raise NostrHostError("contribution submit must be run as root")
+    settings = _agent_contribution_settings_get()
+    if not settings["enabled"]:
+        raise NostrHostError("Hugging Face sharing is not enabled; turn it on in agent settings first")
+    if not settings["token_configured"]:
+        raise NostrHostError("no Hugging Face token is configured")
+    if not _CANDIDATE_ID_PATTERN.match(candidate_file_id or ""):
+        raise NostrHostError("invalid candidate id")
+    candidate_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.json"
+    if not candidate_path.is_file() or candidate_path.is_symlink():
+        raise NostrHostError("no prepared candidate with that id")
+    return _run_agent_tool(AGENT_CONTRIBUTE_BINARY, [
+        "--candidate", str(candidate_path),
+        "--token-file", AGENT_HF_TOKEN_PATH,
+        "--repo", settings["dataset_repo"],
+    ])
 
 
 def _write_policy_toml(operator_npub: str) -> Path:

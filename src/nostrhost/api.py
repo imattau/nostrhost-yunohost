@@ -24,7 +24,20 @@ from typing import Any, Callable
 from bottle import Bottle, HTTPResponse, request
 
 from .cli import (
+    _agent_contribution_settings_get,
+    _agent_contribution_settings_set,
+    _agent_contribution_submit,
+    _agent_export_get,
+    _agent_export_list,
+    _agent_export_run,
     _agent_init,
+    _agent_mode_get,
+    _agent_mode_set,
+    _agent_model_download,
+    _agent_model_profile,
+    _agent_model_recommend,
+    _agent_model_select,
+    _agent_model_status,
     _agent_service,
     _agent_status,
     _TOOL_HANDLERS,
@@ -668,6 +681,74 @@ def build_app(
     @app.post("/package/agent/disable")
     def agent_disable() -> Any:
         return _agent_service("disable")
+
+    @app.get("/package/agent/models/profile")
+    def agent_models_profile() -> Any:
+        return _agent_model_profile()
+
+    @app.get("/package/agent/models/recommend")
+    def agent_models_recommend() -> Any:
+        return _agent_model_recommend()
+
+    @app.post("/package/agent/models/download")
+    def agent_models_download() -> Any:
+        body = _json_body()
+        return _agent_model_download(body.get("model_id", ""), bool(body.get("evaluation_only", False)))
+
+    @app.post("/package/agent/models/select")
+    def agent_models_select() -> Any:
+        body = _json_body()
+        return _agent_model_select(body.get("model_id", ""))
+
+    @app.get("/package/agent/models/status")
+    def agent_models_status() -> Any:
+        return _agent_model_status()
+
+    @app.get("/package/agent/mode")
+    def agent_mode_get() -> Any:
+        return _agent_mode_get()
+
+    @app.post("/package/agent/mode")
+    def agent_mode_set() -> Any:
+        body = _json_body()
+        return _agent_mode_set(body.get("level", ""), bool(body.get("confirm", False)))
+
+    @app.get("/package/agent/export/list")
+    def agent_export_list() -> Any:
+        return _agent_export_list()
+
+    @app.post("/package/agent/export/run")
+    def agent_export_run() -> Any:
+        body = _json_body()
+        return _agent_export_run(body.get("cycle_id", ""))
+
+    @app.get("/package/agent/export/<candidate_file_id>")
+    def agent_export_get(candidate_file_id: str) -> Any:
+        return _agent_export_get(candidate_file_id)
+
+    @app.get("/package/agent/contribution/settings")
+    def agent_contribution_settings_get() -> Any:
+        return _agent_contribution_settings_get()
+
+    @app.post("/package/agent/contribution/settings")
+    def agent_contribution_settings_set() -> Any:
+        """Touches Hugging Face credentials and flips a real upload path on.
+        Same admin-only NIP-98/session trust level as agent_init/agent_enable
+        above -- this is a local admin-API setting, not a host operation, so
+        it does not go through the nostr-operationsd signed tool chain."""
+        body = _json_body()
+        return _agent_contribution_settings_set(
+            bool(body.get("enabled", False)),
+            body.get("dataset_repo", ""),
+            body.get("token") or None,
+        )
+
+    @app.post("/package/agent/contribution/submit")
+    def agent_contribution_submit() -> Any:
+        """Causes real network egress of exactly one reviewed candidate file
+        the admin explicitly chose. Same admin-only trust level as above."""
+        body = _json_body()
+        return _agent_contribution_submit(body.get("candidate_file_id", ""))
 
     # -- catalog --------------------------------------------------------------
 
