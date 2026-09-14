@@ -20,6 +20,39 @@ from bottle import Bottle
 logger = logging.getLogger("nostr-portal-api")
 
 
+def update_route():
+    """PUT /nostrhost/portalapi/update — self-service fullname edit.
+
+    Nostr-only sign-in has no password to change; this only lets a signed-in
+    user update their own display name. Writes the account store directly
+    (no lifecycle/approval chain — the native ``user.update`` tool is
+    admin-gated and NIP-98-signed, which the session-cookie-only portal
+    caller cannot produce).
+    """
+    from bottle import HTTPResponse, request, response
+
+    from yunohost.nostr_account import _session_username
+    from yunohost.nostrhost.accounts import save_users, user_get, users
+
+    username = _session_username()
+    if not username:
+        raise HTTPResponse("not signed in", 401)
+
+    payload = request.json or {}
+    fullname = (payload.get("fullname") or "").strip()
+    if len(fullname) < 2:
+        response.status = 400
+        return {"path": "fullname", "error": "Full name must be at least 2 characters."}
+
+    record = user_get(username) or {}
+    record["fullname"] = fullname
+    all_users = users()
+    all_users[username] = record
+    save_users(all_users)
+
+    return {"fullname": fullname}
+
+
 def logout_route():
     """GET /nostrhost/portalapi/logout — clear the portal session.
 
@@ -55,6 +88,7 @@ def build_app() -> Bottle:
 
     app.get("/public", callback=portal_public_route)
     app.get("/me", callback=portal_me_route)
+    app.put("/update", callback=update_route)
     app.get("/logout", callback=logout_route)
     app.get("/nostr/challenge", callback=challenge_route)
     app.post("/nostr/login", callback=login_route)

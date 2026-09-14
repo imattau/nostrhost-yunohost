@@ -61,9 +61,11 @@ from yunohost.nostr_identity import (
 )
 from yunohost.nostr_operations import (
     OperationError,
+    approve_operation,
     delegate_capability,
     grant_capability,
     list_capabilities,
+    reject_operation,
     revoke_delegation,
 )
 from nostrhost_auth.auth.nostr_verify import parse_and_verify_event
@@ -314,22 +316,28 @@ def build_app(
         """
         username = _session_username()
         pubkey = None
+        admin_pubkey = None
+        admins = _build_admin_set(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
         if username is not None:
             try:
                 identities = resolve_username(username)
             except Exception:  # pragma: no cover - identity store unavailable
                 identities = []
             for identity in identities:
-                pubkey = identity.pubkey
-                break
-        admin = pubkey is not None and pubkey in _build_admin_set(
-            admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey
-        )
+                if pubkey is None:
+                    pubkey = identity.pubkey
+                if identity.pubkey in admins:
+                    admin_pubkey = identity.pubkey
+                    break
         return {
             "authenticated": username is not None,
             "username": username,
-            "pubkey": pubkey,
-            "admin": admin,
+            # The admin identity when one of the user's linked keys is an
+            # admin (mirrors _session_admin_pubkey, which every other route's
+            # authorizer uses); falls back to the first linked identity so a
+            # non-admin session still has a pubkey to display.
+            "pubkey": admin_pubkey or pubkey,
+            "admin": admin_pubkey is not None,
         }
 
     @app.get("/package/events/<request_id>")
@@ -348,11 +356,49 @@ def build_app(
         )
         return response
 
+    # -- operations (audit history + pending approvals) ----------------------
+
+    @app.get("/package/operations")
+    def operations_list() -> Any:
+        limit_param = request.query.get("limit")
+        try:
+            limit = int(limit_param) if limit_param else None
+        except ValueError:
+            raise ApiError(400, "invalid_query", "'limit' must be an integer")
+        return _run_tool("audit.list", {"limit": limit})
+
+    @app.get("/package/operations/<request_id>")
+    def operations_get(request_id: str) -> Any:
+        return _run_tool("audit.get", {"audit_id": request_id})
+
+    @app.post("/package/operations/<request_id>/approve")
+    def operations_approve(request_id: str) -> Any:
+        body = _json_body()
+        try:
+            event = approve_operation(request_id, note=body.get("note"))
+        except OperationError as exc:
+            raise ApiError(400, "operation_failed", str(exc)) from exc
+        return {"ok": True, "request_id": request_id, "event_id": event.get("id")}
+
+    @app.post("/package/operations/<request_id>/reject")
+    def operations_reject(request_id: str) -> Any:
+        body = _json_body()
+        try:
+            event = reject_operation(request_id, reason=body.get("reason"))
+        except OperationError as exc:
+            raise ApiError(400, "operation_failed", str(exc)) from exc
+        return {"ok": True, "request_id": request_id, "event_id": event.get("id")}
+
     # -- system -------------------------------------------------------------
 
     @app.get("/package/system/version")
     def system_version() -> Any:
         return _run_tool("system.version", {})
+
+    @app.get("/package/system/status")
+    def system_status() -> Any:
+        """Host status (platform, hostname, load) for the Overview dashboard."""
+        return _run_tool("system.status", {})
 
     @app.get("/package/system/updates")
     def system_updates() -> Any:
@@ -526,6 +572,11 @@ def build_app(
     def backup_list() -> Any:
         with_info = request.query.get("with_info", "").lower() == "true"
         return _run_tool("backup.list", {"with_info": with_info})
+
+    @app.get("/package/backup/<name>")
+    def backup_info(name: str) -> Any:
+        with_details = request.query.get("with_details", "").lower() == "true"
+        return _run_tool("backup.info", {"name": name, "with_details": with_details})
 
     @app.post("/package/backup/create")
     def backup_create() -> Any:

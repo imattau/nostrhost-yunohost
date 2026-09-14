@@ -113,6 +113,11 @@ class BackupListArgs(_Strict):
     with_info: bool = False
 
 
+class BackupInfoArgs(_Strict):
+    name: str
+    with_details: bool = False
+
+
 class BackupRestoreArgs(_Strict):
     name: str
     apps: list[str] = Field(default_factory=list)
@@ -468,6 +473,17 @@ def _safe_backup_list(with_info: bool = False, **extra: Any) -> dict[str, Any]:
     from yunohost.backup import backup_list
 
     return backup_list(with_info=bool(with_info))
+
+
+def _safe_backup_info(name: str = "", with_details: bool = False, **extra: Any) -> dict[str, Any]:
+    name = str(name or "").strip()
+    if extra:
+        raise OperationError(f"backup.info does not accept extra args: {sorted(extra)}")
+    if not name:
+        raise OperationError("backup.info requires a non-empty 'name'")
+    from yunohost.backup import backup_info
+
+    return backup_info(name, with_details=bool(with_details))
 
 
 def _safe_backup_restore(name: str = "", apps: list[str] | None = None, system: list[str] | None = None, force: bool = False, **extra: Any) -> dict[str, Any]:
@@ -1688,6 +1704,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="backup.list", handler=_safe_backup_list, scope=SCOPE_BACKUPS_READ,
         require_approval=False, input_model=BackupListArgs,
         description="list local backup archives",
+    ),
+    "backup.info": ToolSpec(
+        name="backup.info", handler=_safe_backup_info, scope=SCOPE_BACKUPS_READ,
+        require_approval=False, input_model=BackupInfoArgs,
+        description="details for one local backup archive (apps/system contents)",
     ),
     "backup.restore": ToolSpec(
         name="backup.restore", handler=_safe_backup_restore, scope=SCOPE_BACKUPS_RESTORE,
