@@ -769,6 +769,7 @@ class SourceProvider:
                         if source is None:
                             raise ProviderError("archive file could not be read")
                         target.write_bytes(source.read())
+                        os.chmod(target, stat.S_IMODE(member.mode))
         elif archive_format in {"auto", "zip"} and zipfile.is_zipfile(archive):
             with zipfile.ZipFile(archive) as archive_file:
                 for member in archive_file.infolist():
@@ -784,6 +785,9 @@ class SourceProvider:
                     else:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(archive_file.read(member))
+                        mode = stat.S_IMODE(member.external_attr >> 16)
+                        if mode:
+                            os.chmod(target, mode)
         else:
             raise ProviderError("source is not a supported tar or zip archive")
 

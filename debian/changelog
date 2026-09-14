@@ -1,3 +1,16 @@
+yunohost (12.1.41.43) stable; urgency=low
+
+  * nostrhost: source extraction preserves tar/zip member modes.
+    - SourceProvider._extract wrote every file with write_bytes(), dropping
+      the archive's executable bits, so packaged binaries (e.g.
+      opencode-web_nh) landed mode 0644 and their systemd units failed with
+      EACCES under ProtectSystem=strict (the runtime chmod in run.sh cannot
+      write to a read-only mount).
+    - tar members now restore S_IMODE(member.mode); zip members restore the
+      mode from external_attr when the archive records one.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 03:00:00 +0000 
+
 yunohost (12.1.41.42) stable; urgency=low
 
   * nostrhost: portal settings transition to /etc/nostrhost (clean cut).

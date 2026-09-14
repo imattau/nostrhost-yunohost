@@ -45,6 +45,25 @@ def test_source_provider_verifies_and_extracts_without_shell(tmp_path: Path):
     assert (destination / "payload.txt").read_text() == "native"
 
 
+def test_source_provider_preserves_executable_bits_on_extract(tmp_path: Path):
+    archive = tmp_path / "bin.tar.gz"
+    import tarfile
+
+    payload = b"#!/bin/sh\necho native\n"
+    with tarfile.open(archive, "w:gz") as tar:
+        info = tarfile.TarInfo("opencode")
+        info.size = len(payload)
+        info.mode = 0o755
+        tar.addfile(info, __import__("io").BytesIO(payload))
+
+    provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(archive.read_bytes()))
+    operation = provider.plan({"url": "https://example.test/bin.tar.gz", "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "destination": "/opt/opencode-web", "extract": True})[0]
+    assert provider.apply(operation)["verified"] is True
+    binary = tmp_path / "opt/opencode-web/opencode"
+    assert binary.read_bytes() == payload
+    assert (binary.stat().st_mode & 0o777) == 0o755
+
+
 def test_source_provider_rejects_hash_mismatch(tmp_path: Path):
     provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache", downloader=lambda _url, destination: destination.write_bytes(b"wrong"))
     operation = provider.plan({"url": "https://example.test/source", "sha256": "a" * 64})[0]
