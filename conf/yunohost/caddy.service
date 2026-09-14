@@ -3,6 +3,12 @@ Description=NostrHost Caddy web server
 Documentation=https://caddyserver.com/docs/
 After=network-online.target
 Wants=network-online.target
+# Native app web routes live only in Caddy's admin-API-pushed runtime
+# config, never on disk, so every (re)start - boot, manual restart, a
+# package upgrade that ships this unit and gets restarted by debhelper -
+# drops every installed native app back to the bare per-domain stub.
+# Best-effort, non-blocking: a failure here must never fail Caddy itself.
+Wants=nostrhost-web-reconcile.service
 
 [Service]
 Type=notify

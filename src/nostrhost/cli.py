@@ -388,6 +388,30 @@ def _installed_manifest(app_id: str) -> dict[str, Any]:
     return manifest
 
 
+def _iter_installed_manifests(state_dir: Path | None = None) -> list[tuple[str, dict[str, Any]]]:
+    """Yield ``(app_id, manifest)`` for every installed native app.
+
+    Reads the same ``*-manifest.json`` files ``installed_package_manifest``
+    reads for a single app, one app at a time. Used by ``app
+    reconcile-routes`` to replay every installed app's web route after Caddy
+    (re)starts and drops its admin-API-pushed routes.
+    """
+    base = state_dir or Path("/var/lib/nostrhost/state/packages")
+    results: list[tuple[str, dict[str, Any]]] = []
+    if not base.is_dir():
+        return results
+    for candidate in sorted(base.glob("*-manifest.json")):
+        app_id = candidate.name[: -len("-manifest.json")]
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        manifest = data.get("manifest") if isinstance(data, dict) else None
+        if isinstance(manifest, dict):
+            results.append((app_id, manifest))
+    return results
+
+
 def _removal_envelope(package_data: dict[str, Any]) -> dict[str, Any]:
     from nostrhost.package_engine import (
         PackageManifest,
@@ -1909,6 +1933,41 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             if not body.get("ok"):
                 raise NostrHostError(f"change-url rejected: {body.get('reason') or body.get('state')}")
             return _lifecycle_report("change-url", envelope, body)
+        _guard(run, output_as)
+
+    @app_group.command("reconcile-routes")
+    def app_reconcile_routes(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Re-apply every installed native app's Caddy route (best-effort).
+
+        Native web routes are pushed only through Caddy's admin API and are
+        never written to disk, so any Caddy restart for any reason (a
+        package upgrade that ships caddy.service and gets restarted by
+        debhelper, a manual `systemctl restart caddy`, a crash-restart, a
+        reboot) drops every installed native app back to the bare
+        per-domain stub until something replays its route. This is that
+        replay step, intended to run automatically via
+        nostrhost-web-reconcile.service (After=caddy.service, wanted by
+        caddy.service itself) rather than by hand.
+
+        Reconciles each app's FULL stored manifest, not just its [web]
+        resource: the resource engine already no-ops every operation whose
+        current state still matches, so in practice this only re-applies
+        what Caddy actually lost (route, permission, health check) — no
+        riskier than re-running `app install` for every installed app.
+        Failures are per-app and do not stop the rest from reconciling.
+        """
+        def run() -> Any:
+            results: dict[str, Any] = {}
+            for app_id, manifest in _iter_installed_manifests():
+                if not isinstance(manifest.get("web"), dict):
+                    continue  # nothing to reconcile for a routeless package
+                try:
+                    envelope = _plan_envelope(manifest, None)
+                    body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+                    results[app_id] = {"ok": bool(body.get("ok")), "reason": body.get("reason") or body.get("state")}
+                except Exception as exc:  # noqa: BLE001 - best-effort across every installed app
+                    results[app_id] = {"ok": False, "error": str(exc)}
+            return {"reconciled": results}
         _guard(run, output_as)
 
     @app_group.command("backup")

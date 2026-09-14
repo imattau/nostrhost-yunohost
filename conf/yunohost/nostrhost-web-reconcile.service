@@ -1,0 +1,13 @@
+[Unit]
+Description=NostrHost native app web-route reconciliation (post-Caddy-restart)
+After=caddy.service
+Requisite=caddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nostrhost app reconcile-routes --output-as none
+
+# No [Install] section on purpose: this unit is only ever meant to run as a
+# side effect of caddy.service's own Wants=nostrhost-web-reconcile.service
+# (every time Caddy starts), never enabled/started independently at boot -
+# that would race it a second time via multi-user.target.

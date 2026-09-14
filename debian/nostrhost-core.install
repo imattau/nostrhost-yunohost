@@ -32,6 +32,7 @@ conf/yunohost/nostr-ddnswatchd.service /lib/systemd/system/
 conf/yunohost/nostr-api.service /lib/systemd/system/
 conf/yunohost/nostr-portal-api.service /lib/systemd/system/
 conf/yunohost/caddy.service /lib/systemd/system/
+conf/yunohost/nostrhost-web-reconcile.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.timer /lib/systemd/system/
 locales/* /usr/share/yunohost/locales/

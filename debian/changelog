@@ -1,3 +1,27 @@
+yunohost (12.1.41.47) stable; urgency=low
+
+  * nostrhost: reconcile native app web routes after every Caddy restart.
+    - native app routes are pushed only through Caddy's admin API and never
+      written to disk; any Caddy restart for any reason (a package upgrade
+      that ships caddy.service and gets restarted by debhelper on unpack,
+      a manual `systemctl restart caddy`, a crash-restart, a reboot) drops
+      every installed native app back to the bare per-domain stub until
+      something replays its route (found live: upgrading to 12.1.41.46 on
+      the clean7 VM silently broke ditto, opencode-web_nh, nostrhost-test
+      and configdemo all at once).
+    - new `nostrhost app reconcile-routes`: best-effort, per-app, replays
+      every installed native app's full stored manifest through
+      package.reconcile. The resource engine already no-ops any operation
+      whose current state still matches, so this only actually re-applies
+      what Caddy lost (route, permission, health check); one app's failure
+      never stops the rest from reconciling.
+    - new nostrhost-web-reconcile.service (oneshot, After=/Requisite=
+      caddy.service, no [Install] section - only ever triggered by
+      caddy.service's own new Wants=nostrhost-web-reconcile.service, never
+      independently enabled) runs it automatically every time Caddy starts.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 09:00:00 +0000
+
 yunohost (12.1.41.46) stable; urgency=low
 
   * nostrhost: allow --domain/--path overrides on native app install/upgrade.
