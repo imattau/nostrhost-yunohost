@@ -298,6 +298,38 @@ def _verify_package(package_data: dict[str, Any], coordinate: dict[str, Any] | N
         raise NostrHostError(f"package manifest hash mismatch: expected {expected}, got {actual}")
 
 
+def _apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, path: str | None) -> dict[str, Any]:
+    """Apply install-time ``[web].domain``/``[web].path`` overrides.
+
+    Domain and path are install-time parameters (which host, which URL mount
+    point) rather than part of the package's own signed content, so this
+    must run on a copy of ``package_data`` and only *after* ``_verify_package``
+    has checked the original against the catalogue's ``manifest_sha256`` —
+    overriding them before verification would let an override silently
+    forge what the catalogue actually signed. ``health.path`` is a separate
+    literal field that packages conventionally set equal to ``web.path``
+    (see nh-package-template's docs/new-package.md); keep it in sync so the
+    health check still targets the right route after a ``--path`` override.
+    """
+    if domain is None and path is None:
+        return package_data
+    import copy
+
+    package_data = copy.deepcopy(package_data)
+    web = package_data.get("web")
+    if not isinstance(web, dict):
+        raise NostrHostError("--domain/--path given but the package declares no [web] resource")
+    old_path = web.get("path")
+    if domain is not None:
+        web["domain"] = domain
+    if path is not None:
+        web["path"] = path
+        health = package_data.get("health")
+        if isinstance(health, dict) and health.get("path") == old_path:
+            health["path"] = path
+    return package_data
+
+
 def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None) -> dict[str, Any]:
     from nostrhost.package_engine import package_plan_envelope
 
@@ -1752,6 +1784,8 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         revision: str = typer.Option(None, "--revision", help="override the catalogue git revision"),
         package_path: str = typer.Option(None, "--package-path", help="override the catalogue package.toml path"),
         manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
+        domain: str = typer.Option(None, "--domain", help="install-time override for [web].domain"),
+        path: str = typer.Option(None, "--path", help="install-time override for [web].path"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Install a native app through the signed operation chain.
@@ -1759,11 +1793,17 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         Resolves the catalogue coordinate, fetches and verifies package.toml
         (manifest_sha256), plans the resource-engine operations and runs them
         through the signed request -> policy -> approval -> execute chain.
+
+        --domain/--path let one package.toml be installed on whichever domain
+        and URL path the operator chooses, rather than the package hardcoding
+        one — applied only after manifest_sha256 verification, so they can
+        never be used to forge what the catalogue actually signed.
         """
         def run() -> Any:
             resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
             package_data = _load_package_data(source, resolved)
             _verify_package(package_data, resolved)
+            package_data = _apply_web_overrides(package_data, domain=domain, path=path)
             envelope = _plan_envelope(package_data, resolved)
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
@@ -1779,6 +1819,8 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         revision: str = typer.Option(None, "--revision", help="override the catalogue git revision"),
         package_path: str = typer.Option(None, "--package-path", help="override the catalogue package.toml path"),
         manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
+        domain: str = typer.Option(None, "--domain", help="override [web].domain for this upgrade (default: keep the currently installed domain)"),
+        path: str = typer.Option(None, "--path", help="override [web].path for this upgrade (default: keep the currently installed path)"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Upgrade a native app to the resolved catalogue version.
@@ -1786,12 +1828,26 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         Conservative by construction: the resource engine re-applies only the
         operations whose current state no longer satisfies the new manifest,
         so data resources are left alone unless the manifest changes them.
+
+        An upgrade never moves the app: package.toml is reloaded fresh from
+        source on every upgrade, so without this, whatever [web].domain/path
+        it happens to declare (a placeholder, or just a different value than
+        what --domain/--path set at install time) would silently overwrite
+        the live route. --domain/--path here default to the currently
+        installed values; pass them explicitly only to combine an upgrade
+        with a deliberate move (ordinary moves should use `app change-url`).
         """
         def run() -> Any:
             installed = _installed_manifest(coordinate)
             resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
             package_data = _load_package_data(source, resolved)
             _verify_package(package_data, resolved)
+            installed_web = installed.get("web") or {}
+            package_data = _apply_web_overrides(
+                package_data,
+                domain=domain or installed_web.get("domain"),
+                path=path or installed_web.get("path"),
+            )
             from nostrhost.app_management import carry_forward_compatible_settings
 
             package_data = carry_forward_compatible_settings(installed, package_data)
