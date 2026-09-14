@@ -634,6 +634,71 @@ def test_permission_provider_reconciles_portal_permission():
     assert provider.inspect(desired)["exists"] is False
 
 
+def test_permission_provider_sets_url_before_show_tile_on_update():
+    """YunoHost's user_permission_update() downgrades show_tile=True to False
+    when the permission has no URL yet, so the provider must apply the URL
+    before show_tile when reconciling an existing permission."""
+    state = {
+        "example.main": {
+            "url": None,
+            "additional_urls": [],
+            "allowed": [],
+            "auth_header": True,
+            "auth_request": False,
+            "show_tile": False,
+            "protected": False,
+        }
+    }
+    order: list[str] = []
+
+    class API:
+        syncs = 0
+
+        def info(self, name):
+            return state[name].copy()
+
+        def create(self, name, **kwargs):
+            order.append("create")
+            state[name] = dict(kwargs)
+
+        def update(self, name, *, add, remove, show_tile, protected, **kwargs):
+            order.append("update")
+            state[name]["allowed"] = [
+                g for g in state[name]["allowed"] if g not in remove
+            ] + add
+            state[name]["show_tile"] = show_tile
+            state[name]["protected"] = protected
+
+        def url(self, name, *, url, set_url, auth_header, **kwargs):
+            order.append("url")
+            state[name].update(url=url, additional_urls=set_url, auth_header=auth_header)
+
+        def delete(self, name, **kwargs):
+            del state[name]
+
+        def sync(self):
+            self.syncs += 1
+
+        def set_auth_request(self, name, enabled):
+            state[name]["auth_request"] = enabled
+
+    provider = PermissionProvider(api=API())
+    desired = {
+        "app": "example",
+        "name": "main",
+        "url": "example.test/example",
+        "allowed": ["all_users"],
+        "show_tile": True,
+        "auth_request": True,
+        "additional_urls": [],
+    }
+    provider.apply(provider.plan(desired)[0])
+
+    assert order == ["url", "update"], "URL must be applied before show_tile"
+    assert state["example.main"]["url"] == "example.test/example"
+    assert state["example.main"]["show_tile"] is True
+
+
 def test_port_provider_checks_bind_availability():
     class Probe:
         def bind(self, address): self.address = address

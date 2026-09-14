@@ -30,6 +30,8 @@ logger = logging.getLogger("nostr-permissions")
 
 DEFAULT_PROJECTION = Path("/etc/nostrhost/permissions.json")
 
+PORTAL_SETTINGS_DIR = "/etc/nostrhost/portal"
+
 WELL_KNOWN_PUBLIC_URIS = (
     r"re:^[^/]*/502\.html$",
     r"re:^[^/]*/\.well-known/ynh-diagnosis/.*$",
@@ -114,18 +116,171 @@ def _merge_nip51_grants(permissions: dict[str, Any]) -> None:
         logger.debug("skipping NIP-51 permission merge: %s", exc)
 
 
+def build_portal_projection() -> dict[str, dict[str, dict[str, Any]]]:
+    """Build the per-portal-domain ``apps`` dict the portal SPA renders.
+
+    Mirrors ``app_ssowatconf``'s portal section: one entry per permission with
+    a URL and ``show_tile`` set, carrying ``label``/``users``/``public``/
+    ``url``/``description``/``order`` plus ``hide_from_public`` and ``logo``
+    when declared. Grouped by the top-level portal domain so the portal SPA
+    (which fetches ``/public``) can serve each domain's tiles.
+    """
+    from yunohost.app import _get_manifest_of_app, _load_apps_catalog
+    from yunohost.domain import domain_list
+    from yunohost.permission import user_permission_list
+
+    portal_domains = domain_list(exclude_subdomains=True)["domains"]
+
+    all_permissions = user_permission_list(
+        full=True, ignore_system_perms=True, absolute_urls=True
+    )["permissions"]
+
+    # Apps can opt out of the catalog lookup during postinstall (no network).
+    try:
+        apps_catalog = _load_apps_catalog()["apps"] if os.path.exists("/etc/yunohost/installed") else {}
+    except Exception as exc:  # noqa: BLE001 - default logo is optional
+        logger.warning("skipping catalog logo lookup: %s", exc)
+        apps_catalog = {}
+
+    portal_domains_apps: dict[str, dict[str, dict[str, Any]]] = {
+        domain: {} for domain in portal_domains
+    }
+
+    for perm_name, perm_info in all_permissions.items():
+        uris = list(
+            filter(None, [perm_info.get("url"), *perm_info.get("additional_urls", [])])
+        )
+        # No URL -> nothing to tile; show_tile falsy -> hidden from the portal.
+        if not uris or not perm_info.get("show_tile", False):
+            continue
+
+        app_id = perm_name.split(".")[0]
+        app_domain = uris[0].split("/")[0]
+        app_portal_domain = next(
+            domain for domain in portal_domains if domain in app_domain
+        )
+
+        app_portal_info: dict[str, Any] = {
+            "label": perm_info["label"],
+            "users": perm_info["corresponding_users"],
+            "public": "visitors" in (perm_info.get("allowed") or []),
+            "url": uris[0],
+            "description": perm_info.get("description")
+            or _get_manifest_of_app(app_id)["description"],
+            "order": perm_info.get("order", 100),
+        }
+        if perm_info.get("hide_from_public"):
+            app_portal_info["hide_from_public"] = True
+
+        # Logo may be customized via the perm setting, otherwise the default
+        # logo from the main permission or the catalog.
+        app_base_id = app_id.split("__")[0]
+        logo_hash = (
+            perm_info.get("logo_hash")
+            or all_permissions.get(f"{app_id}.main", {}).get("logo_hash")
+            or apps_catalog.get(app_base_id, {}).get("logo_hash")
+        )
+        if logo_hash:
+            app_portal_info["logo"] = f"/nostrhost/sso/applogos/{logo_hash}.png"
+
+        portal_domains_apps[app_portal_domain][perm_name] = app_portal_info
+
+    return portal_domains_apps
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, sort_keys=True, indent=4).encode() + b"\n"
+
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".portal-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def write_portal_projection(
+    portal_domains_apps: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> None:
+    """Write the per-domain portal settings files to ``PORTAL_SETTINGS_DIR``.
+
+    The ``apps`` key is regenerated from the permission projection; every
+    other key already in a domain's file (theme/title/intro written by the
+    domain config panel) is preserved. Stale files for removed domains are
+    cleaned up, mirroring what ``app_ssowatconf`` used to do for the retired
+    ``/etc/yunohost/portal`` location.
+    """
+    from yunohost.settings import settings_get
+    from yunohost.utils.file_utils import read_json
+
+    import json
+
+    if portal_domains_apps is None:
+        portal_domains_apps = build_portal_projection()
+
+    portal_email_settings = {
+        k: v
+        for k, v in settings_get("security.portal", export=True).items()
+        if "allow_edit_email" in k
+    }
+
+    base = Path(PORTAL_SETTINGS_DIR)
+
+    for domain, apps in portal_domains_apps.items():
+        portal_settings: dict[str, Any] = {}
+        portal_settings_path = base / f"{domain}.json"
+        if portal_settings_path.exists():
+            portal_settings.update(read_json(str(portal_settings_path)))
+        portal_settings.update(portal_email_settings)
+        # Never override anything other than "apps": the file is shared with
+        # the domain config panel's portal options.
+        portal_settings["apps"] = apps
+        payload = json.dumps(portal_settings, sort_keys=True, indent=4).encode() + b"\n"
+        try:
+            if portal_settings_path.exists() and portal_settings_path.read_bytes() == payload:
+                continue
+        except OSError:
+            pass
+        _atomic_write_json(portal_settings_path, portal_settings)
+
+    # Cleanup stale files from possibly old domains.
+    for setting_file in base.iterdir():
+        if setting_file.name.endswith(".json"):
+            domain = setting_file.name[: -len(".json")]
+            if domain not in portal_domains_apps:
+                setting_file.unlink()
+
+
 def write_permissions_projection(
     path: Path = DEFAULT_PROJECTION, *, on_change: bool = True
 ) -> bool:
     """Atomically write the projection JSON, world-readable.
 
-    Returns True when the file was (re)written, False when it already matched
-    (``on_change``). Never raises on a stale/no-op rebuild.
+    Also regenerates the portal ``apps`` projection (``write_portal_projection``)
+    so the authd map and the portal tiles never drift. The portal projection is
+    refreshed on every call -- before the ``on_change`` early return -- because
+    its content (show_tile, labels, urls) can change independently of the authd
+    map's serialized form. Returns True when the file was (re)written, False
+    when it already matched (``on_change``). Never raises on a stale/no-op
+    rebuild.
     """
     import json
 
     projection = build_permissions_projection()
     payload = json.dumps(projection, indent=1, sort_keys=True).encode() + b"\n"
+
+    # The portal tiles are a presentation of the same permission map; a
+    # failure here must not break the authd's critical projection.
+    try:
+        write_portal_projection()
+    except Exception as exc:  # noqa: BLE001 - portal projection is non-critical
+        logger.error("failed to regenerate portal projection: %s", exc)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:

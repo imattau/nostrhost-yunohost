@@ -395,6 +395,16 @@ class PermissionProvider:
             )
         else:
             current = actual.get("allowed", [])
+            # URL first: user_permission_update() with show_tile=True silently
+            # downgrades the tile to False when the permission has no URL yet,
+            # so the tile URL must be in place before show_tile is applied.
+            self._api().url(
+                permission,
+                url=desired.get("url"),
+                set_url=desired.get("additional_urls", []),
+                auth_header=desired.get("auth_header", True),
+                sync_perm=False,
+            )
             self._api().update(
                 permission,
                 add=[group for group in allowed if group not in current],
@@ -403,13 +413,6 @@ class PermissionProvider:
                 protected=desired.get("protected", False),
                 sync_perm=False,
                 log_success_as_debug=True,
-            )
-            self._api().url(
-                permission,
-                url=desired.get("url"),
-                set_url=desired.get("additional_urls", []),
-                auth_header=desired.get("auth_header", True),
-                sync_perm=False,
             )
         self._api().set_auth_request(permission, bool(desired.get("auth_request", False)))
         self._api().sync()

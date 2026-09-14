@@ -108,7 +108,7 @@ def _reject_native_catalog_lifecycle(app: str, action: str) -> None:
         )
 
 
-PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
+PORTAL_SETTINGS_DIR = "/etc/nostrhost/portal"
 APP_FILES_TO_COPY = [
     "manifest.json",
     "manifest.toml",
@@ -1986,8 +1986,7 @@ def app_ssowatconf() -> None:
         domain_list,
     )
     from .permission import AppPermInfos, user_permission_list
-    from .settings import settings_get
-    from .utils.file_utils import read_json, write_to_json
+    from .utils.file_utils import write_to_json
 
     domain_portal_dict = _get_domain_portal_dict()
 
@@ -2163,43 +2162,14 @@ def app_ssowatconf() -> None:
 
     write_to_json("/etc/ssowat/conf.json", conf_dict, sort_keys=True, indent=4)  # type: ignore[arg-type]
 
-    # Generate a file per possible portal with available apps
-    portal_email_settings = {
-        k: v
-        for k, v in settings_get("security.portal", export=True).items()
-        if "allow_edit_email" in k
-    }
-    for domain, apps in portal_domains_apps.items():
-        portal_settings = {}
+    # Generate a file per possible portal with available apps. SSOwat is
+    # retired; the portal settings live under /etc/nostrhost/portal (see
+    # nostrhost.permissions.write_portal_projection), which regenerates the
+    # "apps" projection from the permission list and preserves the domain
+    # config panel's portal options.
+    from .nostrhost.permissions import write_portal_projection
 
-        # If possible, load the existing file
-        portal_settings_path = Path(PORTAL_SETTINGS_DIR) / f"{domain}.json"
-        if portal_settings_path.exists():
-            this_domain_portal_settings: dict[str, Any] = read_json(
-                str(portal_settings_path)
-            )  # type: ignore[assignment]
-            portal_settings.update(this_domain_portal_settings)
-
-        # Update with the new settings
-        portal_settings.update(portal_email_settings)
-
-        # Do no override anything else than "apps" since the file is shared
-        # with domain's config panel "portal" options
-        portal_settings["apps"] = apps
-
-        write_to_json(
-            str(portal_settings_path),
-            portal_settings,  # type: ignore[arg-type]
-            sort_keys=True,
-            indent=4,
-        )
-
-    # Cleanup old files from possibly old domains
-    for setting_file in Path(PORTAL_SETTINGS_DIR).iterdir():
-        if setting_file.name.endswith(".json"):
-            domain = setting_file.name[: -len(".json")]
-            if domain not in portal_domains_apps:
-                setting_file.unlink()
+    write_portal_projection(portal_domains_apps)
 
     logger.debug(tr("ssowat_conf_generated"))
 

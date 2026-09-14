@@ -1,11 +1,12 @@
 """Portal settings + session routes for the portal-api (authd, 127.0.0.1:6788).
 
 The portal SPA fetches its boot settings from ``/nostrhost/portalapi/public``
-(which app_ssowatconf() used to bake into ``/etc/yunohost/portal/<domain>.json``)
 and the signed-in user from ``/nostrhost/portalapi/me``. With SSOwat and the
 moulinette portal-api retired, the portal-api serves these straight from the
 native permission projection (``nostrhost.permissions``) + the native account
-store — no LDAP, no on-disk portal settings file required.
+store — no LDAP, no on-disk portal settings file required. The per-domain
+``apps`` projection (and the domain config panel's portal options) live under
+``/etc/nostrhost/portal`` (written by ``nostrhost.permissions.write_portal_projection``).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 
 logger = logging.getLogger("nostr-portal-settings")
 
-PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
+PORTAL_SETTINGS_DIR = "/etc/nostrhost/portal"
 
 
 def _host_domain(host: str) -> str:

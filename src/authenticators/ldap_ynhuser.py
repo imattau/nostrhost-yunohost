@@ -73,7 +73,7 @@ def SESSION_SECRET() -> str:
 
 # Cache on-disk settings to RAM for faster access
 DOMAIN_USER_ACL_DICT: dict[str, dict[str, Any]] = {}
-PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
+PORTAL_SETTINGS_DIR = "/etc/nostrhost/portal"
 
 
 # Should a user have *minimal* access to a domain?
