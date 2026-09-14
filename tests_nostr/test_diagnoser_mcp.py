@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import subprocess
+import sys
 
 import pytest
 
@@ -129,13 +130,68 @@ def test_check_catalog_skips_kind_check_when_relay_config_unreadable(monkeypatch
     assert len(items) == 1  # only the service-status item, no kind verdict
 
 
-def test_run_combines_both_checks(monkeypatch):
+def test_relay_reachable_none_on_success(monkeypatch):
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    fake_module = type("_FakeWebsocketsModule", (), {"connect": staticmethod(lambda *a, **kw: _FakeConnection())})
+    monkeypatch.setitem(sys.modules, "websockets.sync.client", fake_module)
+    assert mcp._relay_reachable("ws://127.0.0.1:4848") is None
+
+
+def test_relay_reachable_returns_error_on_failure(monkeypatch):
+    def boom(*a, **kw):
+        raise OSError("connection refused")
+
+    fake_module = type("_FakeWebsocketsModule", (), {"connect": staticmethod(boom)})
+    monkeypatch.setitem(sys.modules, "websockets.sync.client", fake_module)
+    error = mcp._relay_reachable("ws://127.0.0.1:4848")
+    assert error is not None
+    assert "connection refused" in error
+
+
+def test_check_notify_skipped_when_control_relay_unavailable(monkeypatch):
+    monkeypatch.setattr(mcp, "_control_relay", None)
+    items = list(mcp.MyDiagnoser._check_notify(None))
+    assert items == []
+
+
+def test_check_notify_success(monkeypatch):
+    monkeypatch.setattr(mcp, "_control_relay", lambda control_relay: "ws://127.0.0.1:4848")
+    monkeypatch.setattr(mcp, "_relay_reachable", lambda relay_url, timeout=5.0: None)
+    items = list(mcp.MyDiagnoser._check_notify(None))
+    assert items == [
+        dict(meta={"relay": "ws://127.0.0.1:4848"}, status="SUCCESS", summary="diagnosis_mcp_notify_relay_reachable")
+    ]
+
+
+def test_check_notify_warns_when_unreachable(monkeypatch):
+    monkeypatch.setattr(mcp, "_control_relay", lambda control_relay: "ws://127.0.0.1:4848")
+    monkeypatch.setattr(mcp, "_relay_reachable", lambda relay_url, timeout=5.0: "connection refused")
+    items = list(mcp.MyDiagnoser._check_notify(None))
+    assert items[0]["status"] == "WARNING"
+    assert items[0]["summary"] == "diagnosis_mcp_notify_relay_unreachable"
+    assert items[0]["details"] == ["diagnosis_mcp_notify_relay_unreachable_details"]
+    assert items[0]["data"] == {"error": "connection refused"}
+
+
+def test_run_combines_all_checks(monkeypatch):
     monkeypatch.setattr(mcp, "_systemd_active", lambda unit: "active")
     monkeypatch.setattr(mcp, "_unit_installed", lambda unit: False)
     monkeypatch.setattr(mcp, "_relay_allowed_kinds", lambda path: None)
+    monkeypatch.setattr(mcp, "_control_relay", lambda control_relay: "ws://127.0.0.1:4848")
+    monkeypatch.setattr(mcp, "_relay_reachable", lambda relay_url, timeout=5.0: None)
     # bypass Diagnoser.__init__ (pulls in the full moulinette i18n stack,
-    # out of scope here) — run() only calls the two check methods below.
+    # out of scope here) — run() only calls the check methods below.
     diagnoser = object.__new__(mcp.MyDiagnoser)
     items = list(mcp.MyDiagnoser.run(diagnoser))
     summaries = [item["summary"] for item in items]
-    assert summaries == ["diagnosis_mcp_operationsd_up", "diagnosis_mcp_catalog_not_installed"]
+    assert summaries == [
+        "diagnosis_mcp_operationsd_up",
+        "diagnosis_mcp_catalog_not_installed",
+        "diagnosis_mcp_notify_relay_reachable",
+    ]
