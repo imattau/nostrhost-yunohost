@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from nostrhost.core import Moulinette
 from nostrhost.i18n import tr
-from packaging import version
 from typing_extensions import TypedDict
 
 from .log import OperationLogger, is_unit_operation
@@ -697,37 +696,23 @@ def tools_migrations_list(
 ) -> dict[str, list[dict[str, Any]]]:
     """
     List existing migrations
+
+    nostrhost has retired the upstream YunoHost migrations subsystem: this
+    fork only ever installs onto a fresh bookworm/YunoHost 12 system, so no
+    migration under migrations/ can ever legitimately apply, and pulling in
+    a future upstream migration via a rebase could otherwise run silently
+    against state nostrhost now manages itself (see e.g. 0032_firewall_config,
+    which assumes a firewall.yml schema nostrhost may have already replaced).
+    Rather than deleting the migration files (churn on every upstream rebase,
+    same tradeoff as docs/LDAP-RETIREMENT.md), this always reports an empty
+    list; see tools_migrations_run below for the matching no-op.
     """
 
     # Check for option conflict
     if pending and done:
         raise YunohostValidationError("migrations_list_conflict_pending_done")
 
-    # Get all migrations
-    _migrations = _get_migrations_list()
-
-    # Reduce to dictionaries
-    migrations = [
-        {
-            "id": migration.id,
-            "number": migration.number,
-            "name": migration.name,
-            "mode": migration.mode,
-            "state": migration.state,
-            "description": migration.description,
-            "disclaimer": migration.disclaimer,
-        }
-        for migration in _migrations
-    ]
-
-    # If asked, filter pending or done migrations
-    if pending or done:
-        if done:
-            migrations = [m for m in migrations if m["state"] != "pending"]
-        if pending:
-            migrations = [m for m in migrations if m["state"] == "pending"]
-
-    return {"migrations": migrations}
+    return {"migrations": []}
 
 
 def tools_migrations_run(
@@ -741,144 +726,12 @@ def tools_migrations_run(
     """
     Perform migrations
 
-    targets        A list migrations to run (all pendings by default)
-    --skip         Skip specified migrations (to be used only if you know what you are doing) (must explicit which migrations)
-    --auto         Automatic mode, won't run manual migrations (to be used only if you know what you are doing)
-    --force-rerun  Re-run already-ran migrations (to be used only if you know what you are doing)(must explicit which migrations)
-    --accept-disclaimer  Accept disclaimers of migrations (please read them before using this option) (only valid for one migration)
-    --skip-postmigrations  Don't automatically run the following migrations if any. Especially useful to not run the migrations following a Debian version bump and run them manually instead (to be used only if you know what you are doing)
+    Permanently disabled on nostrhost -- see the docstring on
+    tools_migrations_list above. Raises rather than silently no-op'ing so
+    callers (admin UI, CLI, MCP tools) get an explicit signal instead of a
+    fake "success" with nothing having happened.
     """
-
-    all_migrations = _get_migrations_list()
-
-    # Small utility that allows up to get a migration given a name, id or number later
-    def get_matching_migration(target):
-        for m in all_migrations:
-            if m.id == target or m.name == target or m.id.split("_")[0] == target:
-                return m
-
-        raise YunohostValidationError("migrations_no_such_migration", id=target)
-
-    # Dirty hack to mark the bullseye->bookworm as done ...
-    # it may still be marked as 'pending' if for some reason the migration crashed,
-    # but the admins ran 'apt full-upgrade' to manually finish the migration
-    # ... in which case it won't be magically flagged as 'done' until here
-    migrate_to_bookworm = get_matching_migration("migrate_to_bookworm")
-    if migrate_to_bookworm.state == "pending":
-        migrate_to_bookworm.state = "done"
-        _write_migration_state(migrate_to_bookworm.id, "done")
-
-    # auto, skip and force are exclusive options
-    if auto + skip + force_rerun > 1:
-        raise YunohostValidationError("migrations_exclusive_options")
-
-    # If no target specified
-    if not targets:
-        # skip, revert or force require explicit targets
-        if skip or force_rerun:
-            raise YunohostValidationError("migrations_must_provide_explicit_targets")
-
-        # Otherwise, targets are all pending migrations
-        migrationtargets = [m for m in all_migrations if m.state == "pending"]
-
-    # If explicit targets are provided, we shall validate them
-    else:
-        migrationtargets = [get_matching_migration(t) for t in targets]
-        done = [t.id for t in migrationtargets if t.state != "pending"]
-        pending = [t.id for t in migrationtargets if t.state == "pending"]
-
-        if skip and done:
-            raise YunohostValidationError(
-                "migrations_not_pending_cant_skip", ids=", ".join(done)
-            )
-        if force_rerun and pending:
-            raise YunohostValidationError(
-                "migrations_pending_cant_rerun", ids=", ".join(pending)
-            )
-        if not (skip or force_rerun) and done:
-            raise YunohostValidationError("migrations_already_ran", ids=", ".join(done))
-
-    # So, is there actually something to do ?
-    if not migrationtargets:
-        logger.info(tr("migrations_no_migrations_to_run"))
-        return
-
-    # Actually run selected migrations
-    for migration in migrationtargets:
-        # If we are migrating in "automatic mode" (i.e. from debian configure
-        # during an upgrade of the package) but we are asked for running
-        # migrations to be ran manually by the user, stop there and ask the
-        # user to run the migration manually.
-        if auto and migration.mode == "manual":
-            logger.warning(tr("migrations_to_be_ran_manually", id=migration.id))
-
-            # We go to the next migration
-            continue
-
-        # Check for migration dependencies
-        if not skip:
-            dependencies = [
-                get_matching_migration(dep) for dep in migration.dependencies
-            ]
-            pending_dependencies = [
-                dep.id for dep in dependencies if dep.state == "pending"
-            ]
-            if pending_dependencies:
-                logger.error(
-                    tr(
-                        "migrations_dependencies_not_satisfied",
-                        id=migration.id,
-                        dependencies_id=", ".join(pending_dependencies),
-                    )
-                )
-                continue
-
-        # If some migrations have disclaimers (and we're not trying to skip them)
-        if migration.disclaimer and not skip:
-            # require the --accept-disclaimer option.
-            # Otherwise, go to the next migration
-            if not accept_disclaimer:
-                logger.warning(
-                    tr(
-                        "migrations_need_to_accept_disclaimer",
-                        id=migration.id,
-                        disclaimer=migration.disclaimer,
-                    )
-                )
-                continue
-            # --accept-disclaimer will only work for the first migration
-            else:
-                accept_disclaimer = False
-
-        # Start register change on system
-        operation_logger = OperationLogger("tools_migrations_migrate_forward")
-        operation_logger.start()
-
-        migration.skip_postmigrations = skip_postmigrations
-
-        if skip:
-            logger.warning(tr("migrations_skip_migration", id=migration.id))
-            migration.state = "skipped"
-            _write_migration_state(migration.id, "skipped")
-            operation_logger.success()
-        else:
-            try:
-                logger.info(tr("migrations_running_forward", id=migration.id))
-                migration.run()
-            except Exception as e:
-                # migration failed, let's stop here but still update state because
-                # we managed to run the previous ones
-                msg = tr(
-                    "migrations_migration_has_failed", exception=e, id=migration.id
-                )
-                logger.error(msg, exc_info=True)
-                operation_logger.error(msg)
-            else:
-                logger.success(tr("migrations_success_forward", id=migration.id))
-                migration.state = "done"
-                _write_migration_state(migration.id, "done")
-
-                operation_logger.success()
+    raise YunohostValidationError("migrations_disabled_nostrhost")
 
 
 def tools_migrations_state() -> dict[str, dict[Any, Any]]:
@@ -958,63 +811,21 @@ def _skip_all_migrations() -> None:
 
 
 def _tools_migrations_run_after_system_restore(backup_version: str) -> None:
-    all_migrations = _get_migrations_list()
-
-    current_version = version.parse(ynh_packages_version()["yunohost"]["version"])
-    backup_version_v = version.parse(backup_version)
-
-    if backup_version_v == current_version:
-        return
-
-    for migration in all_migrations:
-        migration_version = getattr(migration, "introduced_in_version", None)
-        migration_method = getattr(migration, "run_after_system_restore", None)
-
-        if (
-            migration_version is not None
-            and version.parse(migration_version) > backup_version_v
-            and migration_method is not None
-        ):
-            try:
-                logger.info(tr("migrations_running_forward", id=migration.id))
-                migration_method()
-            except Exception as e:
-                msg = tr(
-                    "migrations_migration_has_failed", exception=e, id=migration.id
-                )
-                logger.error(msg, exc_info=True)
-                raise
+    # nostrhost has retired the upstream migrations subsystem (see
+    # tools_migrations_list/tools_migrations_run above): backups are always
+    # created and restored within the same nostrhost/YunoHost 12.1.x
+    # lineage, so no migration's run_after_system_restore hook can
+    # legitimately apply, and invoking one from a legacy upstream migration
+    # (e.g. 0032_firewall_config, 0033_rework_permission_infos) risks
+    # touching state nostrhost now manages itself.
+    return
 
 
 def _tools_migrations_run_before_app_restore(
     backup_version, app_id, app_backup_in_archive
 ):
-    all_migrations = _get_migrations_list()
-
-    current_version = version.parse(ynh_packages_version()["yunohost"]["version"])
-    backup_version = version.parse(backup_version)
-
-    if backup_version == current_version:
-        return
-
-    for migration in all_migrations:
-        migration_version = getattr(migration, "introduced_in_version", None)
-        migration_method = getattr(migration, "run_before_app_restore", None)
-
-        if (
-            migration_version is not None
-            and version.parse(migration_version) > backup_version
-            and migration_method is not None
-        ):
-            try:
-                logger.info(tr("migrations_running_forward", id=migration.id))
-                migration_method(app_id, app_backup_in_archive)
-            except Exception as e:
-                msg = tr(
-                    "migrations_migration_has_failed", exception=e, id=migration.id
-                )
-                logger.error(msg, exc_info=1)
-                raise
+    # See _tools_migrations_run_after_system_restore above.
+    return
 
 
 class Migration:

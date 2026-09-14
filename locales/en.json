@@ -743,6 +743,7 @@
     "migration_python_venv_rebuild_in_progress": "Now attempting to rebuild the Python virtualenv for `{app}`",
     "migrations_already_ran": "Those migrations are already done: {ids}",
     "migrations_dependencies_not_satisfied": "Run these migrations: '{dependencies_id}', before migration {id}.",
+    "migrations_disabled_nostrhost": "The migrations subsystem is disabled on nostrhost: this platform only ever installs onto a fresh system, so no migration here can legitimately apply.",
     "migrations_exclusive_options": "'--auto', '--skip', and '--force-rerun' are mutually exclusive options.",
     "migrations_failed_to_load_migration": "Could not load migration {id}: {error}",
     "migrations_list_conflict_pending_done": "You cannot use both '--previous' and '--done' at the same time.",
