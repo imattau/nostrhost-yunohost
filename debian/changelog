@@ -1,3 +1,17 @@
+yunohost (12.1.41.45) stable; urgency=low
+
+  * nostrhost: wire the resident daemon's automatic contribution setting.
+    - migrate contribution settings storage from a standalone
+      contribution.toml into the agent's own config.json (a "contribution"
+      block matching Go's ContributionFileConfig), so auto_submit changes
+      reach the daemon on restart.
+  * nostr-api: allow writes under /etc and /var/lib/nostrhost-agent so
+    agent settings saves (contribution config, hf_token, llm.env, the
+    agent's config.json) no longer fail with "Read-only file system".
+  * api: fix 500 on GET /package/agent/export/list by wrapping the bare
+    list as {"cycles": [...]} (Bottle only auto-serialises top-level
+    dicts).
+
 yunohost (12.1.41.44) stable; urgency=low
 
   * nostrhost: native API for agent model management and HF contribution.
