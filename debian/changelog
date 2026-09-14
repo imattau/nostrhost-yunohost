@@ -1,3 +1,22 @@
+yunohost (12.1.41.49) stable; urgency=low
+
+  * nostrhost: also reconcile native app web routes after a Caddy *reload*,
+    not just a restart.
+    - 12.1.41.47's nostrhost-web-reconcile.service only triggers via
+      caddy.service's Wants= on unit *start*; `caddy reload --config X`
+      (used by 15-caddy's do_post_regen whenever the base Caddyfile
+      changes) fully replaces the active config the same way a restart
+      does, dropping admin-API-only native routes, but never triggers a
+      systemd unit start - so it slipped through untouched (found live:
+      an unrelated regenconf run on the clean7 VM reloaded Caddy and
+      silently broke every native app again).
+    - 15-caddy's do_post_regen now also fires
+      `systemctl start --no-block nostrhost-web-reconcile.service` right
+      after its `caddy reload`, best-effort, so every reload self-heals
+      the same as every restart.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 10:56:23 +0000
+
 yunohost (12.1.41.48) stable; urgency=low
 
   * nsites Phase 3a: owner-controlled publishing registry (implementation plan

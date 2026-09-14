@@ -46,11 +46,16 @@ do_post_regen() {
     chmod -R u=rwX,go=rX /etc/caddy
 
     if [[ -n "$regen_conf_files" ]] && systemctl is-active caddy --quiet; then
-        # Best-effort reload so a changed base Caddyfile (global options,
-        # e.g. the access-log directive) takes effect immediately. Native
-        # route reconciliation goes through the Caddy admin API and is not
-        # affected by this.
+        # `caddy reload --config X` fully replaces the active config with X,
+        # same as a restart - despite what an earlier version of this
+        # comment claimed, it does NOT preserve routes that only exist via
+        # the admin API (native app web.route resources). So every reload
+        # needs the same post-Caddy-restart reconciliation caddy.service's
+        # own Wants=nostrhost-web-reconcile.service triggers on start -
+        # --no-block keeps this reload path itself fast; the reconcile job
+        # (idempotent, a few seconds) runs in the background.
         caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || systemctl reload caddy >/dev/null 2>&1 || true
+        systemctl start --no-block nostrhost-web-reconcile.service >/dev/null 2>&1 || true
     fi
     exit 0
 }
