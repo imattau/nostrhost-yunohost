@@ -715,7 +715,10 @@ def build_app(
 
     @app.get("/package/agent/export/list")
     def agent_export_list() -> Any:
-        return _agent_export_list()
+        # Bottle 0.12's response casting only auto-serialises a dict, not a
+        # bare list, at the route's top level (same reason catalog_list
+        # below wraps its result) -- wrap the array under a key.
+        return {"cycles": _agent_export_list()}
 
     @app.post("/package/agent/export/run")
     def agent_export_run() -> Any:
