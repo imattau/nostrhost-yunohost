@@ -328,6 +328,40 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     return route
 
 
+def build_nsite_routes(domain: str, upstream: str) -> dict[str, Any]:
+    """Caddy route JSON for the nsite gateway origin (D2).
+
+    The gateway domain serves only the gateway: an apex + wildcard host
+    matcher proxying to the loopback gateway. ``@id nostrhost-nsite:<domain>``
+    makes enable/disable an idempotent admin-API mutation like every other
+    route. The gateway origin must never match NostrHost's own admin/portal
+    routes — those live on other domains; the per-domain snippet for this
+    domain is ``caddy_nsite.conf`` (not the standard one).
+    """
+    host, _, port = upstream.rpartition(":")
+    if not host or not port.isdigit():
+        raise CaddyError(f"invalid nsite upstream {upstream!r} (expected host:port)")
+    return {
+        "@id": f"nostrhost-nsite:{domain}",
+        "match": [{"host": [domain, f"*.{domain}"]}],
+        "handle": [
+            {
+                "handler": "headers",
+                "response": {
+                    "set": {
+                        "X-Content-Type-Options": ["nosniff"],
+                        "Referrer-Policy": ["strict-origin-when-cross-origin"],
+                        "Cross-Origin-Opener-Policy": ["same-origin"],
+                    },
+                    "delete": ["Server"],
+                },
+            },
+            {"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]},
+        ],
+        "terminal": True,
+    }
+
+
 def _route_signature(route: dict[str, Any]) -> tuple[Any, ...]:
     """Canonical identity for idempotent comparison (ignore ``@id``)."""
     return (route.get("match"), route.get("handle"))
@@ -400,6 +434,14 @@ class CaddyAdminClient:
             return
         response.raise_for_status()
         logger.info("removed caddy route %s", route_id)
+
+    def ensure_nsite_routes(self, domain: str, upstream: str) -> str:
+        """Idempotently ensure the gateway origin route for ``domain``."""
+        return self.ensure_route(build_nsite_routes(domain, upstream))
+
+    def remove_nsite_routes(self, domain: str) -> None:
+        """Remove the gateway origin route for ``domain`` (idempotent)."""
+        self.delete_route(f"nostrhost-nsite:{domain}")
 
     def ensure_domain_site(self, domain: str) -> str:
         """Create (or reconcile) Caddy's site for ``domain`` (domain_add)."""

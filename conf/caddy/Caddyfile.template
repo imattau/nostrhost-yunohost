@@ -25,6 +25,17 @@
 		format json
 		include http.log.access
 	}
+
+	# On-Demand TLS for the nsite gateway origin (D2): before issuing any
+	# per-label certificate Caddy asks the gateway's loopback-only
+	# /internal/tls-ask endpoint, which answers 200 only for labels that
+	# decode and are allowlisted. With the gateway stopped the endpoint is
+	# unreachable and issuance is refused (safe failure). Only sites using
+	# `tls { on_demand }` (caddy_nsite.conf) are affected; normal domains
+	# keep their configured ACME/internal TLS.
+	on_demand_tls {
+		ask http://127.0.0.1:8196/internal/tls-ask
+	}
 }
 
 # Per-domain tracked snippets (regenconf renders /etc/caddy/conf.d/*.conf).

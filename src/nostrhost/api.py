@@ -481,6 +481,54 @@ def build_app(
             state=_State(),
         )
 
+    # -- nsite gateway --------------------------------------------------------
+
+    @app.get("/package/nsite/gateway/status")
+    def nsite_gateway_status() -> Any:
+        """Nsite gateway status: enabled, mode, domain, service health."""
+        return _run_tool("nsite.gateway.status", {})
+
+    @app.post("/package/nsite/gateway/enable")
+    def nsite_gateway_enable() -> Any:
+        """Enable the nsite gateway on a dedicated registered domain."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.gateway.enable",
+            {
+                "domain": body.get("domain", ""),
+                "lookup_relays": body.get("lookup_relays"),
+                "extra_relays": body.get("extra_relays"),
+                "fallback_servers": body.get("fallback_servers"),
+                "allow_http": bool(body.get("allow_http", False)),
+                "max_blob_bytes": body.get("max_blob_bytes"),
+                "cache_quota_bytes": body.get("cache_quota_bytes"),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/gateway/disable")
+    def nsite_gateway_disable() -> Any:
+        """Disable the nsite gateway: stop the unit, remove the Caddy route."""
+        return _run_lifecycle("nsite.gateway.disable", {}, state=_State())
+
+    @app.post("/package/nsite/gateway/configure")
+    def nsite_gateway_configure() -> Any:
+        """Update the nsite gateway config and reload."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.gateway.configure",
+            {
+                "domain": body.get("domain", ""),
+                "lookup_relays": body.get("lookup_relays"),
+                "extra_relays": body.get("extra_relays"),
+                "fallback_servers": body.get("fallback_servers"),
+                "allow_http": bool(body.get("allow_http", False)),
+                "max_blob_bytes": body.get("max_blob_bytes"),
+                "cache_quota_bytes": body.get("cache_quota_bytes"),
+            },
+            state=_State(),
+        )
+
     @app.get("/package/dns/plan/<domain>")
     def dns_plan(domain: str) -> Any:
         """Desired-vs-actual DNS plan for a domain (no changes)."""

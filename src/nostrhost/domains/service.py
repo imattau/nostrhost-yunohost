@@ -489,8 +489,20 @@ class DomainService:
         return self.caddy.ensure_portal_routes(name)
 
     def _dependents(self, name: str) -> list[str]:
-        """Native apps whose ``[web]`` domain is this domain or a subdomain."""
+        """Native apps whose ``[web]`` domain is this domain or a subdomain,
+        plus the nsite gateway domain when enabled (which must be removed via
+        ``nsite.gateway.disable`` first)."""
         dependents: list[str] = []
+        # The nsite gateway origin is a dependent of its own domain (D2): the
+        # domain cannot be removed while the gateway is enabled on it.
+        try:
+            from ..nsites.service import load_gateway
+
+            gateway = load_gateway(self.state_dir)
+        except Exception:  # noqa: BLE001 - nsites not installed / state unreadable
+            gateway = None
+        if gateway and gateway.get("enabled") and (gateway.get("config") or {}).get("domain") == name.rstrip("."):
+            dependents.append("nsite-gateway")
         packages_dir = self.state_dir / "packages"
         if not packages_dir.is_dir():
             return dependents

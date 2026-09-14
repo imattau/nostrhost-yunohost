@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
+from .nostrhost.nsites.operations import GatewayArgs, GatewayDisableArgs  # noqa: E402 - nsite.gateway.* input models
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
 KIND_OPERATION_REQUEST = 2200
@@ -111,6 +112,9 @@ SCOPE_AUDIT_READ = "audit.read"
 SCOPE_SYSTEM_POWER = "system.power"
 SCOPE_SETTINGS_READ = "settings.read"
 SCOPE_SETTINGS_WRITE = "settings.write"
+SCOPE_NSITES_READ = "nsites.read"
+SCOPE_NSITES_ADMIN = "nsites.admin"
+SCOPE_NSITES_PUBLISH = "nsites.publish"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -152,6 +156,9 @@ KNOWN_SCOPES = frozenset(
         SCOPE_SYSTEM_POWER,
         SCOPE_SETTINGS_READ,
         SCOPE_SETTINGS_WRITE,
+        SCOPE_NSITES_READ,
+        SCOPE_NSITES_ADMIN,
+        SCOPE_NSITES_PUBLISH,
     }
 )
 
@@ -563,6 +570,30 @@ def _safe_domain_remove(domain: str = "", force: bool = False, **args: Any) -> d
     return _impl(domain=domain, force=force, **args)
 
 
+def _safe_nsite_gateway_status(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_gateway_status as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_gateway_enable(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_gateway_enable as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_gateway_disable(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_gateway_disable as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_gateway_configure(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_gateway_configure as _impl
+
+    return _impl(**args)
+
+
 def _safe_dns_plan(domain: str = "", **args: Any) -> dict[str, Any]:
     from .nostrhost.domains.operations import _safe_dns_plan as _impl
 
@@ -748,6 +779,40 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_DOMAINS_WRITE,
         input_model=DomainRemoveArgs,
         description="remove a native domain (blocks while apps use it; deletes owned DNS only)",
+    ),
+    "nsite.gateway.status": ToolSpec(
+        name="nsite.gateway.status",
+        handler=_safe_nsite_gateway_status,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        description="gateway status: enabled, mode, domain, service health, cache",
+    ),
+    "nsite.gateway.enable": ToolSpec(
+        name="nsite.gateway.enable",
+        handler=_safe_nsite_gateway_enable,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=GatewayArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="enable the nsite gateway on a dedicated registered domain (Caddy route + unit + config)",
+    ),
+    "nsite.gateway.disable": ToolSpec(
+        name="nsite.gateway.disable",
+        handler=_safe_nsite_gateway_disable,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=GatewayDisableArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="disable the nsite gateway: stop the unit, remove the Caddy route, keep state",
+    ),
+    "nsite.gateway.configure": ToolSpec(
+        name="nsite.gateway.configure",
+        handler=_safe_nsite_gateway_configure,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=GatewayArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="update gateway config (relays, blossom servers, limits) and reload",
     ),
     "dns.plan": ToolSpec(
         name="dns.plan",

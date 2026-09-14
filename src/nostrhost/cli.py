@@ -73,6 +73,10 @@ from yunohost.nostr_operations import (
     _safe_dns_subscribe,
     _safe_dns_subscriptions,
     _safe_dns_unsubscribe,
+    _safe_nsite_gateway_status,
+    _safe_nsite_gateway_enable,
+    _safe_nsite_gateway_disable,
+    _safe_nsite_gateway_configure,
     _safe_dns_verify,
     _safe_dns_watch,
     _safe_domain_add,
@@ -126,6 +130,10 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "dns.subscribe": _safe_dns_subscribe,
     "dns.subscriptions": _safe_dns_subscriptions,
     "dns.unsubscribe": _safe_dns_unsubscribe,
+    "nsite.gateway.status": _safe_nsite_gateway_status,
+    "nsite.gateway.enable": _safe_nsite_gateway_enable,
+    "nsite.gateway.disable": _safe_nsite_gateway_disable,
+    "nsite.gateway.configure": _safe_nsite_gateway_configure,
     "network.public_ip": _safe_network_public_ip,
     "credential.set": _safe_credential_set,
     "credential.remove": _safe_credential_remove,
@@ -2202,6 +2210,51 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Refresh cached update metadata (apt cache, app catalog sources)."""
         _guard(lambda: _run_tool("updates.refresh", {"target": target}), output_as)
 
+    # -- nsites ------------------------------------------------------------
+
+    nsite = typer.Typer(name="nsite", help="NIP-5A nsite gateway (Phase 1)", no_args_is_help=True)
+
+    @nsite.command("status")
+    def nsite_status(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Gateway status: enabled, mode, domain, service health."""
+        _guard(lambda: _run_tool("nsite.gateway.status", {}), output_as)
+
+    @nsite.command("enable")
+    def nsite_enable(
+        domain: str = typer.Argument(..., help="registered gateway domain (D2)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Enable the nsite gateway on a dedicated registered domain."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.gateway.enable", {"domain": domain}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.gateway.enable rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("disable")
+    def nsite_disable(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Disable the nsite gateway: stop the unit, remove the Caddy route."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.gateway.disable", {}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.gateway.disable rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("configure")
+    def nsite_configure(
+        domain: str = typer.Argument(..., help="registered gateway domain (D2)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Update the nsite gateway config and reload."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.gateway.configure", {"domain": domain}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.gateway.configure rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     # -- logs ---------------------------------------------------------------
 
     logs = typer.Typer(name="logs", help="host logs (journal + nginx)", no_args_is_help=True)
@@ -2895,7 +2948,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, mcp, op_group, postinstall, backup, domain, dns, catalog, updates, logs, user, audit, network, credential):
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, mcp, op_group, postinstall, backup, domain, dns, nsite, catalog, updates, logs, user, audit, network, credential):
         app.add_typer(group, name=group.info.name)
 
     return app
