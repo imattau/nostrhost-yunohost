@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any, Callable
 
 from bottle import Bottle, HTTPResponse, request
@@ -584,7 +585,8 @@ def build_app(
 
     @app.post("/package/nsite/publish/plan")
     def nsite_publish_plan() -> Any:
-        """Blob inventory to an unsigned manifest + plan_sha256 (D7)."""
+        """Blob inventory to an unsigned manifest + plan_sha256 (D7), or a
+        copy plan from a source site (Phase 5, ``copy_of``)."""
         body = _json_body()
         return _run_tool(
             "nsite.publish.plan",
@@ -596,6 +598,7 @@ def build_app(
                 "site": body.get("site", ""),
                 "servers": body.get("servers"),
                 "relays": body.get("relays"),
+                "copy_of": body.get("copy_of", ""),
             },
         )
 
@@ -1036,8 +1039,29 @@ def build_app(
         # The catalogue CLI emits a bare list; the admin client expects the
         # trusted entries under an "entries" key.
         if isinstance(result, list):
-            return {"entries": result}
-        return result
+            entries: list[dict[str, Any]] = result
+            out: dict[str, Any] = {"entries": entries}
+        else:
+            out = dict(result)
+            entries = out.get("entries") or []
+        # Phase 5: annotate kind-32267 entries that are served as a registered
+        # nsite (the normal nostrhost catalogue — nsites are never a separate
+        # catalogue). The annotation is best-effort: it must not break the
+        # catalogue listing when the gateway is not enabled.
+        try:
+            from .nsites.service import NsiteService
+
+            links = NsiteService().catalogue_nsite_links()
+        except Exception:  # noqa: BLE001 - annotation is cosmetic
+            links = {}
+        if links:
+            for entry in entries:
+                decl = entry.get("declaration") or {}
+                address = f"32267:{decl.get('Publisher', '')}:{decl.get('AppID', '')}"
+                link = links.get(address)
+                if link:
+                    entry["nsite"] = link
+        return out
 
     @app.get("/package/catalog/get/<app_id>")
     def catalog_get(app_id: str) -> Any:
@@ -1613,6 +1637,15 @@ def run(
     When neither ``operator_pubkey`` nor ``admin_pubkeys`` is given, the
     operator + admins are derived from /etc/nostrhost/operator.toml (the
     nostr-api unit relies on this; nothing needs to be injected)."""
+    # Every write route runs its lifecycle through a local OperationEngine
+    # (see cli._run_lifecycle / nostr_operations.run_signed_chain), reusing
+    # nostr_operationsd's own logger. That daemon's entrypoint configures
+    # logging itself (nostr_operationsd.run()), but this one previously
+    # didn't -- so an execution failure's `logger.error(...)` had no handler
+    # anywhere in the process and was silently dropped, on top of the
+    # client-side "operation rejected" bug. Same setup as every other
+    # nostr-*d entrypoint (nostr_operationsd.run(), nostr_identityd.run(), …).
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if app is None and operator_pubkey is None and not admin_pubkeys:
         admin_pubkeys, operator_pubkey = _identity_pubkeys_from_config()
     app = app or build_app(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)

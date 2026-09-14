@@ -43,6 +43,7 @@ class Verdict:
     paths: list[tuple[str, str]] = field(default_factory=list)
     aggregate_hash: str | None = None
     label: str | None = None
+    app: str | None = None  # "kind:pubkey:d" address of the linked kind-32267 app (Phase 5)
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +302,25 @@ def validate_manifest(
             if not is_valid_ref(str(t[1])):
                 errors.append("bad_A_shape")
 
+    # Optional `app` tag (Phase 5): a single well-formed "kind:pubkey:d"
+    # address linking the site to its kind-32267 app declaration in the
+    # normal nostrhost catalogue. It carries no content-integrity meaning, so
+    # a missing tag is fine; a malformed one is an error so the server never
+    # records garbage it then has to explain away.
+    app_tags = [
+        t for t in tags if isinstance(t, list) and len(t) > 1 and t[0] == "app"
+    ]
+    app: str | None = None
+    if len(app_tags) > 1:
+        errors.append("multiple_app")
+    for t in app_tags[:1]:
+        if not is_valid_ref(str(t[1])):
+            errors.append("bad_app_shape")
+        elif len(t) > 2 and not str(t[2]).startswith(("wss://", "ws://")):
+            errors.append("bad_app_relay")
+        else:
+            app = str(t[1])
+
     # Deterministic, deduped error list so tests can compare exactly.
     errors = list(dict.fromkeys(errors))
 
@@ -326,6 +346,7 @@ def validate_manifest(
         paths=valid_paths,
         aggregate_hash=computed,
         label=label,
+        app=app,
     )
 
 

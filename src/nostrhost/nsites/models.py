@@ -57,7 +57,7 @@ class GatewayConfig(BaseModel):
     """
 
     domain: str = ""
-    mode: Literal["hosted"] = "hosted"  # "open" is deferred to Phase 5 (D3)
+    mode: Literal["hosted", "open"] = "hosted"  # open (Phase 5) needs the operator's ACME DNS-01 token
     public_listen: str = "127.0.0.1:8195"
     internal_listen: str = "127.0.0.1:8196"
     cache_path: str = "/var/cache/nostrhost-nsite"

@@ -87,6 +87,35 @@ def _valid_fqdn(fqdn: str) -> bool:
     return bool(_HOSTNAME_RE.fullmatch(fqdn))
 
 
+_OPERATOR_CONFIG = "/etc/nostrhost/operator.toml"
+
+
+def _acme_dns_config() -> tuple[str, str] | None:
+    """The operator's ACME DNS-01 credentials for open-mode wildcard certs.
+
+    Open mode (Phase 5) serves any decodable ``*.domain`` label, so Caddy
+    needs a wildcard certificate, which is a DNS-01 challenge — a DNS API
+    token the operator keeps in ``operator.toml`` (``acme_dns_provider`` +
+    ``acme_dns_api_token``), never in the regenconf-tracked Caddy snippet.
+    Returns ``None`` when absent so ``enable``/``configure`` reject open mode
+    without it (the fork renders the wildcard DNS-01 block only when the
+    token is configured).
+    """
+    import tomllib
+
+    path = os.environ.get("NOSTRHOST_OPERATOR_CONFIG", _OPERATOR_CONFIG)
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    provider = data.get("acme_dns_provider")
+    token = data.get("acme_dns_api_token")
+    if isinstance(provider, str) and provider and isinstance(token, str) and token:
+        return provider, token
+    return None
+
+
 def _pubkey_hex(pubkey: str) -> str:
     import re as _re
 
@@ -523,22 +552,46 @@ class NsiteService:
         self.caddy.remove_custom_domain_route(fqdn)
         return {"route": f"nostrhost-nsite:{fqdn}", "removed": True}
 
-    def _write_snippet(self, domain: str) -> Path:
-        """Write the gateway domain's tracked Caddy snippet (caddy_nsite.conf
-        template) so regenconf detects manual edits."""
-        template = CADDY_TEMPLATE_DIR / "caddy_nsite.conf"
+    def _write_snippet(self, domain: str, *, mode: str = "hosted") -> Path:
+        """Write the gateway domain's tracked Caddy snippet so regenconf
+        detects manual edits.
+
+        Hosted mode uses ``caddy_nsite.conf`` (On-Demand TLS asking the
+        gateway's loopback tls-ask). Open mode (Phase 5) uses
+        ``caddy_nsite_open.conf``: a wildcard certificate via DNS-01, so any
+        decodable ``*.domain`` label is covered by one cert instead of
+        on-demand per-name issuance. The snippet references the operator's
+        ACME DNS API token through Caddy env substitution (``{$…}``) — the
+        token itself lives only in ``operator.toml``, never in this
+        regenconf-tracked file.
+        """
+        template = CADDY_TEMPLATE_DIR / (
+            "caddy_nsite_open.conf" if mode == "open" else "caddy_nsite.conf"
+        )
         if not template.is_file():
             return Path("")
         CADDY_CONF_DIR.mkdir(parents=True, exist_ok=True)
         conf = template.read_text(encoding="utf-8").replace("{{ domain }}", domain)
+        if mode == "open":
+            acme = _acme_dns_config()
+            if acme is None:
+                # enable/configure gate open mode on the token, so this is
+                # unreachable in practice; never render a dns block we can't fill.
+                return Path("")
+            conf = conf.replace("{{ provider }}", acme[0])
         if (
             domain.endswith(".test")
             or domain.endswith(".local")
             or domain == "localhost"
         ):
-            # The template's on-demand block is multi-line; match it loosely so
+            # The template's TLS block is multi-line; match it loosely so
             # local/CI domains fall back to the internal CA instead of ACME.
-            conf = re.sub(r"tls\s*\{\s*on_demand\s*\}", "tls internal", conf)
+            conf = re.sub(
+                r"tls\s*\{[^}]*\}",
+                "tls internal",
+                conf,
+                count=1,
+            )
         path = CADDY_CONF_DIR / f"{domain}.conf"
         path.write_text(conf, encoding="utf-8")
         return path
@@ -592,13 +645,27 @@ class NsiteService:
         except Exception as exc:  # noqa: BLE001
             return {"status": "unreachable", "detail": str(exc)}
 
+    def _require_acme_dns(self, mode: str) -> None:
+        """Open mode (Phase 5) needs a wildcard certificate, which is a
+        DNS-01 challenge: reject it unless the operator configured an ACME
+        DNS provider + API token in ``operator.toml`` (D3 lifted for open
+        mode). Hosted mode never touches DNS-01."""
+        if mode != "open":
+            return
+        if _acme_dns_config() is None:
+            raise NsiteError(
+                "open mode requires the operator's ACME DNS-01 credentials: set "
+                "acme_dns_provider and acme_dns_api_token in /etc/nostrhost/operator.toml"
+            )
+
     def enable(self, config: GatewayConfig) -> dict[str, Any]:
         if not config.domain:
             raise NsiteError("gateway enable requires a domain")
+        self._require_acme_dns(config.mode)
         self._registered_domain(config.domain)
         self._assert_dedicated_domain(config.domain)
         self.render_config(config)
-        snippet = self._write_snippet(config.domain)
+        snippet = self._write_snippet(config.domain, mode=config.mode)
         if snippet != Path(""):
             self._reload_caddy()
         caddy = self._ensure_caddy(config.domain)
@@ -607,6 +674,7 @@ class NsiteService:
         return {
             "action": "nsite.gateway.enable",
             "domain": config.domain,
+            "mode": config.mode,
             "config_path": str(self.config_path),
             "snippet": str(snippet) if snippet != Path("") else None,
             "caddy": caddy,
@@ -636,11 +704,12 @@ class NsiteService:
             raise NsiteError("gateway is not enabled; run nsite.gateway.enable first")
         if not config.domain:
             raise NsiteError("gateway configure requires a domain")
+        self._require_acme_dns(config.mode)
         if config.domain != (state.get("config") or {}).get("domain"):
             self._registered_domain(config.domain)
             self._assert_dedicated_domain(config.domain)
         self.render_config(config)
-        self._write_snippet(config.domain)
+        self._write_snippet(config.domain, mode=config.mode)
         self._reload_caddy()
         caddy = self._ensure_caddy(config.domain)
         self._set_state({"enabled": True, "config": config.dict()})
@@ -648,6 +717,7 @@ class NsiteService:
         return {
             "action": "nsite.gateway.configure",
             "domain": config.domain,
+            "mode": config.mode,
             "config_path": str(self.config_path),
             "caddy": caddy,
             "reloaded": SERVICE,
@@ -730,6 +800,42 @@ class NsiteService:
             "sites": _sites(self.state_dir),
             "count": len(_sites(self.state_dir)),
         }
+
+    def catalogue_nsite_links(self) -> dict[str, dict[str, str]]:
+        """Kind-32267 address -> registered nsite (Phase 5, normal catalogue).
+
+        Every registered site whose manifest carries an ``app`` tag maps its
+        ``kind:pubkey:d`` address to the location it is served at. The
+        catalogue list annotates the matching kind-32267 entry with an "open
+        nsite" link from this index. Reuses the existing catalogue projection
+        (custom-catalog logic) — nsites are part of the normal nostrhost
+        catalogue, never a separate one.
+        """
+        from .manifest import _npub_for, canonical_site_url, named_label
+
+        state = self._state()
+        gateway_domain = (state.get("config") or {}).get("domain", "")
+        if not gateway_domain:
+            return {}
+        links: dict[str, dict[str, str]] = {}
+        for record in _sites(self.state_dir):
+            app = record.get("app", "")
+            if not app:
+                continue
+            pubkey = record.get("pubkey", "")
+            d = str(record.get("d", ""))
+            kind = int(record.get("kind", KIND_ROOT))
+            label: str | None = None
+            if kind == KIND_NAMED and d:
+                label = named_label(pubkey, d)
+            elif kind == KIND_ROOT:
+                label = _npub_for(pubkey)
+            if label:
+                links[app] = {
+                    "url": f"https://{canonical_site_url(label, gateway_domain)}/",
+                    "label": label,
+                }
+        return links
 
     def site_inspect(self, pubkey: str, *, d: str = "") -> dict[str, Any]:
         pubkey = _pubkey_hex(pubkey)
@@ -936,6 +1042,7 @@ class NsiteService:
         site: str = "",
         servers: list[str] | None = None,
         relays: list[str] | None = None,
+        copy_of: str = "",
     ) -> dict[str, Any]:
         """Build the unsigned manifest and the plan digest (D7, §6 step 2/5).
 
@@ -944,16 +1051,72 @@ class NsiteService:
         ``site`` names a server-side draft (Phase 3b, D6): its inventory is
         read from ``/var/lib/nostrhost/nsites/drafts/<site>/`` and shown
         before signing. Nothing is signed or broadcast here.
+
+        ``copy_of`` (Phase 5) is a ``kind:pubkey:d`` address whose manifest
+        becomes this plan: the target kind matches the source (a copy of a
+        root is a root, of a named site a named site), the target ``d``
+        defaults to the source's (override to fork into your own name), and
+        the unsigned event carries ``a`` (parent) and ``A`` (origin) tags so
+        the published manifest is a genuine copy. The source inventory comes
+        from the local site record when the source is registered here, else
+        from a relay resolution. ``a``/``A`` are not part of the plan digest
+        (they carry no content-integrity meaning), so the signed copy matches
+        ``plan_sha256`` exactly like a fresh plan.
         """
         from .manifest import is_sha256_hex, is_valid_d
 
         pubkey = _pubkey_hex(pubkey)
         if kind not in (KIND_ROOT, KIND_NAMED):
             raise NsiteError("plan kind must be 15128 (root) or 35128 (named)")
+
+        copy_tags: list[list[str]] = []
+        if copy_of:
+            parts = copy_of.split(":", 2)
+            if (
+                len(parts) != 3
+                or parts[0] not in ("15128", "35128")
+                or not is_sha256_hex(parts[1])
+            ):
+                raise NsiteError(
+                    f"invalid copy source {copy_of!r} (expect kind:pubkey:d with kind 15128/35128)"
+                )
+            src_kind, src_pubkey, src_d = int(parts[0]), parts[1].lower(), parts[2]
+            if kind != src_kind:
+                kind = src_kind
+            if not d and kind == KIND_NAMED:
+                d = src_d
+            if not items:
+                src_path = site_path(self.state_dir, src_pubkey, src_d)
+                if src_path.is_file():
+                    try:
+                        record = json.loads(src_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        record = {}
+                    items = record.get("paths")
+                else:
+                    resolved = self.resolve(pubkey=src_pubkey, d=src_d)
+                    src_event = resolved.get("manifest")
+                    if not resolved.get("found") or not src_event:
+                        raise NsiteError(
+                            f"copy source {copy_of!r} is not registered locally and could not be resolved from relays"
+                        )
+                    items = [
+                        {"path": str(t[1]), "sha256": str(t[2])}
+                        for t in src_event.get("tags", [])
+                        if isinstance(t, list) and len(t) >= 3 and t[0] == "path"
+                    ]
+            if not items:
+                raise NsiteError("copy source has no paths to copy")
+            copy_tags = [
+                ["a", f"{src_kind}:{src_pubkey}:{src_d}"],
+                ["A", f"{src_kind}:{src_pubkey}:{src_d}"],
+            ]
+
         if kind == KIND_NAMED and not is_valid_d(d):
             raise NsiteError(f"invalid named-site d tag: {d!r}")
         if kind == KIND_ROOT and d:
             raise NsiteError("root sites take no d tag")
+
         if not items and site:
             items = self.draft_inventory(pubkey, d=d)["items"]
         if not items:
@@ -979,6 +1142,7 @@ class NsiteService:
         tags: list[list[str]] = []
         if kind == KIND_NAMED:
             tags.append(["d", d])
+        tags.extend(copy_tags)
         for path, blob_hash in sorted(paths):
             tags.append(["path", path, blob_hash])
         if servers:
@@ -993,6 +1157,7 @@ class NsiteService:
             "items": [{"path": p, "sha256": h} for p, h in paths],
             "servers": servers,
             "relays": relays,
+            "copy_of": copy_of,
             "unsigned_event": {
                 "kind": kind,
                 "pubkey": pubkey,
@@ -1111,6 +1276,7 @@ class NsiteService:
                 "last_event_id": event.get("id", ""),
                 "aggregate_hash": _aggregate_from_event(event),
                 "paths": _paths_from_event(event),
+                "app": _app_from_event(event),
                 "servers": servers,
                 "relays": relays,
                 "provenance": {
@@ -1417,6 +1583,15 @@ def _paths_from_event(event: dict[str, Any]) -> list[dict[str, str]]:
         for t in event.get("tags", [])
         if isinstance(t, list) and len(t) >= 3 and t[0] == "path"
     ]
+
+
+def _app_from_event(event: dict[str, Any]) -> str:
+    """The ``app`` tag's "kind:pubkey:d" address (Phase 5), if the manifest
+    links itself to a kind-32267 catalogue declaration."""
+    for t in event.get("tags", []):
+        if isinstance(t, list) and len(t) >= 2 and t[0] == "app":
+            return str(t[1])
+    return ""
 
 
 def _sites(state_dir: Path) -> list[dict[str, Any]]:

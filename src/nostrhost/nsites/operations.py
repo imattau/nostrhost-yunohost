@@ -7,7 +7,7 @@ registry's ``ToolSpec.validate_args`` uses v2 ``model_validate``/schema).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +24,10 @@ class GatewayArgs(_Strict):
     """Shared arguments for nsite.gateway.enable/configure."""
 
     domain: str = Field(description="the registered gateway domain (D2)")
+    mode: Literal["hosted", "open"] = Field(
+        default="hosted",
+        description="hosted (allowlisted) or open (any decodable label; requires the operator's ACME DNS-01 token)",
+    )
     lookup_relays: list[str] | None = Field(
         None, description="override the default NIP-65 lookup relays (D5)"
     )
@@ -78,6 +82,10 @@ class PublishPlanArgs(_Strict):
     )
     servers: list[str] | None = Field(None, description="Blossom server hints")
     relays: list[str] | None = Field(None, description="publish relays (defaults to host list)")
+    copy_of: str = Field(
+        default="",
+        description="Phase 5: copy the site at 'kind:pubkey:d' — the plan carries a (parent) and A (origin) tags",
+    )
 
 
 class MirrorArgs(_Strict):
@@ -138,7 +146,7 @@ def _service() -> NsiteService:
 
 
 def _config(args: dict[str, Any]) -> GatewayConfig:
-    base = GatewayConfig(domain=args["domain"])
+    base = GatewayConfig(domain=args["domain"], mode=args.get("mode", "hosted"))
     if args.get("lookup_relays") is not None:
         base.relays = GatewayRelays(lookup=args["lookup_relays"])
     if args.get("extra_relays") is not None:
@@ -224,11 +232,11 @@ def _safe_nsite_validate(event: dict | None = None, **args: Any) -> dict[str, An
     return _service().validate_manifest(event)
 
 
-def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, site: str = "", servers: list | None = None, relays: list | None = None, **args: Any) -> dict[str, Any]:
+def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, site: str = "", servers: list | None = None, relays: list | None = None, copy_of: str = "", **args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError(f"nsite.publish.plan does not accept extra args: {sorted(args)}")
     try:
-        return _service().publish_plan(pubkey, kind=kind, d=d, items=items, site=site, servers=servers, relays=relays)
+        return _service().publish_plan(pubkey, kind=kind, d=d, items=items, site=site, servers=servers, relays=relays, copy_of=copy_of)
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 
