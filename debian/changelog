@@ -1,3 +1,14 @@
+yunohost (12.1.41.51) stable; urgency=low
+
+  * Fix nostrhost-certd service health reporting by monitoring its active
+    timer without constructing a nonexistent .timer.service unit name.
+  * Treat successful certificate exports as successful systemd runs instead
+    of returning exit status 1 whenever certificate material changes.
+  * Preserve helper compatibility symlinks in the binary package so core
+    upgrades do not fail while unpacking duplicated helper/vendor payloads.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 23:40:07 +0000
+
 yunohost (12.1.41.50) stable; urgency=low
 
   * release: rebuild pass for the 2026-09-14 APT release train (all self-hosted
@@ -198,4 +209,3 @@ yunohost (12.1.41.39) stable; urgency=low
     - catalog/list wraps the bare CLI list in {entries: [...]}.
 
  -- NostrHost <noreply@nostrhost.org>  Sun, 13 Sep 2026 20:19:53 +0000 
-

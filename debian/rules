@@ -9,3 +9,15 @@ override_dh_auto_build:
 	# and man-page generators depend on share/actionsmap.yml, which is
 	# intentionally removed from this fork and is not installed by its packages.
 	@true
+
+override_dh_install:
+	dh_install
+	# dh_install dereferences the source-tree compatibility symlinks. Restore
+	# them in the staging tree so upgrades do not collide with the installed
+	# links while unpacking duplicate helper/vendor payloads through both paths.
+	rm -rf debian/nostrhost-core/usr/share/yunohost/helpers.v1.d/vendor
+	ln -s ../vendor debian/nostrhost-core/usr/share/yunohost/helpers.v1.d/vendor
+	rm -rf debian/nostrhost-core/usr/share/yunohost/helpers.v2.1.d/vendor
+	ln -s ../vendor debian/nostrhost-core/usr/share/yunohost/helpers.v2.1.d/vendor
+	rm -rf debian/nostrhost-core/usr/share/yunohost/helpers.v2.d
+	ln -s helpers.v1.d debian/nostrhost-core/usr/share/yunohost/helpers.v2.d

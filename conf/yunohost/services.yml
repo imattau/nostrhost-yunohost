@@ -41,7 +41,10 @@ nostr-portal-api:
   category: admin
 nostrhost-certd:
   category: web
-  actual_systemd_service: nostrhost-certd.timer
+  # service.py appends ".service" when it queries systemd, so keep this as
+  # the base oneshot unit and use the timer as the long-lived health signal.
+  actual_systemd_service: nostrhost-certd
+  test_status: systemctl is-active --quiet nostrhost-certd.timer
 # Yunohost will dynamically add installed php-fpm services (7.3, 7.4, 8.0, ...) in services.py
 #php7.4-fpm:
 #  log: /var/log/php7.4-fpm.log

@@ -195,7 +195,9 @@ def export_domain(domain: str, dry_run: bool = False) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--once", action="store_true", help="do a single pass (default)")
+    parser.add_argument(
+        "--once", action="store_true", help="do a single pass (default)"
+    )
     parser.add_argument(
         "--status", action="store_true", help="print the Caddy->exported mapping"
     )
@@ -213,11 +215,13 @@ def main(argv: list[str] | None = None) -> int:
         _print_status()
         return 0
 
-    changed = False
     for domain in _caddy_domains():
-        if export_domain(domain, dry_run=args.dry_run):
-            changed = True
-    return 0 if not changed else 1
+        export_domain(domain, dry_run=args.dry_run)
+
+    # A changed certificate is a successful outcome, not a process error.
+    # export_domain logs each changed mapping; real failures propagate as
+    # exceptions and therefore still make the systemd oneshot fail.
+    return 0
 
 
 def _caddy_domains() -> set[str]:
