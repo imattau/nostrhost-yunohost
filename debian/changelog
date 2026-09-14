@@ -1,3 +1,10 @@
+yunohost (12.1.41.50) stable; urgency=low
+
+  * release: rebuild pass for the 2026-09-14 APT release train (all self-hosted
+    package versions bumped in packaging/packages.yml; no fork source change).
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 12:30:00 +0000
+
 yunohost (12.1.41.49) stable; urgency=low
 
   * nostrhost: also reconcile native app web routes after a Caddy *reload*,
