@@ -1,3 +1,17 @@
+yunohost (12.1.41.44) stable; urgency=low
+
+  * nostrhost: native API for agent model management and HF contribution.
+    - model profile/recommend/download/select (drives the local inference
+      runtime download + systemd unit + agent config inference block),
+      model/llm service status, and operation mode get/set with a hard
+      server-side confirm requirement before switching to
+      maintain/autonomous.
+    - agent contribution submit (as a pull request), contribution
+      settings get/set, and export list/run/get, surfaced as operation
+      tools + HTTP routes for the admin AI-management UI.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 03:45:00 +0000 
+
 yunohost (12.1.41.43) stable; urgency=low
 
   * nostrhost: source extraction preserves tar/zip member modes.
