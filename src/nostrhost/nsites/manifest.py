@@ -163,7 +163,7 @@ def _path_is_bad(path: str) -> bool:
     if "\\" in path:
         return True
     for segment in path.split("/"):
-        if segment == "..":
+        if ".." in segment:
             return True
     return False
 
