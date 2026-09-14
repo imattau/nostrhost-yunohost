@@ -129,12 +129,12 @@ class OperationEngine:
         self._publish = publish
         self._server_sk = server_sk
         self._server_pubkey = _derive_pubkey(server_sk)
-        self._admins = tuple(admins)
+        self._admins = tuple(a.lower() for a in admins)
         self._backend = backend or YnhExecutorBackend()
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
         self._policy = policy  # optional nostrhost-policy adapter
-        self._policy_owner = policy_owner
+        self._policy_owner = policy_owner.lower() if policy_owner else policy_owner
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
         self.delegations: dict[str, dict[str, Any]] = {}

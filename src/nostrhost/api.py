@@ -121,9 +121,9 @@ def _build_admin_set(
     operator_pubkey: str | None = None,
 ) -> set[str]:
     """The admin pubkey set: configured admin pubkeys + the operator."""
-    admins = set(admin_pubkeys)
+    admins = {pk.lower() for pk in admin_pubkeys}
     if operator_pubkey:
-        admins.add(operator_pubkey)
+        admins.add(operator_pubkey.lower())
     return admins
 
 
@@ -158,7 +158,7 @@ def _session_admin_pubkey(admins: set[str]) -> str | None:
     except Exception:  # pragma: no cover - identity store unavailable
         identities = []
     for identity in identities:
-        if identity.pubkey in admins:
+        if identity.pubkey.lower() in admins:
             return identity.pubkey
     return None
 
@@ -202,7 +202,7 @@ def default_authorizer(
                 identity = None
             if identity is None:
                 raise ApiError(403, "identity_not_linked", "pubkey is not a linked identity")
-            if pubkey not in admins:
+            if pubkey.lower() not in admins:
                 raise ApiError(403, "not_authorized", "pubkey is not an admin")
             return pubkey
 

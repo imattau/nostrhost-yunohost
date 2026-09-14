@@ -248,7 +248,7 @@ def bootstrap_node(
             raise IdentityError(f"{name} must be a 64-char hex secret key")
 
     operator_pk = _pubkey(operator_sk)
-    admin_pubkeys = [a.strip() for a in (admins or [])]
+    admin_pubkeys = [_parse_pubkey(a.strip()).lower() for a in (admins or [])]
     if not admin_pubkeys:
         admin_pubkeys = [operator_pk]
 
