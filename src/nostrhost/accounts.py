@@ -240,13 +240,32 @@ def delete_real_user(username: str, purge: bool = False) -> None:
 
 
 def add_real_user_to_group(username: str, groupname: str) -> None:
+    """Best-effort: mirror membership into the real /etc/group entry.
+
+    The native store (``save_groups``) is the source of truth; a transient
+    ``gpasswd`` failure here must not prevent that write from landing (it
+    used to, silently losing membership - see the postinstall bootstrap
+    path in ``nostrhost/cli.py``).
+    """
     if real_group_exists(groupname):
-        subprocess.check_call(["gpasswd", "-a", username, groupname])
+        try:
+            subprocess.check_call(["gpasswd", "-a", username, groupname])
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                "Failed to add %s to real group %s (native store is still "
+                "authoritative): %s", username, groupname, e
+            )
 
 
 def remove_real_user_from_group(username: str, groupname: str) -> None:
     if real_group_exists(groupname):
-        subprocess.check_call(["gpasswd", "-d", username, groupname])
+        try:
+            subprocess.check_call(["gpasswd", "-d", username, groupname])
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                "Failed to remove %s from real group %s (native store is "
+                "still authoritative): %s", username, groupname, e
+            )
 
 
 def create_real_group(groupname: str, gid: str) -> None:

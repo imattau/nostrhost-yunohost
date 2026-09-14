@@ -1380,28 +1380,41 @@ def _bootstrap_operator_account(
     """
     import secrets as _secrets
 
-    from yunohost.user import user_list, user_create
+    from yunohost.user import user_list, user_create, user_group_list
 
-    try:
-        if username not in user_list()["users"]:
-            password = _secrets.token_urlsafe(24) + "Aa1!"
-            user_create(
-                username=username,
-                domain=domain,
-                password=password,
-                fullname="NostrHost operator",
-                admin=True,
-            )
-        event = link_identity(
-            username,
-            operator_pubkey,
-            signer_type="nip07",
-            label="operator",
+    if username not in user_list()["users"]:
+        password = _secrets.token_urlsafe(24) + "Aa1!"
+        user_create(
+            username=username,
+            domain=domain,
+            password=password,
+            fullname="NostrHost operator",
             admin=True,
         )
-        return {"username": username, "pubkey": operator_pubkey, "event": event.get("id")}
-    except Exception as exc:  # noqa: BLE001 - surfaced in the summary
-        return {"error": str(exc)}
+
+    # user_create(admin=True) is supposed to land the operator in both
+    # 'admins' and 'all_users' (yunohost.user.user_create -> user_group_update).
+    # That used to be able to fail silently if the real /etc/group mutation
+    # raised before the native store write (see accounts.add_real_user_to_group);
+    # don't let a bootstrap that never actually happened report success.
+    groups = user_group_list()["groups"]
+    for required_group in ("admins", "all_users"):
+        members = groups.get(required_group, {}).get("members", [])
+        if username not in members:
+            raise NostrHostError(
+                f"postinstall bootstrap failed: '{username}' was not added to "
+                f"the '{required_group}' group (expected after user_create "
+                "with admin=True)"
+            )
+
+    event = link_identity(
+        username,
+        operator_pubkey,
+        signer_type="nip07",
+        label="operator",
+        admin=True,
+    )
+    return {"username": username, "pubkey": operator_pubkey, "event": event.get("id")}
 
 
 def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) -> dict[str, Any]:

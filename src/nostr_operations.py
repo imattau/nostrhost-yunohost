@@ -386,6 +386,7 @@ def _safe_app_list(**args: Any) -> dict[str, Any]:
                 "repository": "nostrhost",
                 "source": "nostr",
                 "native": True,
+                "movable": isinstance(manifest.get("web"), dict),
             }
     except Exception:  # noqa: BLE001 - state listing is additive
         native = {}

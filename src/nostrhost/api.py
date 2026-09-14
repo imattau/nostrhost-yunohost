@@ -45,7 +45,7 @@ from .cli import (
     _run_lifecycle,
 )
 from .core import NostrHostError
-from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
+from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
 from .package_engine import PackageError
 from .mcp_endpoint import export_ca_bundle, read_endpoint_config
 from yunohost.nostr_identity import (
@@ -1123,6 +1123,36 @@ def build_app(
                 headers={"Content-Type": "application/json"},
             )
         return {"operation": result, "settings_diff": envelope["settings_diff"]}
+
+    @app.post("/package/app/<app_id>/change-url/plan")
+    def app_change_url_plan(app_id: str) -> Any:
+        body = _json_body()
+        if set(body) != {"domain", "path"}:
+            raise ApiError(400, "invalid_request", "change-url plan requires domain and path")
+        try:
+            return plan_native_change_url(app_id, body.get("domain"), body.get("path"))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+
+    @app.post("/package/app/<app_id>/change-url/apply")
+    def app_change_url_apply(app_id: str) -> Any:
+        body = _json_body()
+        if set(body) != {"domain", "path", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "change-url apply requires domain, path and plan_sha256")
+        try:
+            envelope = plan_native_change_url(app_id, body.get("domain"), body.get("path"))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "The app or another app's route changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": {key: value for key, value in envelope.items() if key != "url_diff"}}, state=_State())
+        if not result.get("ok"):
+            return HTTPResponse(
+                json.dumps({"error": result.get("reason") or result.get("state") or "change-url was rejected", "code": "operation_rejected", "operation": result}),
+                status=409,
+                headers={"Content-Type": "application/json"},
+            )
+        return {"operation": result, "action": "change-url", "url_diff": envelope["url_diff"]}
 
     @app.post("/package/app/remove")
     def app_remove() -> Any:

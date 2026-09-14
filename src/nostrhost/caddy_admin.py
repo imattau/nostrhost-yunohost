@@ -286,7 +286,13 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     if domain:
         matcher["host"] = [domain]
     if path:
-        matcher["path"] = [f"{path}/*"]
+        # Match the bare path too, not just everything under it - portal
+        # tiles and permission URLs link to the bare path (e.g. "/ditto",
+        # no trailing slash), which otherwise falls through this route
+        # entirely and hits whatever the next matching route is (typically
+        # a default/placeholder handler), even though the app is installed
+        # and reachable at "/ditto/...".
+        matcher["path"] = [path, f"{path}/*"]
     else:
         # Root claim: no `path` matcher means this route matches EVERY path
         # on the host. Caddy's route array is order-dependent (first
@@ -295,9 +301,29 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
         # routes would otherwise land ahead of them and swallow
         # /nostrhost/*, /package/*, and the NIP-05 well-known route. Excluding
         # them here makes the root app safe regardless of insertion order.
-        matcher["not"] = [
-            {"path": [f"{prefix}/*" for prefix in RESERVED_PATH_PREFIXES] + list(RESERVED_EXACT_PATHS)}
-        ]
+        #
+        # This must also exclude every OTHER installed app's own claimed
+        # path on this domain - without it, a root app installed (or
+        # reconciled) after a sibling subpath app shadows that sibling
+        # entirely, since the root route is terminal and has no path
+        # restriction beyond the reserved prefixes.
+        exclude_paths = [f"{prefix}/*" for prefix in RESERVED_PATH_PREFIXES] + list(RESERVED_EXACT_PATHS)
+        this_app = desired.get("app")
+        try:
+            from .cli import _iter_installed_manifests
+
+            for other_id, other_manifest in _iter_installed_manifests():
+                if other_id == this_app:
+                    continue
+                other_web = other_manifest.get("web")
+                if not isinstance(other_web, dict) or other_web.get("domain") != domain:
+                    continue
+                other_path = str(other_web.get("path") or "").rstrip("/")
+                if other_path:
+                    exclude_paths.extend([other_path, f"{other_path}/*"])
+        except Exception:  # noqa: BLE001 - a broken sibling manifest must not block this app's own route
+            pass
+        matcher["not"] = [{"path": exclude_paths}]
     if matcher:
         match.append(matcher)
     if match:

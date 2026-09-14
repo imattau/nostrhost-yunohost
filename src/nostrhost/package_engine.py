@@ -311,6 +311,12 @@ class WebResource(BaseModel):
     file_root: str | None = None
     auth: Literal["none", "nostrhost"] = "none"
     https: Literal["automatic", "required", "disabled"] = "automatic"
+    # Some apps can't share a domain with anything else - either their built
+    # assets reference absolute root paths (e.g. a Vite SPA with no base-path
+    # configured) or their backend has no subpath/base-path support at all.
+    # Declaring this lets install/change-url reject a subpath placement with
+    # a clear error instead of the app silently breaking.
+    full_domain: bool = False
 
     @validator("path")
     def path_starts_with_slash(cls, value: str) -> str:
@@ -491,6 +497,13 @@ class PackageManifest(BaseModel):
         web = values.get("web")
         if declared and (web is None or not (web.domain or "").strip()):
             raise ValueError("dns records require a declared web.domain (they are enforced inside the domain's zone)")
+        return values
+
+    @root_validator
+    def full_domain_implies_root_path(cls, values: dict[str, Any]) -> dict[str, Any]:
+        web = values.get("web")
+        if web is not None and web.full_domain and web.path != "/":
+            raise ValueError("web.full_domain=true requires web.path to be '/' (it claims the whole domain)")
         return values
 
     @validator("service")

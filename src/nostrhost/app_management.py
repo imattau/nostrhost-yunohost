@@ -73,6 +73,7 @@ def merge_catalogue_and_installed(catalogue: dict[str, Any], installed: dict[str
             "source": local.get("source") or local.get("repository"),
             "legacy": not bool(local.get("native")),
         }
+        entry["movable"] = bool(local.get("movable"))
         names = local.get("name")
         if entry.get("catalogue") is None:
             entry["name"] = names.get("en", app_id) if isinstance(names, dict) else (names or app_id)
@@ -151,6 +152,97 @@ def carry_forward_compatible_settings(installed: dict[str, Any], candidate: dict
     return result
 
 
+def _check_domain_path_availability(
+    app_id: str, domain: str, path: str, full_domain: bool, *, other_manifests: list[tuple[str, dict[str, Any]]]
+) -> None:
+    """Reject a domain/path placement that collides with another installed app.
+
+    Two apps may share a domain only if neither claims it exclusively
+    (``full_domain``) and they don't claim the exact same path. Used by both
+    install (a fresh app has no existing route yet) and change-url (moving
+    an existing one) so the two can't diverge on what's allowed.
+    """
+    if not domain:
+        return
+    domain = domain.rstrip("/")
+    path = "/" + path.strip("/") if path.strip("/") else "/"
+    for other_id, other_manifest in other_manifests:
+        if other_id == app_id:
+            continue
+        other_web = other_manifest.get("web")
+        if not isinstance(other_web, dict):
+            continue
+        other_domain = str(other_web.get("domain") or "").rstrip("/")
+        if other_domain != domain:
+            continue
+        other_path = "/" + str(other_web.get("path") or "/").strip("/") if str(other_web.get("path") or "/").strip("/") else "/"
+        other_full_domain = bool(other_web.get("full_domain"))
+        if full_domain or other_full_domain:
+            raise PackageError(
+                f"{domain} is not available: {other_id!r} already uses it"
+                f"{' exclusively (full_domain)' if other_full_domain else ''} and "
+                f"{app_id!r} {'requires the whole domain' if full_domain else 'would collide with it'}"
+            )
+        if other_path == path:
+            raise PackageError(f"{domain}{path} is already used by installed app {other_id!r}")
+
+
+def plan_native_change_url(app_id: str, domain: str, path: str, *, state_dir: str | None = None) -> dict[str, Any]:
+    """Build a server-derived package plan that moves a native app's web route.
+
+    An installed app's own domain/path live at ``manifest.web.domain`` /
+    ``manifest.web.path`` (WebResource), not under ``settings``. Reconciling
+    a package re-emits ``web.route.ensure``/``permission.ensure`` from
+    whatever ``web`` currently holds, and Caddy routes are keyed by app id
+    (not domain+path), so writing a new domain/path here and reconciling
+    moves the app's route in place - the same shape as
+    ``plan_native_settings_update``, just mutating ``web`` instead of
+    ``settings.values``.
+    """
+    app_id = _app_id(app_id)
+    domain = str(domain or "").strip().rstrip("/")
+    path = "/" + str(path or "/").strip("/") if str(path or "/").strip("/") else "/"
+    if not domain:
+        raise PackageError("change-url requires a non-empty domain")
+    from .native_providers import installed_package_manifest
+
+    manifest = installed_package_manifest(app_id, state_dir=Path(state_dir) if state_dir else None)
+    if manifest is None or (manifest.get("app") or {}).get("id") != app_id:
+        raise PackageError(f"native app {app_id!r} is not installed")
+    web = manifest.get("web")
+    if not isinstance(web, dict):
+        raise PackageError(f"native app {app_id!r} has no web route to move")
+    current_domain = str(web.get("domain") or "").rstrip("/")
+    current_path = "/" + str(web.get("path") or "/").strip("/") if str(web.get("path") or "/").strip("/") else "/"
+    if (domain, path) == (current_domain, current_path):
+        raise PackageError("new domain/path is identical to the current one")
+
+    from .cli import _iter_installed_manifests
+
+    _check_domain_path_availability(
+        app_id, domain, path, bool(web.get("full_domain")), other_manifests=_iter_installed_manifests()
+    )
+
+    updated = copy.deepcopy(manifest)
+    updated["web"]["domain"] = domain
+    updated["web"]["path"] = path
+
+    try:
+        envelope = package_plan_envelope(updated)
+        operations = [Operation(**{**row, "depends_on": tuple(row.get("depends_on", ()))}) for row in envelope["operations"]]
+    except (TypeError, ValueError) as exc:
+        raise PackageError(f"invalid change-url plan: {exc}") from exc
+
+    envelope["operations"] = [operation.json_dict() for operation in operations]
+    envelope["plan_sha256"] = operation_plan_digest(operations)
+    envelope["url_diff"] = {
+        "old": {"domain": current_domain, "path": current_path},
+        "new": {"domain": domain, "path": path},
+    }
+    validate_plan_envelope({key: value for key, value in envelope.items() if key != "url_diff"})
+    return envelope
+
+
 def catalogue_lifecycle_plan(app_id: str, action: str) -> dict[str, Any]:
     """Resolve and verify a trusted catalogue package for install or upgrade."""
     app_id = _app_id(app_id)
@@ -181,6 +273,18 @@ def catalogue_lifecycle_plan(app_id: str, action: str) -> dict[str, Any]:
             if installed_version == package.get("app", {}).get("version"):
                 raise PackageError(f"native app {app_id!r} is already at the catalogue version")
             package = carry_forward_compatible_settings(installed, package)
+        if action == "install":
+            web = package.get("web")
+            if isinstance(web, dict) and web.get("domain"):
+                from .cli import _iter_installed_manifests
+
+                _check_domain_path_availability(
+                    app_id,
+                    str(web.get("domain") or ""),
+                    str(web.get("path") or "/"),
+                    bool(web.get("full_domain")),
+                    other_manifests=_iter_installed_manifests(),
+                )
         return _plan_envelope(package, coordinate)
     except PackageError:
         raise
