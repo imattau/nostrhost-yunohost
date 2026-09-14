@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PackageProvider, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
 from nostrhost.package_engine import Operation
 
 
@@ -596,6 +596,32 @@ def test_policy_provider_writes_and_removes_managed_policy(tmp_path: Path):
     assert target.read_text() == desired["content"]
     provider.apply(provider.remove(desired)[0])
     assert not target.exists()
+
+
+def test_package_provider_reapply_preserves_legacy_permissions(tmp_path: Path):
+    """package.ensure re-applying (e.g. on app upgrade) must not wipe the
+    _permissions the separate permission.ensure operation already persisted
+    into the legacy settings.yml, otherwise the app's portal tile silently
+    disappears on upgrade."""
+    import yaml
+
+    apps_dir = tmp_path / "apps"
+    provider = PackageProvider(state_dir=tmp_path / "state", apps_dir=apps_dir)
+
+    install = Operation("package.ensure", "example", {"id": "example", "version": "0.1", "domain": "example.test", "path": "/"})
+    provider.apply(install)
+
+    legacy_dir = apps_dir / "example"
+    settings = yaml.safe_load((legacy_dir / "settings.yml").read_text())
+    settings["_permissions"] = {"main": {"url": "/", "allowed": ["all_users"], "show_tile": True}}
+    (legacy_dir / "settings.yml").write_text(yaml.safe_dump(settings))
+
+    upgrade = Operation("package.ensure", "example", {"id": "example", "version": "0.2", "domain": "example.test", "path": "/"})
+    provider.apply(upgrade)
+
+    settings_after = yaml.safe_load((legacy_dir / "settings.yml").read_text())
+    assert settings_after["_permissions"] == {"main": {"url": "/", "allowed": ["all_users"], "show_tile": True}}
+    assert settings_after["version"] == "0.2"
 
 
 def test_permission_provider_reconciles_portal_permission():

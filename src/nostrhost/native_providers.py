@@ -118,7 +118,18 @@ class PackageProvider:
 
     @staticmethod
     def _ensure_legacy(legacy_dir: Path | None, *, app_id: str | None = None, version: str | None = None, domain: str | None = None, path: str | None = None) -> None:
-        """Create the minimal legacy app-registry entry (permission gateway)."""
+        """Create or update the minimal legacy app-registry entry (permission gateway).
+
+        This must *merge* into whatever is already on disk rather than
+        rebuilding it: the portal's permission machinery (permission_create /
+        permission_url, invoked by the separate `permission.ensure` operation)
+        persists `_permissions` into this same settings.yml. A wholesale
+        rebuild here — e.g. on every `package.ensure` re-apply during an app
+        upgrade — silently wiped `_permissions`, and since a `permission.ensure`
+        that already looked satisfied against the pre-upgrade state is skipped
+        by the reconciler, nothing restored it: apps lost their portal tile
+        permission the moment they were upgraded.
+        """
         if legacy_dir is None:
             return
         existed = legacy_dir.is_dir()
@@ -126,10 +137,11 @@ class PackageProvider:
         existing: dict[str, Any] = {}
         if existed:
             existing = PackageProvider._legacy_settings(legacy_dir)
-        settings: dict[str, Any] = {"installed": True}
+        settings: dict[str, Any] = dict(existing)
+        settings["installed"] = True
         if app_id:
             settings["id"] = app_id
-            settings["install_time"] = int(time.time())
+            settings.setdefault("install_time", int(time.time()))
         if version:
             settings["version"] = version
         if domain:
@@ -138,10 +150,11 @@ class PackageProvider:
         elif existing.get("domain"):
             settings["domain"] = existing["domain"]
             settings["path"] = existing.get("path", "/")
-        body = "".join(f"{key}: {value}\n" for key, value in settings.items())
         target = legacy_dir / "settings.yml"
-        if not existed or target.read_text(encoding="utf-8") != body:
-            target.write_text(body, encoding="utf-8")
+        if not existed or existing != settings:
+            import yaml
+
+            target.write_text(yaml.safe_dump(settings, default_flow_style=False), encoding="utf-8")
             os.chmod(target, 0o644)
         # Minimal manifest.json so the legacy app registry (app_map / app_list)
         # can enumerate the native app without a full legacy manifest install.
