@@ -458,7 +458,6 @@ AGENT_LLM_ENV = "/etc/nostrhost-agent/llm.env"
 AGENT_LLM_SERVICE = "nostrhost-agent-llm.service"
 AGENT_INFERENCE_HOST = "127.0.0.1"
 AGENT_INFERENCE_PORT = 18080
-AGENT_CONTRIBUTION_CONFIG = "/etc/nostrhost-agent/contribution.toml"
 AGENT_HF_TOKEN_PATH = "/etc/nostrhost-agent/hf_token"
 AGENT_MODE_LEVELS = ("observe", "assist", "maintain", "autonomous")
 
@@ -910,62 +909,60 @@ def _agent_export_get(candidate_file_id: str) -> Any:
 
 
 def _agent_contribution_settings_get() -> dict[str, Any]:
-    path = Path(AGENT_CONTRIBUTION_CONFIG)
-    enabled, dataset_repo = False, ""
-    if path.is_file() and not path.is_symlink():
-        try:
-            with path.open("rb") as handle:
-                conf = tomllib.load(handle)
-            enabled = bool(conf.get("enabled", False))
-            dataset_repo = str(conf.get("dataset_repo", ""))
-        except (OSError, tomllib.TOMLDecodeError):
-            enabled, dataset_repo = False, ""
+    dataset_repo = ""
+    auto_submit = False
+    try:
+        config = _read_agent_config()
+        contribution = config.get("contribution") or {}
+        dataset_repo = str(contribution.get("dataset_repo", ""))
+        # Go's ContributionFileConfig.Enabled *is* "the resident daemon
+        # auto-submits every completed cycle with no human review" -- see
+        # agent/contribution_auto.go. Named "auto_submit" here so the two
+        # very different meanings of "enabled" never collide in this API.
+        auto_submit = bool(contribution.get("enabled", False))
+    except NostrHostError:
+        pass
+    token_configured = Path(AGENT_HF_TOKEN_PATH).is_file()
     return {
-        "enabled": enabled,
+        "enabled": bool(dataset_repo) and token_configured,
+        "auto_submit": auto_submit,
         "dataset_repo": dataset_repo,
-        "token_configured": Path(AGENT_HF_TOKEN_PATH).is_file(),
+        "token_configured": token_configured,
     }
 
 
-def _agent_contribution_settings_set(enabled: bool, dataset_repo: str, token: str | None) -> dict[str, Any]:
+def _agent_contribution_settings_set(dataset_repo: str, token: str | None, auto_submit: bool) -> dict[str, Any]:
+    """Update the agent's Hugging Face contribution settings.
+
+    ``dataset_repo``/``token`` control whether a human can manually submit a
+    prepared candidate (the "enabled" field in the get() response, derived
+    from these two rather than stored separately). ``auto_submit`` is a
+    stronger, explicit opt-in: it flips the resident daemon's own
+    ``contribution.enabled`` config so it submits every completed cycle
+    itself, with no human review -- see agent/contribution_auto.go. It can
+    only be turned on once a repo and a token both exist.
+    """
     if os.geteuid() != 0:
         raise NostrHostError("contribution settings must be set as root")
-    if enabled and not dataset_repo:
-        raise NostrHostError("dataset_repo is required to enable Hugging Face sharing")
-    path = Path(AGENT_CONTRIBUTION_CONFIG)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = (
-        "# NostrHost agent Hugging Face contribution settings.\n"
-        "# Off by default; nothing is ever uploaded automatically or by the\n"
-        "# resident agent daemon -- only an explicit `nostrhost-agent-contribute`\n"
-        "# invocation, triggered by an explicit admin action, ever uploads data,\n"
-        "# and only the one locally-prepared, redacted candidate file chosen.\n"
-        f"enabled = {'true' if enabled else 'false'}\n"
-        f'dataset_repo = "{dataset_repo}"\n'
-    )
-    temp_path = path.with_name(path.name + f".{os.getpid()}.tmp")
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(content)
-        os.replace(temp_path, path)
-        os.chown(path, 0, 0)
-        os.chmod(path, 0o600)
-    except Exception:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    token_will_exist = bool(token) or Path(AGENT_HF_TOKEN_PATH).is_file()
+    if auto_submit and not (dataset_repo and token_will_exist):
+        raise NostrHostError("dataset_repo and a saved Hugging Face token are both required before enabling automatic submission")
     if token:
+        # The resident daemon (an unprivileged account) must be able to read
+        # this directly for automatic submission -- root can always read it
+        # regardless of ownership, so this doesn't weaken the manual path.
+        import pwd
+
+        agent_user = pwd.getpwnam("nostrhost-agent")
         token_path = Path(AGENT_HF_TOKEN_PATH)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
         token_temp = token_path.with_name(token_path.name + f".{os.getpid()}.tmp")
         fd = os.open(token_temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(token.strip() + "\n")
             os.replace(token_temp, token_path)
-            os.chown(token_path, 0, 0)
+            os.chown(token_path, agent_user.pw_uid, agent_user.pw_gid)
             os.chmod(token_path, 0o600)
         except Exception:
             try:
@@ -973,6 +970,10 @@ def _agent_contribution_settings_set(enabled: bool, dataset_repo: str, token: st
             except FileNotFoundError:
                 pass
             raise
+    config = _read_agent_config()
+    config["contribution"] = {"enabled": auto_submit, "dataset_repo": dataset_repo}
+    _write_agent_config(config)
+    _restart_agent_if_active()
     return _agent_contribution_settings_get()
 
 

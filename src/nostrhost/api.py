@@ -735,15 +735,17 @@ def build_app(
 
     @app.post("/package/agent/contribution/settings")
     def agent_contribution_settings_set() -> Any:
-        """Touches Hugging Face credentials and flips a real upload path on.
-        Same admin-only NIP-98/session trust level as agent_init/agent_enable
-        above -- this is a local admin-API setting, not a host operation, so
-        it does not go through the nostr-operationsd signed tool chain."""
+        """Touches Hugging Face credentials and, via auto_submit, can flip on
+        the resident daemon submitting every completed cycle with no human
+        review. Same admin-only NIP-98/session trust level as
+        agent_init/agent_enable above -- this is a local admin-API setting,
+        not a host operation, so it does not go through the
+        nostr-operationsd signed tool chain."""
         body = _json_body()
         return _agent_contribution_settings_set(
-            bool(body.get("enabled", False)),
             body.get("dataset_repo", ""),
             body.get("token") or None,
+            bool(body.get("auto_submit", False)),
         )
 
     @app.post("/package/agent/contribution/submit")
