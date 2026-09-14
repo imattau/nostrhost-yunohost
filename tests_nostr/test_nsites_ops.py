@@ -163,6 +163,7 @@ def test_gateway_status_disabled(tmp_path: Path):
     status = svc.gateway_status()
     assert status["gateway"]["enabled"] is False
     assert status["gateway"]["health"] == "degraded"
+    assert status["gateway"]["config"] == {}
 
 
 def test_gateway_status_enabled_active(tmp_path: Path):
@@ -172,6 +173,11 @@ def test_gateway_status_enabled_active(tmp_path: Path):
     status = svc.gateway_status()
     assert status["gateway"]["enabled"] is True
     assert status["gateway"]["service_active"] is True
+    stored = status["gateway"]["config"]
+    assert stored["domain"] == "sites.example.org"
+    assert stored["relays"]["lookup"]
+    assert stored["blossom"]["fallback_servers"]
+    assert stored["limits"]["max_blob_bytes"] > 0
 
 
 def test_enable_rejects_unregistered_domain(tmp_path: Path):

@@ -220,6 +220,7 @@ class NsiteService:
             "health": "ok" if healthy else "degraded",
             "health_detail": health_detail,
             "sites": len(_sites(self.state_dir)),
+            "config": config,
         }
         if healthy:
             gateway_json["internal"] = self._probe_internal()
