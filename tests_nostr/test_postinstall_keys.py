@@ -193,6 +193,10 @@ def test_bootstrap_operator_account_creates_and_links(monkeypatch):
     monkeypatch.setattr("yunohost.user.user_list", lambda: {"users": {}})
     monkeypatch.setattr("yunohost.user.user_create", lambda **kw: calls["create"].append(kw))
     monkeypatch.setattr(
+        "yunohost.user.user_group_list",
+        lambda: {"groups": {"admins": {"members": ["nostrhost"]}, "all_users": {"members": ["nostrhost"]}}},
+    )
+    monkeypatch.setattr(
         cli_module, "link_identity", lambda *a, **kw: calls["link"].append((a, kw)) or {"id": "evt"}
     )
 
@@ -211,6 +215,10 @@ def test_bootstrap_operator_account_skips_existing(monkeypatch):
     calls = {"create": [], "link": []}
     monkeypatch.setattr("yunohost.user.user_list", lambda: {"users": {"nostrhost": {}}})
     monkeypatch.setattr("yunohost.user.user_create", lambda **kw: calls["create"].append(kw))
+    monkeypatch.setattr(
+        "yunohost.user.user_group_list",
+        lambda: {"groups": {"admins": {"members": ["nostrhost"]}, "all_users": {"members": ["nostrhost"]}}},
+    )
     monkeypatch.setattr(
         cli_module, "link_identity", lambda *a, **kw: calls["link"].append((a, kw)) or {"id": "evt"}
     )

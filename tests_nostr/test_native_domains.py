@@ -347,7 +347,9 @@ def test_web_route_normal_path_unaffected():
     from nostrhost.caddy_admin import build_web_route
 
     route = build_web_route({"domain": "w4.test", "upstream": "127.0.0.1:9000", "path": "/blog"})
-    assert route["match"] == [{"host": ["w4.test"], "path": ["/blog/*"]}]
+    # Bare path AND prefix are matched (a bare-path link like "/blog" falls
+    # through a prefix-only matcher to whatever route is next).
+    assert route["match"] == [{"host": ["w4.test"], "path": ["/blog", "/blog/*"]}]
 
 
 @pytest.mark.parametrize("path", ["/nostrhost/admin", "/nostrhost/sso", "/package", "/package/foo"])

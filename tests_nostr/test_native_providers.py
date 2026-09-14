@@ -415,8 +415,9 @@ def test_build_web_route_reverse_proxy():
     assert route["@id"] == "nostrhost-web:demo"
     # host + path ANDed in a single matcher so the app route never shadows
     # other /nostrhost/* routes on the same domain (regression: separate
-    # match objects are OR'd in Caddy).
-    assert route["match"] == [{"host": ["example.test"], "path": ["/demo/*"]}]
+    # match objects are OR'd in Caddy). Bare path AND prefix are matched so a
+    # bare-path link ("/demo") doesn't fall through to the next route.
+    assert route["match"] == [{"host": ["example.test"], "path": ["/demo", "/demo/*"]}]
     assert route["handle"] == [
         {"handler": "rewrite", "strip_path_prefix": "/demo"},
         {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8123"}]},
