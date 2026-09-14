@@ -1,3 +1,23 @@
+yunohost (12.1.41.46) stable; urgency=low
+
+  * nostrhost: allow --domain/--path overrides on native app install/upgrade.
+    - native package.toml has no install-time question mechanism like
+      classic _ynh's [install.domain]/[install.path]; every real _nh
+      package (opencode-web_nh, nostrhost-test, ditto_nh, armada_nh)
+      hardcoded a literal [web].domain, so installing on any other domain
+      required hand-editing the checked-out package.toml first (found
+      while test-installing ditto_nh on the clean7 VM).
+    - `app install --domain/--path` substitute [web].domain/path (and keep
+      health.path in sync when it tracked the old web.path) after
+      manifest_sha256 verification, so an override can never forge what
+      the catalogue actually signed.
+    - `app upgrade --domain/--path` default to the currently installed
+      values rather than package.toml's freshly-reloaded ones, so a
+      routine upgrade never silently moves a live app back to a
+      placeholder domain; deliberate moves still use `app change-url`.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 08:37:03 +0000
+
 yunohost (12.1.41.45) stable; urgency=low
 
   * nostrhost: wire the resident daemon's automatic contribution setting.
