@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -137,9 +138,21 @@ class NsiteService:
     # -- config rendering -------------------------------------------------
 
     def render_config(self, config: GatewayConfig) -> Path:
-        """Write ``/etc/nostrhost/nsite.toml`` (root-owned, 0640)."""
+        """Write ``/etc/nostrhost/nsite.toml`` as root:nostrhost-nsite, 0640.
+
+        The gateway runs as the unprivileged ``nostrhost-nsite`` user, so the
+        config must be group-readable by that user (root-only 0640 would make
+        the unit fail to start with EACCES on every host).
+        """
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(config.to_toml(), encoding="utf-8")
+        try:
+            import grp
+
+            gid = grp.getgrnam("nostrhost-nsite").gr_gid
+            os.chown(self.config_path, 0, gid)
+        except (KeyError, OSError):
+            pass
         try:
             os.chmod(self.config_path, 0o640)
         except OSError:
@@ -188,13 +201,21 @@ class NsiteService:
             or domain.endswith(".local")
             or domain == "localhost"
         ):
-            conf = conf.replace("tls { on_demand }", "tls internal")
+            # The template's on-demand block is multi-line; match it loosely so
+            # local/CI domains fall back to the internal CA instead of ACME.
+            conf = re.sub(r"tls\s*\{\s*on_demand\s*\}", "tls internal", conf)
         path = CADDY_CONF_DIR / f"{domain}.conf"
         path.write_text(conf, encoding="utf-8")
         return path
 
     def _remove_snippet(self, domain: str) -> None:
         (CADDY_CONF_DIR / f"{domain}.conf").unlink(missing_ok=True)
+
+    def _reload_caddy(self) -> None:
+        """Reload Caddy so the per-domain snippet (TLS policy, log, headers)
+        takes effect. The route itself is reconciled through the admin API and
+        is live immediately; the site-level directives only load on reload."""
+        self._systemctl("reload", "caddy")
 
     # -- gateway operations ----------------------------------------------
 
@@ -243,6 +264,8 @@ class NsiteService:
         self._assert_dedicated_domain(config.domain)
         self.render_config(config)
         snippet = self._write_snippet(config.domain)
+        if snippet != Path(""):
+            self._reload_caddy()
         caddy = self._ensure_caddy(config.domain)
         self._set_state({"enabled": True, "config": config.dict()})
         self._start()
@@ -283,6 +306,7 @@ class NsiteService:
             self._assert_dedicated_domain(config.domain)
         self.render_config(config)
         self._write_snippet(config.domain)
+        self._reload_caddy()
         caddy = self._ensure_caddy(config.domain)
         self._set_state({"enabled": True, "config": config.dict()})
         self._reload()

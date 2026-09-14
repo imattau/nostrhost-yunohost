@@ -57,7 +57,7 @@ def make_service(
     template_dir = tmp_path / "caddy-templates"
     template_dir.mkdir()
     (template_dir / "caddy_nsite.conf").write_text(
-        "{{ domain }}, *.{{ domain }} {\n\tlog\n\ttls { on_demand }\n}\n",
+        "{{ domain }}, *.{{ domain }} {\n\tlog\n\ttls {\n\t\ton_demand\n\t}\n}\n",
         encoding="utf-8",
     )
     conf_dir = tmp_path / "caddy-conf.d"
@@ -131,6 +131,34 @@ def test_gateway_enable_flow(tmp_path: Path):
     state = service.load_gateway(svc.state_dir)
     assert state["enabled"] is True
     assert state["config"]["domain"] == "sites.example.org"
+
+
+def test_gateway_config_is_group_readable(tmp_path: Path):
+    import grp
+    import os
+
+    svc = make_service(tmp_path, caddy=FakeCaddy(), systemctl=FakeSystemctl())
+    svc.enable(cfg())
+    mode = os.stat(svc.config_path).st_mode & 0o777
+    assert mode == 0o640
+    try:
+        gid = grp.getgrnam("nostrhost-nsite").gr_gid
+    except KeyError:
+        return
+    assert os.stat(svc.config_path).st_gid == gid
+
+
+def test_gateway_snippet_uses_tls_internal_for_test_domain(tmp_path: Path):
+    caddy, systemctl = FakeCaddy(), FakeSystemctl()
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    (svc.state_dir / "domains-native" / "sites.example.test.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    svc.enable(cfg("sites.example.test"))
+    conf = (tmp_path / "caddy-conf.d" / "sites.example.test.conf").read_text()
+    assert "tls internal" in conf
+    assert "on_demand" not in conf
+    assert "reload caddy" in systemctl.calls
 
 
 def test_gateway_disable_flow(tmp_path: Path):

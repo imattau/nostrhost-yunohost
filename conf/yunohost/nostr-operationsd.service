@@ -18,7 +18,7 @@ ProtectSystem=full
 # native surface (firewall, backup, user, app lifecycle, diagnosis, system
 # upgrade) writes the yunohost state/log dirs, so they are explicit read-write
 # mounts alongside the NostrHost state dirs. Everything else stays read-only.
-ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt /etc/caddy
 
 [Install]
 WantedBy=multi-user.target
