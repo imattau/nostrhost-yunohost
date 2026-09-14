@@ -90,7 +90,7 @@ FIELD_GUIDANCE = {
     "timer": "A systemd timer and absolute executable for recurring package work.",
     "backup": "Filesystem paths and database inputs registered with the backup plane.",
     "policies": "Typed host security/log rotation policies rendered through registered providers.",
-    "settings": "Typed non-secret package settings and defaults. Store credentials with secrets instead.",
+    "settings": "Typed non-secret package settings and defaults. Store credentials with secrets instead. Post-install, these fields become the app's config panel (app.config.read/set, webadmin); values flow into managed config templates as the `settings` context.",
     "secrets": "Generated secret resources; never embed secret values in the manifest.",
     "hooks": "Restricted Python hook references for behavior not expressible as a resource; hooks are not shell snippets.",
 }

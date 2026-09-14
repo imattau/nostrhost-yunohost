@@ -1,3 +1,21 @@
+yunohost (12.1.41.41) stable; urgency=low
+
+  * nostrhost: post-install config panel for native package.toml apps.
+    - native [settings] now generates a YunoHost-compatible config_panel.toml
+      + scripts/config (legacy app registry), so app.config.read/set, the
+      webadmin and the ConfigPanel machinery work on the same typed values the
+      engine persists.
+    - the config script validates/coerces against the declared field types,
+      persists to the native settings state, re-renders the app's managed
+      config templates with the new settings context, and reloads the app's
+      service (native units are not in YunoHost's service registry, so the
+      panel declares no services and the apply script handles the restart).
+    - native manifest.json declares packaging_format 2 so the legacy manifest
+      loader skips the v1->v2 conversion (which assumed an `arguments` table
+      and crashed on the minimal native manifest).
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 00:20:00 +0000 
+
 yunohost (12.1.41.40) stable; urgency=low
 
   * nostrhost: operation executor + catalogue publish fixes.

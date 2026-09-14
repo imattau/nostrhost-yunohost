@@ -145,11 +145,15 @@ class PackageProvider:
             os.chmod(target, 0o644)
         # Minimal manifest.json so the legacy app registry (app_map / app_list)
         # can enumerate the native app without a full legacy manifest install.
+        # packaging_format 2: native packages are declarative (no v1
+        # arguments), so the legacy manifest loader must not run the v1->v2
+        # conversion that assumes an `arguments` table.
         manifest: dict[str, Any] = {
             "id": app_id or "app",
             "version": settings.get("version"),
             "name": {"en": app_id or "app"},
             "description": {"en": ""},
+            "packaging_format": 2,
             "integration": {"architectures": []},
         }
         manifest_target = legacy_dir / "manifest.json"
@@ -1189,6 +1193,41 @@ class JsonStateProvider:
         return [Operation(f"{self.resource_type}.unregister", desired["name"], desired, reverse=f"{self.resource_type}.register", summary=f"unregister {self.resource_type} state")]
 
 
+class NativeSettingsProvider(JsonStateProvider):
+    """Persist native settings and manage the generated config panel.
+
+    For packages that declare ``[settings]`` fields, install also generates a
+    YunoHost-compatible ``config_panel.toml`` + ``scripts/config`` in the
+    legacy app-registry entry (``/etc/yunohost/apps/<app>``), so webadmin,
+    ``app.config.read`` and ``app.config.set`` operate on the same typed values
+    the engine persists. Service restarts on apply are handled by the config
+    script (native units are not in YunoHost's service registry, so the panel
+    deliberately declares no ``services``).
+    """
+
+    def __init__(self, *, state_dir: Path, apps_dir: Path | None = None) -> None:
+        super().__init__(state_dir=state_dir, resource_type="settings")
+        self.apps_dir = apps_dir
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        result = super().apply(operation)
+        if self.apps_dir is None:
+            return result
+        app_id = operation.args.get("name") or _safe_name(operation.resource.rsplit(":", 1)[-1])
+        if operation.name.endswith(".remove") or operation.name.endswith(".unregister"):
+            from .native_config import remove_config_panel
+
+            remove_config_panel(self.apps_dir, app_id)
+            return result
+        fields = operation.args.get("fields") or {}
+        if not fields:
+            return result
+        from .native_config import write_config_panel
+
+        write_config_panel(self.apps_dir, app_id, fields)
+        return result
+
+
 class BackupProvider(JsonStateProvider):
     """Register backup inputs without owning the Restic data plane."""
 
@@ -1755,7 +1794,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
         "policy": PolicyProvider(root=root, command=command, state_dir=(root / "var/lib/nostrhost/state") if root != Path("/") else Path("/var/lib/nostrhost/state")),
-        "settings": JsonStateProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), resource_type="settings"),
+        "settings": NativeSettingsProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), apps_dir=(root / "etc/yunohost/apps") if root != Path("/") else Path("/etc/yunohost/apps")),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
         "dns.records": DnsRecordsProvider(),
