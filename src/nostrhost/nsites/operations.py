@@ -49,6 +49,54 @@ class GatewayDisableArgs(_Strict):
     confirm: bool = Field(True, description="acknowledge disabling the gateway")
 
 
+class SiteArgs(_Strict):
+    """Shared arguments for nsite.register / nsite.inspect / nsite.unregister."""
+
+    pubkey: str = Field(description="the site owner pubkey (hex or npub)")
+    d: str = Field(default="", description="named-site d tag (empty for root sites)")
+
+
+class SiteRegisterArgs(SiteArgs):
+    kind: int = Field(15128, description="15128 (root) or 35128 (named)")
+    title: str = Field(default="", description="human-readable site title")
+
+
+class ValidateManifestArgs(_Strict):
+    event: dict = Field(description="the signed (or unsigned) manifest event")
+
+
+class PublishPlanArgs(_Strict):
+    pubkey: str = Field(description="the site owner pubkey (hex or npub)")
+    kind: int = Field(15128, description="15128 (root) or 35128 (named)")
+    d: str = Field(default="", description="named-site d tag (empty for root sites)")
+    items: list[dict[str, str]] = Field(
+        description='blob inventory: [{"path": "/index.html", "sha256": "<64 hex>"}]'
+    )
+    servers: list[str] | None = Field(None, description="Blossom server hints")
+    relays: list[str] | None = Field(None, description="publish relays (defaults to host list)")
+
+
+class PublishArgs(_Strict):
+    event: dict = Field(description="the signed manifest event to verify/broadcast/record")
+    plan_sha256: str = Field(description="the plan digest from nsite.publish.plan")
+    relays: list[str] | None = Field(None, description="publish relays (must match the plan)")
+
+
+class ResolveArgs(_Strict):
+    label: str = Field(default="", description="a site label (npub1…, v+50 base36, or 50 base36 + d)")
+    pubkey: str = Field(default="", description="author pubkey (hex or npub)")
+    d: str = Field(default="", description="named-site d tag")
+    relays: list[str] | None = Field(None, description="lookup relays to query")
+    limit: int = Field(5, description="max relays to query (bounded)")
+    timeout: float = Field(8.0, description="per-relay timeout seconds (bounded)")
+
+
+class ReachabilityArgs(_Strict):
+    relays: list[str] | None = Field(None, description="relay URLs to probe")
+    servers: list[str] | None = Field(None, description="Blossom server URLs to probe")
+    timeout: float = Field(5.0, description="per-target timeout seconds")
+
+
 def _service() -> NsiteService:
     return NsiteService()
 
@@ -97,3 +145,90 @@ def _safe_gateway_configure(**args: Any) -> dict[str, Any]:
         return _service().configure(_config(args))
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_list(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError("nsite.list takes no arguments")
+    return _service().site_list()
+
+
+def _safe_nsite_inspect(pubkey: str = "", d: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.inspect does not accept extra args: {sorted(args)}")
+    try:
+        return _service().site_inspect(pubkey, d=d)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_register(pubkey: str = "", kind: int = 15128, d: str = "", title: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.register does not accept extra args: {sorted(args)}")
+    try:
+        return _service().site_register(pubkey, kind=kind, d=d, title=title)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_unregister(pubkey: str = "", d: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.unregister does not accept extra args: {sorted(args)}")
+    try:
+        return _service().site_unregister(pubkey, d=d)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_validate(event: dict | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.validate_manifest does not accept extra args: {sorted(args)}")
+    if not event:
+        raise NostrHostError("nsite.validate_manifest requires an event")
+    return _service().validate_manifest(event)
+
+
+def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, servers: list | None = None, relays: list | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.publish.plan does not accept extra args: {sorted(args)}")
+    try:
+        return _service().publish_plan(pubkey, kind=kind, d=d, items=items or [], servers=servers, relays=relays)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_publish(event: dict | None = None, plan_sha256: str = "", relays: list | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.publish does not accept extra args: {sorted(args)}")
+    if not event:
+        raise NostrHostError("nsite.publish requires a signed event")
+    try:
+        return _service().publish(event, plan_sha256=plan_sha256, relays=relays)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_snapshot(event: dict | None = None, plan_sha256: str = "", relays: list | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.snapshot does not accept extra args: {sorted(args)}")
+    if not event:
+        raise NostrHostError("nsite.snapshot requires a signed event")
+    try:
+        return _service().snapshot(event, plan_sha256=plan_sha256, relays=relays)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_resolve(label: str = "", pubkey: str = "", d: str = "", relays: list | None = None, limit: int = 5, timeout: float = 8.0, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.resolve does not accept extra args: {sorted(args)}")
+    try:
+        return _service().resolve(label=label, pubkey=pubkey, d=d, relays=relays, limit=limit, timeout=timeout)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_reachability(relays: list | None = None, servers: list | None = None, timeout: float = 5.0, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.reachability does not accept extra args: {sorted(args)}")
+    return _service().reachability(relays=relays, servers=servers, timeout=timeout)

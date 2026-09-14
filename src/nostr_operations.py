@@ -42,7 +42,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
-from .nostrhost.nsites.operations import GatewayArgs, GatewayDisableArgs  # noqa: E402 - nsite.gateway.* input models
+from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models
+    GatewayArgs,
+    GatewayDisableArgs,
+    PublishArgs,
+    PublishPlanArgs,
+    ReachabilityArgs,
+    ResolveArgs,
+    SiteArgs,
+    SiteRegisterArgs,
+    ValidateManifestArgs,
+)
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
 KIND_OPERATION_REQUEST = 2200
@@ -594,6 +604,66 @@ def _safe_nsite_gateway_configure(**args: Any) -> dict[str, Any]:
     return _impl(**args)
 
 
+def _safe_nsite_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_list as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_inspect(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_inspect as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_register(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_register as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_unregister(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_unregister as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_validate(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_validate as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_publish_plan(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_publish_plan as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_publish(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_publish as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_snapshot(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_snapshot as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_resolve(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_resolve as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_reachability(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_reachability as _impl
+
+    return _impl(**args)
+
+
 def _safe_dns_plan(domain: str = "", **args: Any) -> dict[str, Any]:
     from .nostrhost.domains.operations import _safe_dns_plan as _impl
 
@@ -813,6 +883,89 @@ TOOLS: dict[str, ToolSpec] = {
         risk=RISK_MEDIUM,
         reversibility=REVERSIBLE,
         description="update gateway config (relays, blossom servers, limits) and reload",
+    ),
+    "nsite.list": ToolSpec(
+        name="nsite.list",
+        handler=_safe_nsite_list,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        description="registered sites and the gateway mode",
+    ),
+    "nsite.inspect": ToolSpec(
+        name="nsite.inspect",
+        handler=_safe_nsite_inspect,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        input_model=SiteArgs,
+        description="one registered site record (current manifest, hashes, relay/blob status)",
+    ),
+    "nsite.resolve": ToolSpec(
+        name="nsite.resolve",
+        handler=_safe_nsite_resolve,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        input_model=ResolveArgs,
+        description="fetch the current manifest for a label/pubkey from public relays (read only, bounded)",
+    ),
+    "nsite.validate_manifest": ToolSpec(
+        name="nsite.validate_manifest",
+        handler=_safe_nsite_validate,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        input_model=ValidateManifestArgs,
+        description="validate a candidate manifest event (kind, signature, tags, aggregate); no network",
+    ),
+    "nsite.reachability": ToolSpec(
+        name="nsite.reachability",
+        handler=_safe_nsite_reachability,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        input_model=ReachabilityArgs,
+        description="relay/server reachability for a site (bounded probes)",
+    ),
+    "nsite.publish.plan": ToolSpec(
+        name="nsite.publish.plan",
+        handler=_safe_nsite_publish_plan,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        input_model=PublishPlanArgs,
+        description="blob inventory to an unsigned manifest + plan_sha256 (D7); nothing is signed or broadcast",
+    ),
+    "nsite.register": ToolSpec(
+        name="nsite.register",
+        handler=_safe_nsite_register,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=SiteRegisterArgs,
+        risk=RISK_LOW,
+        reversibility=REVERSIBLE,
+        description="add a hosted-mode allowlist entry",
+    ),
+    "nsite.unregister": ToolSpec(
+        name="nsite.unregister",
+        handler=_safe_nsite_unregister,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=SiteArgs,
+        risk=RISK_LOW,
+        reversibility=REVERSIBLE,
+        description="remove a hosted-mode allowlist entry",
+    ),
+    "nsite.publish": ToolSpec(
+        name="nsite.publish",
+        handler=_safe_nsite_publish,
+        scope=SCOPE_NSITES_PUBLISH,
+        input_model=PublishArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="verify a signed manifest (plan digest, signer, allowlist), broadcast to relays, record",
+    ),
+    "nsite.snapshot": ToolSpec(
+        name="nsite.snapshot",
+        handler=_safe_nsite_snapshot,
+        scope=SCOPE_NSITES_PUBLISH,
+        input_model=PublishArgs,
+        risk=RISK_LOW,
+        reversibility=REVERSIBLE,
+        description="record a client-signed kind-5128 snapshot of the current manifest",
     ),
     "dns.plan": ToolSpec(
         name="dns.plan",

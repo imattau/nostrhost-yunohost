@@ -107,7 +107,42 @@ class SiteRecord(BaseModel):
     title: str = ""
     last_event_id: str = ""
     aggregate_hash: str = ""
+    servers: list[str] = Field(default_factory=list)
+    relays: list[str] = Field(default_factory=list)
     provenance: dict[str, str] = Field(default_factory=dict)
+
+
+class PublishItem(BaseModel):
+    """One blob in a publish plan: path and its content sha256."""
+
+    path: str
+    sha256: str
+
+
+class PublishPlan(BaseModel):
+    """The unsigned manifest a user is about to sign (D7).
+
+    Built by ``nsite.publish.plan``, never persisted: the plan digest
+    ``plan_sha256`` binds the manifest *content* (kind, ``d``, path tags)
+    so ``nsite.publish`` can reject a signed event whose digest does not
+    match what was planned (stale-plan rejection).
+    """
+
+    pubkey: str
+    kind: int = 15128  # 15128 root | 35128 named
+    d: str = ""
+    items: list[PublishItem] = Field(default_factory=list)
+    servers: list[str] = Field(default_factory=list)
+    relays: list[str] = Field(default_factory=list)
+    unsigned_event: dict = Field(default_factory=dict)
+    plan_sha256: str = ""
+
+
+class PublishRequest(BaseModel):
+    """A signed manifest + the plan digest it was built from (D7)."""
+
+    event: dict
+    plan_sha256: str = ""
 
 
 def _str_list(values: list[str]) -> str:

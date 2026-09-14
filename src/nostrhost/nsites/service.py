@@ -1,23 +1,33 @@
-"""Nsites gateway lifecycle service (Phase 1, task 1.4).
+"""Nsites gateway lifecycle + publishing service (Phase 1 task 1.4, Phase 3a).
 
 Manages the optional ``nostrhost-nsite`` systemd unit: enable/disable/
 configure, rendering ``/etc/nostrhost/nsite.toml``, writing the gateway
 domain's Caddy snippet and reconciling the ``nostrhost-nsite:<domain>`` admin
 route, and persisting intent in ``state/nsites/gateway.json`` (ngit state,
-§3.2). Site registration/publishing is Phase 3.
+§3.2). Phase 3a adds site registration and owner-controlled publishing:
+``publish_plan`` builds an unsigned manifest and its plan digest (D7),
+``publish`` verifies a signed manifest (signature, plan digest, host-key
+signer guard, hosted allowlist), broadcasts to relays with per-relay results
+(D5) and records the site, ``snapshot`` records a client-signed kind 5128,
+``resolve`` reads manifests from relays, ``reachability`` probes relay/server
+targets — all bounded.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .models import GatewayConfig
+from .manifest import KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT
+from .models import GatewayConfig, SiteRecord
 
 CONFIG_PATH = Path("/etc/nostrhost/nsite.toml")
 CADDY_TEMPLATE_DIR = Path("/usr/share/yunohost/conf/caddy")
@@ -26,6 +36,123 @@ GATEWAY_UPSTREAM = "127.0.0.1:8195"
 SERVICE = "nostrhost-nsite.service"
 
 _LIVE = object()
+
+# Host defaults for publishing when the owner's NIP-65 list is unavailable
+# (implementation plan §D5).
+DEFAULT_PUBLISH_RELAYS = [
+    "wss://purplepag.es",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
+]
+
+_SITE_DIR = "sites"
+
+
+def site_path(state_dir: Path, pubkey: str, d: str = "") -> Path:
+    """``state/nsites/sites/<pubkey>[.<d>].json`` (implementation plan §3.2)."""
+    name = pubkey if not d else f"{pubkey}.{d}"
+    return nsites_state_dir(state_dir) / _SITE_DIR / f"{name}.json"
+
+
+def _pubkey_hex(pubkey: str) -> str:
+    import re as _re
+
+    if _re.fullmatch(r"[0-9a-f]{64}", pubkey or ""):
+        return pubkey
+    from nostr_sdk import PublicKey
+
+    try:
+        return PublicKey.parse(pubkey).to_hex()
+    except Exception as exc:  # noqa: BLE001
+        raise NsiteError(f"invalid site pubkey: {pubkey!r}") from exc
+
+
+def plan_digest(
+    *, kind: int, d: str, paths: list[tuple[str, str]], servers: list[str]
+) -> str:
+    """The plan digest binding a manifest's signed content (D7, §6 step 5).
+
+    Covers exactly what a manifest carries that the signer commits to: kind,
+    ``d``, the (sorted) path tags and the (sorted) server hints. The Admin's
+    ``src/lib/nsite/manifest.ts`` computes the identical digest, so a signed
+    event submitted to ``nsite.publish`` with a stale/mismatched digest is
+    rejected before any broadcast or record (stale-plan rejection).
+    """
+    payload = json.dumps(
+        [kind, d, sorted(paths), sorted(set(servers))], separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _broadcast(event: dict[str, Any], relays: list[str], timeout: float = 10.0) -> dict[str, Any]:
+    """Publish ``event`` to each relay, collecting per-relay results (D5).
+
+    A relay that accepts the event is an OK; any exception (unreachable,
+    timeout, explicit rejection) is a failed entry. The caller decides on
+    ``succeeded``: at least one OK is a success-with-warnings, none is a
+    failure (implementation plan §D5).
+    """
+    from yunohost.nostr_identity import publish_to_relay
+
+    results: list[dict[str, Any]] = []
+    for relay in relays:
+        try:
+            publish_to_relay(relay, event, timeout=timeout)
+            results.append({"relay": relay, "ok": True})
+        except Exception as exc:  # noqa: BLE001 - per-relay failures are reported, not raised
+            results.append({"relay": relay, "ok": False, "error": str(exc)})
+    ok = sum(1 for r in results if r["ok"])
+    return {
+        "results": results,
+        "ok_count": ok,
+        "failed_count": len(results) - ok,
+        "succeeded": ok > 0,
+    }
+
+
+def _query_relay_events(
+    relay_url: str,
+    filters: dict[str, Any],
+    *,
+    limit: int = 20,
+    timeout: float = 8.0,
+) -> list[dict[str, Any]]:
+    """Issue one bounded REQ against a relay and return the matching events.
+
+    Raw NIP-01 WebSocket, mirroring ``events.query_chain_events``. Best-effort:
+    an unreachable relay yields ``[]``. The caller bounds relay count and
+    timeout so ``nsite.resolve`` cannot be an amplification vector.
+    """
+    from websockets.sync.client import connect
+
+    deadline = time.time() + timeout
+    events: list[dict[str, Any]] = []
+    try:
+        with connect(relay_url) as ws:
+            sub_id = "nostrhost-nsites-" + secrets.token_hex(4)
+            ws.send(json.dumps(["REQ", sub_id, filters]))
+            while time.time() < deadline and len(events) < limit:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "EVENT":
+                    events.append(msg[2])
+                elif msg[0] == "EOSE":
+                    break
+            ws.send(json.dumps(["CLOSE", sub_id]))
+    except Exception:  # noqa: BLE001 - best-effort read
+        return []
+    return events
+
+
+def _http_probe(url: str, timeout: float = 5.0) -> dict[str, Any]:
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-provided target, bounded
+            return {"url": url, "ok": True, "status": resp.status}
+    except Exception as exc:  # noqa: BLE001
+        return {"url": url, "ok": False, "error": str(exc)}
 
 
 class NsiteError(ValueError):
@@ -143,9 +270,22 @@ class NsiteService:
         The gateway runs as the unprivileged ``nostrhost-nsite`` user, so the
         config must be group-readable by that user (root-only 0640 would make
         the unit fail to start with EACCES on every host).
+
+        The ``[[sites]]`` allowlist is rendered from ``state/nsites/sites/*``
+        (Phase 3a), so registration and publish both re-render + SIGHUP.
         """
+        text = config.to_toml()
+        sites = _sites(self.state_dir)
+        if sites:
+            parts = [text.rstrip(), ""]
+            for site in sites:
+                parts.append("[[sites]]")
+                parts.append(f'pubkey = "{site.get("pubkey", "")}"')
+                parts.append(f"kind = {site.get('kind', KIND_ROOT)}")
+                parts.append(f'd = "{site.get("d", "")}"')
+            text = "\n".join(parts) + "\n"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(config.to_toml(), encoding="utf-8")
+        self.config_path.write_text(text, encoding="utf-8")
         try:
             import grp
 
@@ -318,6 +458,494 @@ class NsiteService:
             "reloaded": SERVICE,
             "ok": True,
         }
+
+    # -- site registry (Phase 3a) ----------------------------------------
+
+    def _require_gateway(self) -> dict[str, Any]:
+        state = self._state()
+        if not state.get("enabled"):
+            raise NsiteError("the gateway is not enabled; enable it before publishing")
+        return state
+
+    def _refresh_gateway(self) -> None:
+        """Re-render the allowlist into nsite.toml and SIGHUP the gateway."""
+        state = self._state()
+        config = state.get("config")
+        if not state.get("enabled") or not config:
+            return
+        try:
+            self.render_config(GatewayConfig(**config))
+        except Exception:  # noqa: BLE001 - config render must not fail the state write
+            return
+        self._reload()
+
+    def _site_registered(self, pubkey: str, kind: int, d: str) -> bool:
+        """Hosted-mode allowlist check: root/named match pubkey+d, snapshots
+        match the author's pubkey (implementation plan §4.1 step 2)."""
+        for record in _sites(self.state_dir):
+            if record.get("pubkey") != pubkey:
+                continue
+            if kind == KIND_SNAPSHOT or record.get("d", "") == d:
+                return True
+        return False
+
+    def site_register(
+        self,
+        pubkey: str,
+        *,
+        kind: int = KIND_ROOT,
+        d: str = "",
+        title: str = "",
+    ) -> dict[str, Any]:
+        from .manifest import is_valid_d
+
+        pubkey = _pubkey_hex(pubkey)
+        if kind not in (KIND_ROOT, KIND_NAMED):
+            raise NsiteError("site kind must be 15128 (root) or 35128 (named)")
+        if kind == KIND_NAMED:
+            if not is_valid_d(d):
+                raise NsiteError(f"invalid named-site d tag: {d!r}")
+        elif d:
+            raise NsiteError("root sites take no d tag")
+        path = site_path(self.state_dir, pubkey, d)
+        record = SiteRecord(
+            pubkey=pubkey,
+            kind=kind,
+            d=d,
+            title=title or "",
+            provenance={"actor": "nsite.register", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ")},
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record.dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self._refresh_gateway()
+        return {"action": "nsite.register", "site": record.dict(), "ok": True}
+
+    def site_unregister(self, pubkey: str, *, d: str = "") -> dict[str, Any]:
+        pubkey = _pubkey_hex(pubkey)
+        path = site_path(self.state_dir, pubkey, d)
+        if not path.is_file():
+            raise NsiteError("site is not registered")
+        path.unlink()
+        self._refresh_gateway()
+        return {"action": "nsite.unregister", "pubkey": pubkey, "d": d, "removed": True, "ok": True}
+
+    def site_list(self) -> dict[str, Any]:
+        return {
+            "mode": (self._state().get("config") or {}).get("mode", "hosted"),
+            "sites": _sites(self.state_dir),
+            "count": len(_sites(self.state_dir)),
+        }
+
+    def site_inspect(self, pubkey: str, *, d: str = "") -> dict[str, Any]:
+        pubkey = _pubkey_hex(pubkey)
+        path = site_path(self.state_dir, pubkey, d)
+        if not path.is_file():
+            raise NsiteError("site is not registered")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return {"site": record}
+
+    # -- manifest validation / plan / publish (Phase 3a) -----------------
+
+    def validate_manifest(self, event: dict[str, Any]) -> dict[str, Any]:
+        from .manifest import validate_manifest as _validate
+        from .signer_guard import forbidden_signer_pubkeys
+
+        verdict = _validate(
+            event, forbidden_pubkeys=forbidden_signer_pubkeys()
+        )
+        return {
+            "valid": verdict.valid,
+            "errors": verdict.errors,
+            "site_type": verdict.site_type,
+            "pubkey": verdict.pubkey,
+            "event_id": verdict.event_id,
+            "d": verdict.d,
+            "aggregate_hash": verdict.aggregate_hash,
+            "label": verdict.label,
+            "paths": verdict.paths,
+        }
+
+    def publish_plan(
+        self,
+        pubkey: str,
+        *,
+        kind: int = KIND_ROOT,
+        d: str = "",
+        items: list[dict[str, str]],
+        servers: list[str] | None = None,
+        relays: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build the unsigned manifest and the plan digest (D7, §6 step 2/5).
+
+        ``items`` is ``[{"path": "/index.html", "sha256": "…64 hex…"}, …]``
+        produced by the Admin's client-side inventory+hash. Nothing is signed
+        or broadcast here; the client signs the manifest and submits it to
+        :meth:`publish` with the returned ``plan_sha256``.
+        """
+        from .manifest import is_sha256_hex, is_valid_d
+
+        pubkey = _pubkey_hex(pubkey)
+        if kind not in (KIND_ROOT, KIND_NAMED):
+            raise NsiteError("plan kind must be 15128 (root) or 35128 (named)")
+        if kind == KIND_NAMED and not is_valid_d(d):
+            raise NsiteError(f"invalid named-site d tag: {d!r}")
+        if kind == KIND_ROOT and d:
+            raise NsiteError("root sites take no d tag")
+        if not items:
+            raise NsiteError("a manifest needs at least one path/blob")
+
+        paths: list[tuple[str, str]] = []
+        for item in items:
+            path = str(item.get("path", ""))
+            blob_hash = str(item.get("sha256", ""))
+            if not path.startswith("/"):
+                raise NsiteError(f"path must start with '/': {path!r}")
+            if not is_sha256_hex(blob_hash):
+                raise NsiteError(f"invalid blob hash for {path!r}")
+            paths.append((path, blob_hash))
+        servers = [s for s in (servers or []) if s]
+        relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        for url in servers + relays:
+            if not url.startswith(("https://", "wss://")):
+                raise NsiteError(f"refusing non-TLS server/relay URL: {url!r}")
+
+        from .manifest import aggregate_hash
+
+        tags: list[list[str]] = []
+        if kind == KIND_NAMED:
+            tags.append(["d", d])
+        for path, blob_hash in sorted(paths):
+            tags.append(["path", path, blob_hash])
+        if servers:
+            for server in sorted(set(servers)):
+                tags.append(["server", server])
+        tags.append(["x", aggregate_hash(paths), "aggregate"])
+
+        plan = {
+            "pubkey": pubkey,
+            "kind": kind,
+            "d": d,
+            "items": [{"path": p, "sha256": h} for p, h in paths],
+            "servers": servers,
+            "relays": relays,
+            "unsigned_event": {
+                "kind": kind,
+                "pubkey": pubkey,
+                "created_at": 0,
+                "tags": tags,
+                "content": "",
+            },
+            "plan_sha256": plan_digest(kind=kind, d=d, paths=paths, servers=servers),
+        }
+        return {"plan": plan}
+
+    def publish(
+        self,
+        event: dict[str, Any],
+        *,
+        plan_sha256: str = "",
+        relays: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Verify a signed manifest, broadcast it and record the site.
+
+        Rejects (before any broadcast or record) when the event is not a valid
+        manifest, is signed by a host key, the plan digest does not match the
+        event's signed content, or (hosted mode) the pubkey is unregistered.
+        A publish that reaches at least one relay succeeds with a warning list;
+        one that reaches none fails (implementation plan §D5).
+        """
+        from .manifest import validate_manifest as _validate
+        from .signer_guard import forbidden_signer_pubkeys
+
+        self._require_gateway()
+        verdict = _validate(event, forbidden_pubkeys=forbidden_signer_pubkeys())
+        if not verdict.valid:
+            raise NsiteError(
+                "manifest is not valid: " + ", ".join(verdict.errors)
+            )
+        if verdict.pubkey is None:
+            raise NsiteError("manifest has no signable pubkey")
+
+        path_tags = [t for t in event.get("tags", []) if t and t[0] == "path"]
+        server_tags = [t[1] for t in event.get("tags", []) if t and t[0] == "server"]
+        paths = [(str(t[1]), str(t[2])) for t in path_tags if len(t) >= 3]
+        d = verdict.d or ""
+        servers = [str(s) for s in server_tags]
+        digest = plan_digest(kind=event["kind"], d=d, paths=paths, servers=servers)
+        if plan_sha256 and digest != plan_sha256:
+            raise NsiteError("plan digest mismatch: the signed manifest does not match the planned content")
+        if plan_sha256 == "":
+            # digest binding is mandatory when a plan was expected; a caller
+            # that omits it gets a plan-less publish only if the operation
+            # opts in. We require it (D7: every submitted manifest is checked).
+            raise NsiteError("publish requires the plan_sha256 from nsite.publish.plan")
+
+        mode = (self._state().get("config") or {}).get("mode", "hosted")
+        if mode == "hosted" and not self._site_registered(
+            verdict.pubkey, event["kind"], d
+        ):
+            raise NsiteError(
+                f"pubkey {verdict.pubkey[:16]}… is not registered in hosted mode; run nsite.register first"
+            )
+
+        broadcast_relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        broadcast = _broadcast(event, broadcast_relays)
+        if not broadcast["succeeded"]:
+            raise NsiteError(
+                "publish reached no relay: " + ", ".join(
+                    f"{r['relay']}: {r.get('error', 'rejected')}" for r in broadcast["results"]
+                )
+            )
+
+        self._record_site(verdict.pubkey, event["kind"], d, event, servers, broadcast_relays)
+
+        site_url = None
+        state = self._state()
+        gateway_domain = (state.get("config") or {}).get("domain", "")
+        if gateway_domain and verdict.label:
+            from .manifest import canonical_site_url
+
+            site_url = canonical_site_url(verdict.label, gateway_domain)
+
+        return {
+            "action": "nsite.publish",
+            "event_id": verdict.event_id,
+            "pubkey": verdict.pubkey,
+            "kind": event["kind"],
+            "d": d,
+            "label": verdict.label,
+            "aggregate_hash": verdict.aggregate_hash,
+            "site_url": site_url,
+            "plan_matched": True,
+            "relays": broadcast,
+            "ok": True,
+        }
+
+    def _record_site(
+        self,
+        pubkey: str,
+        kind: int,
+        d: str,
+        event: dict[str, Any],
+        servers: list[str],
+        relays: list[str],
+    ) -> None:
+        path = site_path(self.state_dir, pubkey, d)
+        record: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                record = {}
+        record.update(
+            {
+                "pubkey": pubkey,
+                "kind": kind,
+                "d": d,
+                "title": record.get("title", ""),
+                "last_event_id": event.get("id", ""),
+                "aggregate_hash": _aggregate_from_event(event),
+                "servers": servers,
+                "relays": relays,
+                "provenance": {
+                    "actor": "nsite.publish",
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            }
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self._refresh_gateway()
+
+    def snapshot(
+        self,
+        event: dict[str, Any],
+        *,
+        plan_sha256: str = "",
+        relays: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record a client-signed kind 5128 snapshot (implementation plan §5).
+
+        The snapshot is built and signed client-side (it references the root
+        manifest's ``a`` tag and recomputes the aggregate); the server
+        validates it exactly like a publish and records the event id on the
+        site record's ``snapshots`` list. A snapshot does not change the
+        allowlist.
+        """
+        from .manifest import validate_manifest as _validate
+        from .signer_guard import forbidden_signer_pubkeys
+
+        self._require_gateway()
+        verdict = _validate(event, forbidden_pubkeys=forbidden_signer_pubkeys())
+        if not verdict.valid or verdict.site_type != "snapshot":
+            raise NsiteError(
+                "snapshot is not a valid kind-5128 manifest: "
+                + ", ".join(verdict.errors or ["bad_kind"])
+            )
+        if verdict.pubkey is None:
+            raise NsiteError("snapshot has no signable pubkey")
+        if plan_sha256 and verdict.aggregate_hash and verdict.aggregate_hash != plan_sha256:
+            # For snapshots the client binds the aggregate it signed; keep the
+            # same reject-a-stale-plan shape as publish.
+            raise NsiteError("snapshot aggregate does not match the planned digest")
+
+        broadcast_relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        broadcast = _broadcast(event, broadcast_relays)
+        if not broadcast["succeeded"]:
+            raise NsiteError("snapshot reached no relay")
+
+        # Record on the site the snapshot references (its ``a`` tag), not the
+        # snapshot's own (d-less) identity.
+        ref_pubkey, ref_d = verdict.pubkey, ""
+        for t in event.get("tags", []):
+            if isinstance(t, list) and t and t[0] == "a" and len(t) > 1:
+                parts = str(t[1]).split(":", 2)
+                if len(parts) == 3 and parts[1]:
+                    ref_pubkey, ref_d = parts[1], parts[2]
+        path = site_path(self.state_dir, ref_pubkey, ref_d)
+        if path.is_file():
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                record = {}
+            snapshots = record.get("snapshots", [])
+            if verdict.event_id not in snapshots:
+                snapshots.append(verdict.event_id)
+            record["snapshots"] = snapshots
+            path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        return {
+            "action": "nsite.snapshot",
+            "event_id": verdict.event_id,
+            "pubkey": verdict.pubkey,
+            "label": verdict.label,
+            "relays": broadcast,
+            "ok": True,
+        }
+
+    # -- read-only network tools (Phase 3a) -------------------------------
+
+    def resolve(
+        self,
+        *,
+        label: str = "",
+        pubkey: str = "",
+        d: str = "",
+        relays: list[str] | None = None,
+        limit: int = 5,
+        timeout: float = 8.0,
+    ) -> dict[str, Any]:
+        """Fetch the current manifest for a label or pubkey from public relays.
+
+        Bounded: at most ``limit`` relays, each with ``timeout`` seconds and
+        at most 20 events, then the newest valid manifest wins. Reads only.
+        """
+        from .manifest import decode_label
+
+        kind: int | None = None
+        author = ""
+        event_id = ""
+        if label:
+            site_type, hex_value, label_d = decode_label(label)
+            if site_type is None:
+                raise NsiteError(f"cannot decode site label {label!r}")
+            kind = {"root": KIND_ROOT, "named": KIND_NAMED, "snapshot": KIND_SNAPSHOT}.get(
+                site_type, KIND_ROOT
+            )
+            if site_type == "snapshot":
+                event_id, author = hex_value, ""
+            else:
+                author, d = hex_value, label_d or d
+        elif pubkey:
+            author = _pubkey_hex(pubkey)
+            kind = KIND_NAMED if d else KIND_ROOT
+        else:
+            raise NsiteError("resolve needs a label or a pubkey")
+
+        lookup_relays = [r for r in (relays or []) if r]
+        if not lookup_relays:
+            state = self._state()
+            config = state.get("config") or {}
+            lookup_relays = config.get("relays", {}).get("lookup") or ["wss://purplepag.es", "wss://user.kindpag.es"]
+
+        filters: dict[str, Any] = {"kinds": [kind]}
+        if author:
+            filters["authors"] = [author]
+        if event_id:
+            filters["ids"] = [event_id]
+
+        candidates: list[dict[str, Any]] = []
+        for relay in lookup_relays[:limit]:
+            candidates.extend(_query_relay_events(relay, filters, limit=20, timeout=timeout))
+        if not candidates:
+            return {"found": False, "relays_queried": lookup_relays[:limit], "manifest": None}
+
+        from .manifest import validate_manifest as _validate
+
+        newest: tuple[int, dict[str, Any], Any] | None = None
+        for event in candidates:
+            verdict = _validate(event)
+            if not verdict.valid:
+                continue
+            if d and (verdict.d or "") != d:
+                continue
+            if kind == KIND_NAMED and not d:
+                continue
+            created_at = int(event.get("created_at", 0))
+            if newest is None or created_at > newest[0]:
+                newest = (created_at, event, verdict)
+        if newest is None:
+            return {"found": False, "relays_queried": lookup_relays[:limit], "manifest": None}
+
+        _created, event, verdict = newest
+        return {
+            "found": True,
+            "relays_queried": lookup_relays[:limit],
+            "manifest": {
+                "event_id": verdict.event_id,
+                "pubkey": verdict.pubkey,
+                "kind": event["kind"],
+                "d": verdict.d,
+                "label": verdict.label,
+                "aggregate_hash": verdict.aggregate_hash,
+                "paths": verdict.paths,
+            },
+        }
+
+    def reachability(
+        self,
+        *,
+        relays: list[str] | None = None,
+        servers: list[str] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Probe relay (WebSocket) and server (HTTP HEAD) reachability.
+
+        Bounded per target; results are advisory only.
+        """
+        relay_results: list[dict[str, Any]] = []
+        for relay in (relays or []):
+            started = time.time()
+            try:
+                _query_relay_events(relay, {"kinds": []}, limit=1, timeout=timeout)
+                relay_results.append(
+                    {"relay": relay, "ok": True, "roundtrip_ms": int((time.time() - started) * 1000)}
+                )
+            except Exception as exc:  # noqa: BLE001
+                relay_results.append({"relay": relay, "ok": False, "error": str(exc)})
+        server_results = [_http_probe(url, timeout=timeout) for url in (servers or [])]
+        return {"relays": relay_results, "servers": server_results}
+
+
+def _aggregate_from_event(event: dict[str, Any]) -> str:
+    from .manifest import aggregate_hash
+
+    paths = [
+        (str(t[1]), str(t[2]))
+        for t in event.get("tags", [])
+        if isinstance(t, list) and len(t) >= 3 and t[0] == "path"
+    ]
+    return aggregate_hash(paths)
 
 
 def _sites(state_dir: Path) -> list[dict[str, Any]]:

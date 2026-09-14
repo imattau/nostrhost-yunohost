@@ -77,6 +77,16 @@ from yunohost.nostr_operations import (
     _safe_nsite_gateway_enable,
     _safe_nsite_gateway_disable,
     _safe_nsite_gateway_configure,
+    _safe_nsite_inspect,
+    _safe_nsite_list,
+    _safe_nsite_publish,
+    _safe_nsite_publish_plan,
+    _safe_nsite_reachability,
+    _safe_nsite_register,
+    _safe_nsite_resolve,
+    _safe_nsite_snapshot,
+    _safe_nsite_unregister,
+    _safe_nsite_validate,
     _safe_dns_verify,
     _safe_dns_watch,
     _safe_domain_add,
@@ -134,6 +144,16 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "nsite.gateway.enable": _safe_nsite_gateway_enable,
     "nsite.gateway.disable": _safe_nsite_gateway_disable,
     "nsite.gateway.configure": _safe_nsite_gateway_configure,
+    "nsite.list": _safe_nsite_list,
+    "nsite.inspect": _safe_nsite_inspect,
+    "nsite.resolve": _safe_nsite_resolve,
+    "nsite.validate_manifest": _safe_nsite_validate,
+    "nsite.reachability": _safe_nsite_reachability,
+    "nsite.publish.plan": _safe_nsite_publish_plan,
+    "nsite.register": _safe_nsite_register,
+    "nsite.unregister": _safe_nsite_unregister,
+    "nsite.publish": _safe_nsite_publish,
+    "nsite.snapshot": _safe_nsite_snapshot,
     "network.public_ip": _safe_network_public_ip,
     "credential.set": _safe_credential_set,
     "credential.remove": _safe_credential_remove,
@@ -210,6 +230,16 @@ class _State:
 
 def _print_error(exc: Exception) -> None:
     print(f"error: {exc}", file=sys.stderr)
+
+
+def _load_json_file(path: str) -> Any:
+    """Read a JSON file (a signed event or blob inventory) or raise."""
+    try:
+        import json
+
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise NostrHostError(f"cannot read JSON file {path}: {exc}") from exc
 
 
 def _run_tool(name: str, args: dict[str, Any]) -> Any:
@@ -2311,6 +2341,159 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             body = _run_lifecycle("nsite.gateway.configure", {"domain": domain}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"nsite.gateway.configure rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("list")
+    def nsite_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Registered sites and the gateway mode."""
+        _guard(lambda: _run_tool("nsite.list", {}), output_as)
+
+    @nsite.command("inspect")
+    def nsite_inspect(
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """One registered site record."""
+        _guard(lambda: _run_tool("nsite.inspect", {"pubkey": pubkey, "d": d}), output_as)
+
+    @nsite.command("register")
+    def nsite_register(
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        kind: int = typer.Option(15128, "--kind", help="15128 (root) or 35128 (named)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        title: str = typer.Option("", "--title"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Add a hosted-mode allowlist entry."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.register", {"pubkey": pubkey, "kind": kind, "d": d, "title": title}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.register rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("unregister")
+    def nsite_unregister(
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove a hosted-mode allowlist entry."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.unregister", {"pubkey": pubkey, "d": d}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.unregister rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("validate")
+    def nsite_validate(
+        event_file: str = typer.Argument(..., help="path to a signed manifest JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Validate a candidate manifest event; no network."""
+        def run() -> Any:
+            return _run_tool("nsite.validate_manifest", {"event": _load_json_file(event_file)})
+        _guard(run, output_as)
+
+    @nsite.command("resolve")
+    def nsite_resolve(
+        label: str = typer.Argument("", help="site label (npub1…, v+50 base36, 50 base36 + d)"),
+        pubkey: str = typer.Option("", "--pubkey", help="author pubkey (hex or npub)"),
+        d: str = typer.Option("", "--d", help="named-site d tag"),
+        relays: str = typer.Option("", "--relays", help="comma-separated lookup relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Fetch the current manifest from public relays (read only, bounded)."""
+        _guard(
+            lambda: _run_tool(
+                "nsite.resolve",
+                {"label": label, "pubkey": pubkey, "d": d,
+                 "relays": [r for r in relays.split(",") if r] or None},
+            ),
+            output_as,
+        )
+
+    @nsite.command("reachability")
+    def nsite_reachability(
+        relays: str = typer.Option("", "--relays", help="comma-separated relay URLs"),
+        servers: str = typer.Option("", "--servers", help="comma-separated blossom server URLs"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Probe relay/server reachability (bounded)."""
+        _guard(
+            lambda: _run_tool(
+                "nsite.reachability",
+                {"relays": [r for r in relays.split(",") if r] or None,
+                 "servers": [s for s in servers.split(",") if s] or None},
+            ),
+            output_as,
+        )
+
+    @nsite.command("publish-plan")
+    def nsite_publish_plan(
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        inventory: str = typer.Argument(..., help="path to a JSON blob inventory"),
+        kind: int = typer.Option(15128, "--kind", help="15128 (root) or 35128 (named)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        servers: str = typer.Option("", "--servers", help="comma-separated blossom servers"),
+        relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Build the unsigned manifest + plan_sha256 from a blob inventory."""
+        def run() -> Any:
+            return _run_tool(
+                "nsite.publish.plan",
+                {
+                    "pubkey": pubkey,
+                    "kind": kind,
+                    "d": d,
+                    "items": _load_json_file(inventory),
+                    "servers": [r for r in servers.split(",") if r] or None,
+                    "relays": [r for r in relays.split(",") if r] or None,
+                },
+            )
+        _guard(run, output_as)
+
+    @nsite.command("publish")
+    def nsite_publish(
+        signed_event: str = typer.Argument(..., help="path to the signed manifest JSON"),
+        plan: str = typer.Argument(..., help="the plan_sha256 from nsite publish-plan"),
+        relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Verify a signed manifest, broadcast to relays, record the site."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.publish",
+                {"event": _load_json_file(signed_event), "plan_sha256": plan,
+                 "relays": [r for r in relays.split(",") if r] or None},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.publish rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("snapshot")
+    def nsite_snapshot(
+        signed_event: str = typer.Argument(..., help="path to the signed kind-5128 snapshot JSON"),
+        plan: str = typer.Argument("", help="plan/aggregate digest binding"),
+        relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Record a client-signed kind-5128 snapshot of the current manifest."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.snapshot",
+                {"event": _load_json_file(signed_event), "plan_sha256": plan,
+                 "relays": [r for r in relays.split(",") if r] or None},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.snapshot rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 

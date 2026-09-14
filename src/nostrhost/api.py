@@ -529,6 +529,129 @@ def build_app(
             state=_State(),
         )
 
+    # -- nsite sites / publishing (Phase 3a) --------------------------------
+
+    @app.get("/package/nsite/list")
+    def nsite_list() -> Any:
+        """Registered sites and the gateway mode."""
+        return _run_tool("nsite.list", {})
+
+    @app.get("/package/nsite/inspect")
+    def nsite_inspect() -> Any:
+        """One registered site record."""
+        return _run_tool(
+            "nsite.inspect",
+            {
+                "pubkey": request.query.get("pubkey", ""),
+                "d": request.query.get("d", ""),
+            },
+        )
+
+    @app.get("/package/nsite/resolve")
+    def nsite_resolve() -> Any:
+        """Fetch the current manifest for a label/pubkey from public relays
+        (read only, bounded)."""
+        return _run_tool(
+            "nsite.resolve",
+            {
+                "label": request.query.get("label", ""),
+                "pubkey": request.query.get("pubkey", ""),
+                "d": request.query.get("d", ""),
+                "relays": _optional_list(request.query.get("relays")),
+                "limit": int(request.query.get("limit", "5")),
+                "timeout": float(request.query.get("timeout", "8")),
+            },
+        )
+
+    @app.post("/package/nsite/validate")
+    def nsite_validate_manifest() -> Any:
+        """Validate a candidate manifest event; no network."""
+        body = _json_body()
+        return _run_tool("nsite.validate_manifest", {"event": body.get("event")})
+
+    @app.post("/package/nsite/reachability")
+    def nsite_reachability() -> Any:
+        """Relay/server reachability probes (bounded)."""
+        body = _json_body()
+        return _run_tool(
+            "nsite.reachability",
+            {
+                "relays": body.get("relays"),
+                "servers": body.get("servers"),
+                "timeout": float(body.get("timeout", "5")),
+            },
+        )
+
+    @app.post("/package/nsite/publish/plan")
+    def nsite_publish_plan() -> Any:
+        """Blob inventory to an unsigned manifest + plan_sha256 (D7)."""
+        body = _json_body()
+        return _run_tool(
+            "nsite.publish.plan",
+            {
+                "pubkey": body.get("pubkey", ""),
+                "kind": int(body.get("kind", 15128)),
+                "d": body.get("d", ""),
+                "items": body.get("items", []),
+                "servers": body.get("servers"),
+                "relays": body.get("relays"),
+            },
+        )
+
+    @app.post("/package/nsite/register")
+    def nsite_register() -> Any:
+        """Add a hosted-mode allowlist entry. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.register",
+            {
+                "pubkey": body.get("pubkey", ""),
+                "kind": int(body.get("kind", 15128)),
+                "d": body.get("d", ""),
+                "title": body.get("title", ""),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/unregister")
+    def nsite_unregister() -> Any:
+        """Remove a hosted-mode allowlist entry. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.unregister",
+            {"pubkey": body.get("pubkey", ""), "d": body.get("d", "")},
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/publish")
+    def nsite_publish() -> Any:
+        """Verify a signed manifest, broadcast to relays, record the site.
+        Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.publish",
+            {
+                "event": body.get("event"),
+                "plan_sha256": body.get("plan_sha256", ""),
+                "relays": body.get("relays"),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/snapshot")
+    def nsite_snapshot() -> Any:
+        """Record a client-signed kind-5128 snapshot. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.snapshot",
+            {
+                "event": body.get("event"),
+                "plan_sha256": body.get("plan_sha256", ""),
+                "relays": body.get("relays"),
+            },
+            state=_State(),
+        )
+
     @app.get("/package/dns/plan/<domain>")
     def dns_plan(domain: str) -> Any:
         """Desired-vs-actual DNS plan for a domain (no changes)."""
