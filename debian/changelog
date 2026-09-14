@@ -1,3 +1,21 @@
+yunohost (12.1.41.48) stable; urgency=low
+
+  * nsites Phase 3a: owner-controlled publishing registry (implementation plan
+    docs/NSITES-IMPLEMENTATION-PLAN.md §5).
+    - new NsiteService surface: site register/unregister/list/inspect;
+      publish_plan (unsigned manifest + plan_sha256 binding kind/d/path/server
+      tags); publish (verifies signature/id, host-key signer via new
+      signer_guard.py from operator.toml server/operator/publisher keys, plan
+      digest, aggregate, hosted allowlist BEFORE any broadcast or record;
+      per-relay results, >=1 OK succeeds); snapshot (client-signed kind 5128
+      recorded on the a-referenced site); bounded resolve/reachability.
+    - gateway config now renders [[sites]] from state/nsites/sites and SIGHUPs.
+    - 10 new ToolSpecs (nsite.list/inspect/resolve/validate_manifest/
+      reachability/publish.plan read-only; register/unregister nsites.admin;
+      publish/snapshot nsites.publish, approval-gated) + API routes + CLI.
+
+ -- NostrHost <noreply@nostrhost.org>  Mon, 14 Sep 2026 10:00:00 +0000
+
 yunohost (12.1.41.47) stable; urgency=low
 
   * nostrhost: reconcile native app web routes after every Caddy restart.
