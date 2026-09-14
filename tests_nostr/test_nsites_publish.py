@@ -473,7 +473,7 @@ def test_registry_wiring():
         assert spec.scope == "nsites.admin"
         assert spec.require_approval is True
 
-    for name in ("nsite.publish", "nsite.snapshot"):
+    for name in ("nsite.publish", "nsite.snapshot", "nsite.mirror"):
         spec = TOOLS[name]
         assert spec.scope == "nsites.publish"
         assert spec.require_approval is True
@@ -508,3 +508,171 @@ def test_signer_guard_missing_config_is_empty(tmp_path: Path):
 
     missing = tmp_path / "does-not-exist.toml"
     assert forbidden_signer_pubkeys(operator_config=missing, force_refresh=True) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b: draft area + mirror
+# ---------------------------------------------------------------------------
+
+
+def test_draft_inventory_lists_files_with_hashes(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    from nostrhost.nsites import service as svc_mod
+
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"hello")
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "about.html").write_bytes(b"about")
+    result = svc.draft_inventory(TEST_PUBKEY)
+    assert result["count"] == 2
+    paths = {item["path"] for item in result["items"]}
+    assert paths == {"/index.html", "/sub/about.html"}
+    by_path = {item["path"]: item["sha256"] for item in result["items"]}
+    import hashlib as _hashlib
+
+    assert by_path["/index.html"] == _hashlib.sha256(b"hello").hexdigest()
+
+
+def test_draft_inventory_skips_unsafe_paths(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"ok")
+    bad = root / "..hidden"
+    bad.write_bytes(b"bad")
+    result = svc.draft_inventory(TEST_PUBKEY)
+    assert all(".." not in item["path"] for item in result["items"])
+    assert result["count"] == 1
+
+
+def test_draft_clear_removes_files(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"x")
+    svc.draft_clear(TEST_PUBKEY)
+    assert not root.exists()
+    assert svc.draft_inventory(TEST_PUBKEY)["count"] == 0
+
+
+def test_publish_plan_reads_draft_inventory(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"hello")
+    plan = svc.publish_plan(TEST_PUBKEY, kind=15128, d="", site="yes")["plan"]
+    assert len(plan["items"]) == 1
+    assert plan["items"][0]["path"] == "/index.html"
+    assert plan["items"][0]["sha256"] == _sha256_of(b"hello")
+
+
+def test_mirror_uploads_missing_blobs_from_draft(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    register_root(svc)
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    event = root_event()
+    plan = svc.publish_plan(
+        TEST_PUBKEY, kind=15128, d="", items=event_paths(event), servers=event_servers(event)
+    )["plan"]
+    monkeypatch.setattr(service, "_broadcast", ok_broadcast())
+    svc.publish(event, plan_sha256=plan["plan_sha256"])
+
+    # populate the draft with the manifest's blobs. The manifest hashes are
+    # fixed (corpus), so we patch the hash check to accept the draft file.
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    for item in event_paths(event):
+        path = root / item["path"].lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+    expected_by_path = {item["path"]: item["sha256"] for item in event_paths(event)}
+    root_str = str(root)
+    monkeypatch.setattr(
+        service, "_sha256_file",
+        lambda path: expected_by_path.get("/" + str(path).replace(root_str + "/", ""), "0" * 64),
+    )
+    monkeypatch.setattr(service, "_read_draft_blob", lambda path: b"x")
+
+    uploaded: list[tuple[str, str]] = []
+    monkeypatch.setattr(service, "_blossom_has", lambda server, sha, timeout=8.0: False)
+    monkeypatch.setattr(
+        service, "_blossom_upload",
+        lambda server, sha, data, auth, timeout=60.0: uploaded.append((server, sha)) or (True, "200"),
+    )
+    monkeypatch.setattr(service, "_blossom_auth_event", lambda hashes: {"kind": 24242, "tags": [["x", h] for h in hashes]})
+
+    result = svc.mirror(TEST_PUBKEY, servers=["https://blossom.test"])
+    assert result["ok"] is True
+    assert result["total_uploaded"] == len(event_paths(event))
+    server_result = result["servers"][0]
+    assert server_result["uploaded"] == [item["path"] for item in event_paths(event)]
+    assert server_result["skipped"] == 0 and server_result["missing_from_draft"] == 0
+    assert len(uploaded) == len(event_paths(event))
+
+
+def test_mirror_skips_present_and_reports_missing_from_draft(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    register_root(svc)
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    event = root_event()
+    plan = svc.publish_plan(
+        TEST_PUBKEY, kind=15128, d="", items=event_paths(event), servers=event_servers(event)
+    )["plan"]
+    monkeypatch.setattr(service, "_broadcast", ok_broadcast())
+    svc.publish(event, plan_sha256=plan["plan_sha256"])
+
+    # only the first blob exists in the draft; the server has neither
+    items = event_paths(event)
+    root = svc_mod.draft_dir(TEST_PUBKEY)
+    first = root / items[0]["path"].lstrip("/")
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(b"x")
+
+    expected_by_path = {item["path"]: item["sha256"] for item in items}
+    root_str = str(root)
+    monkeypatch.setattr(
+        service, "_sha256_file",
+        lambda path: expected_by_path.get("/" + str(path).replace(root_str + "/", ""), "0" * 64),
+    )
+    monkeypatch.setattr(service, "_read_draft_blob", lambda path: b"x")
+
+    monkeypatch.setattr(service, "_blossom_has", lambda server, sha, timeout=8.0: False)
+    monkeypatch.setattr(service, "_blossom_upload", lambda *a, **k: (True, "200"))
+    monkeypatch.setattr(service, "_blossom_auth_event", lambda hashes: {"kind": 24242})
+
+    result = svc.mirror(TEST_PUBKEY, servers=["https://blossom.test"])
+    server_result = result["servers"][0]
+    assert server_result["uploaded"] == [items[0]["path"]]
+    assert server_result["skipped"] == 0
+    assert server_result["missing_from_draft"] == 1
+    assert server_result["failed"] == []
+
+
+def test_mirror_requires_registered_site_and_https(tmp_path: Path, monkeypatch):
+    svc = make_service(tmp_path)
+    with pytest.raises(service.NsiteError, match="not registered"):
+        svc.mirror(TEST_PUBKEY, servers=["https://blossom.test"])
+    register_root(svc)
+    with pytest.raises(service.NsiteError, match="non-HTTPS"):
+        svc.mirror(TEST_PUBKEY, servers=["http://insecure.test"])
+
+
+def _sha256_of(data: bytes) -> str:
+    import hashlib as _hashlib
+
+    return _hashlib.sha256(data).hexdigest()

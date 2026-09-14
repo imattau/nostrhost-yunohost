@@ -103,6 +103,7 @@ def test_registry_has_the_safe_tools():
         "nsite.gateway.status",
         "nsite.inspect",
         "nsite.list",
+        "nsite.mirror",
         "nsite.publish",
         "nsite.publish.plan",
         "nsite.reachability",

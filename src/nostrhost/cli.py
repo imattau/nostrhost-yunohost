@@ -79,6 +79,7 @@ from yunohost.nostr_operations import (
     _safe_nsite_gateway_configure,
     _safe_nsite_inspect,
     _safe_nsite_list,
+    _safe_nsite_mirror,
     _safe_nsite_publish,
     _safe_nsite_publish_plan,
     _safe_nsite_reachability,
@@ -146,6 +147,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "nsite.gateway.configure": _safe_nsite_gateway_configure,
     "nsite.list": _safe_nsite_list,
     "nsite.inspect": _safe_nsite_inspect,
+    "nsite.mirror": _safe_nsite_mirror,
     "nsite.resolve": _safe_nsite_resolve,
     "nsite.validate_manifest": _safe_nsite_validate,
     "nsite.reachability": _safe_nsite_reachability,
@@ -655,7 +657,14 @@ def _agent_init() -> dict[str, Any]:
         },
         # service.status is implemented by both the agent registry and the
         # current NostrHost control-plane ToolSpec registry.
-        "observation_queries": [{"operation": "service.status"}],
+        "observation_queries": [
+            {"operation": "service.status"},
+            # Phase 3b: the nsite read surface is observed (never executed —
+            # observe mode only runs read queries, and nsite.* writes are
+            # absent from the agent registry entirely).
+            {"operation": "nsite.gateway.status"},
+            {"operation": "nsite.list"},
+        ],
         "audit_path": str(Path(AGENT_STATE_DIR) / "audit.jsonl"),
         "interval": "6h",
         "run_immediately": True,
@@ -2448,14 +2457,15 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @nsite.command("publish-plan")
     def nsite_publish_plan(
         pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
-        inventory: str = typer.Argument(..., help="path to a JSON blob inventory"),
+        inventory: str = typer.Argument(None, help="path to a JSON blob inventory (omit to use --site)"),
         kind: int = typer.Option(15128, "--kind", help="15128 (root) or 35128 (named)"),
         d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        site: str = typer.Option("", "--site", help="Phase 3b: read the inventory from the server-side draft area"),
         servers: str = typer.Option("", "--servers", help="comma-separated blossom servers"),
         relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
-        """Build the unsigned manifest + plan_sha256 from a blob inventory."""
+        """Build the unsigned manifest + plan_sha256 from a blob inventory (or a draft site)."""
         def run() -> Any:
             return _run_tool(
                 "nsite.publish.plan",
@@ -2463,7 +2473,8 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                     "pubkey": pubkey,
                     "kind": kind,
                     "d": d,
-                    "items": _load_json_file(inventory),
+                    "items": _load_json_file(inventory) if inventory else None,
+                    "site": site,
                     "servers": [r for r in servers.split(",") if r] or None,
                     "relays": [r for r in relays.split(",") if r] or None,
                 },
@@ -2507,6 +2518,25 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             )
             if not body.get("ok"):
                 raise NostrHostError(f"nsite.snapshot rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("mirror")
+    def nsite_mirror(
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        servers: str = typer.Option(..., "--servers", help="comma-separated blossom servers"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Re-upload a site's missing blobs to the selected servers from the draft area."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.mirror",
+                {"pubkey": pubkey, "d": d, "servers": [s for s in servers.split(",") if s]},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.mirror rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
 

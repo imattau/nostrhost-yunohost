@@ -45,7 +45,11 @@ def test_agent_init_creates_private_observe_config_without_enable_or_grant(monke
     assert written["relay"]["agent_secret_key"] != "1" * 64
     assert written["relay"]["trusted_server_key"] == "a" * 64
     assert written["policy"]["level"] == "observe"
-    assert written["observation_queries"] == [{"operation": "service.status"}]
+    assert written["observation_queries"] == [
+        {"operation": "service.status"},
+        {"operation": "nsite.gateway.status"},
+        {"operation": "nsite.list"},
+    ]
 
 
 def test_agent_writer_allowlist_update_is_idempotent_and_removable(monkeypatch, tmp_path):

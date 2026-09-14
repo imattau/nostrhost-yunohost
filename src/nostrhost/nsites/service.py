@@ -47,6 +47,18 @@ DEFAULT_PUBLISH_RELAYS = [
 
 _SITE_DIR = "sites"
 
+# Phase 3b draft area (implementation plan §3.2 / D6): the one fixed
+# server-side file path involved in publishing. The Admin agent writes site
+# files here; publish_plan can read its inventory ("shown to the user before
+# signing") and nsite.mirror re-uploads missing blobs to selected servers
+# from it. The path is fixed, never user-supplied.
+DRAFT_ROOT = Path(os.environ.get("NOSTRHOST_NSITE_DRAFTS", "/var/lib/nostrhost/nsites/drafts"))
+
+
+def draft_dir(pubkey: str, d: str = "") -> Path:
+    name = pubkey if not d else f"{pubkey}.{d}"
+    return DRAFT_ROOT / name
+
 
 def site_path(state_dir: Path, pubkey: str, d: str = "") -> Path:
     """``state/nsites/sites/<pubkey>[.<d>].json`` (implementation plan §3.2)."""
@@ -153,6 +165,84 @@ def _http_probe(url: str, timeout: float = 5.0) -> dict[str, Any]:
             return {"url": url, "ok": True, "status": resp.status}
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "ok": False, "error": str(exc)}
+
+
+def _draft_path_is_bad(path: str) -> bool:
+    """A draft path must satisfy the same rules as a manifest path (D6)."""
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return True
+    if "\\" in path:
+        return True
+    for segment in path.split("/"):
+        if ".." in segment:
+            return True
+    return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_draft_blob(path: Path) -> bytes | None:
+    """Read a draft blob, bounded so an oversized file is skipped not loaded."""
+    try:
+        size = path.stat().st_size
+        if size > 128 * 1024 * 1024:  # mirror cap mirrors the gateway's 128 MiB max
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _blossom_has(server: str, sha256: str, timeout: float = 8.0) -> bool:
+    """HEAD a blob on a Blossom server (BUD-01); True when present."""
+    try:
+        req = urllib.request.Request(f"{server}/{sha256}", method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured server
+            return resp.status == 200
+    except Exception:  # noqa: BLE001 - a missing/unreachable blob is reported, not raised
+        return False
+
+
+def _blossom_upload(
+    server: str, sha256: str, data: bytes, auth_event: dict[str, Any], timeout: float = 60.0
+) -> tuple[bool, str]:
+    """PUT a blob to a Blossom server with a kind-24242 auth event (BUD-02/03)."""
+    import base64
+
+    payload = json.dumps(auth_event, separators=(",", ":")).encode("utf-8")
+    header = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    req = urllib.request.Request(
+        f"{server}/upload?sha256={sha256}",
+        data=data,
+        method="PUT",
+        headers={"Authorization": f"Nostr {header}", "Content-Type": "application/octet-stream"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured server
+            return resp.status == 200, str(resp.status)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _blossom_auth_event(hashes: list[str]) -> dict[str, Any] | None:
+    """A kind-24242 auth event covering ``hashes``, signed with the operator key.
+
+    Server-initiated mirror uploads are not user manifests, so the signer
+    guard does not apply; the operator key signs the upload auth (BUD-02/03).
+    Returns None when the node is not bootstrapped.
+    """
+    try:
+        from yunohost.nostr_identity import _operator_config, _sign_event
+
+        cfg = _operator_config()
+        return _sign_event(cfg.sk, cfg.operator_pubkey, 24242, "", [["x", h] for h in hashes])
+    except Exception:  # noqa: BLE001 - mirror needs a bootstrapped node
+        return None
 
 
 class NsiteError(ValueError):
@@ -544,6 +634,50 @@ class NsiteService:
         record = json.loads(path.read_text(encoding="utf-8"))
         return {"site": record}
 
+    # -- draft area (Phase 3b) --------------------------------------------
+
+    def draft_inventory(self, pubkey: str, *, d: str = "") -> dict[str, Any]:
+        """List a site's server-side draft files with their hashes.
+
+        The draft area (D6) is the one fixed server-side file path: the Admin
+        agent writes site files here, and publish_plan/mirror read from it.
+        Paths are validated with the same rules as manifest paths, so a draft
+        can never escape its own directory.
+        """
+        from .manifest import is_sha256_hex
+
+        pubkey = _pubkey_hex(pubkey)
+        root = draft_dir(pubkey, d)
+        if not root.is_dir():
+            return {"site": pubkey, "d": d, "items": [], "count": 0}
+        items: list[dict[str, Any]] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = "/" + path.relative_to(root).as_posix()
+            if _draft_path_is_bad(rel):
+                continue
+            blob_hash = _sha256_file(path)
+            if not is_sha256_hex(blob_hash):
+                continue
+            items.append({"path": rel, "sha256": blob_hash, "size": path.stat().st_size})
+        return {"site": pubkey, "d": d, "items": items, "count": len(items)}
+
+    def draft_clear(self, pubkey: str, *, d: str = "") -> dict[str, Any]:
+        """Remove a site's draft directory (files only, never symlinks)."""
+        pubkey = _pubkey_hex(pubkey)
+        root = draft_dir(pubkey, d)
+        if root.is_dir():
+            for path in sorted(root.rglob("*"), reverse=True):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                path.unlink(missing_ok=True)
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+        return {"site": pubkey, "d": d, "cleared": True, "ok": True}
+
     # -- manifest validation / plan / publish (Phase 3a) -----------------
 
     def validate_manifest(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -571,16 +705,18 @@ class NsiteService:
         *,
         kind: int = KIND_ROOT,
         d: str = "",
-        items: list[dict[str, str]],
+        items: list[dict[str, str]] | None = None,
+        site: str = "",
         servers: list[str] | None = None,
         relays: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build the unsigned manifest and the plan digest (D7, §6 step 2/5).
 
         ``items`` is ``[{"path": "/index.html", "sha256": "…64 hex…"}, …]``
-        produced by the Admin's client-side inventory+hash. Nothing is signed
-        or broadcast here; the client signs the manifest and submits it to
-        :meth:`publish` with the returned ``plan_sha256``.
+        produced by the Admin's client-side inventory+hash. Alternatively
+        ``site`` names a server-side draft (Phase 3b, D6): its inventory is
+        read from ``/var/lib/nostrhost/nsites/drafts/<site>/`` and shown
+        before signing. Nothing is signed or broadcast here.
         """
         from .manifest import is_sha256_hex, is_valid_d
 
@@ -591,8 +727,10 @@ class NsiteService:
             raise NsiteError(f"invalid named-site d tag: {d!r}")
         if kind == KIND_ROOT and d:
             raise NsiteError("root sites take no d tag")
+        if not items and site:
+            items = self.draft_inventory(pubkey, d=d)["items"]
         if not items:
-            raise NsiteError("a manifest needs at least one path/blob")
+            raise NsiteError("a manifest needs at least one path/blob (pass items or a draft site)")
 
         paths: list[tuple[str, str]] = []
         for item in items:
@@ -745,6 +883,7 @@ class NsiteService:
                 "title": record.get("title", ""),
                 "last_event_id": event.get("id", ""),
                 "aggregate_hash": _aggregate_from_event(event),
+                "paths": _paths_from_event(event),
                 "servers": servers,
                 "relays": relays,
                 "provenance": {
@@ -820,6 +959,101 @@ class NsiteService:
             "pubkey": verdict.pubkey,
             "label": verdict.label,
             "relays": broadcast,
+            "ok": True,
+        }
+
+    # -- read-only network tools (Phase 3a) -------------------------------
+
+    def mirror(
+        self,
+        pubkey: str,
+        *,
+        d: str = "",
+        servers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Re-upload a site's missing blobs to the selected Blossom servers.
+
+        Reads the site's last published manifest (its recorded path->hash
+        list), finds each blob in the server-side draft area, and PUTs the
+        ones the target server does not already have (BUD-01 HEAD skip) with
+        a kind-24242 auth event per batch (BUD-02/03). A blob missing from the
+        draft (or whose draft bytes do not hash to the recorded value) is
+        reported, not uploaded.
+        """
+        pubkey = _pubkey_hex(pubkey)
+        servers = [s for s in (servers or []) if s]
+        if not servers:
+            raise NsiteError("mirror requires at least one Blossom server")
+        for server in servers:
+            if not server.startswith("https://"):
+                raise NsiteError(f"refusing non-HTTPS Blossom server: {server!r}")
+        record_path = site_path(self.state_dir, pubkey, d)
+        if not record_path.is_file():
+            raise NsiteError("site is not registered")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        paths = record.get("paths") or []
+        if not paths:
+            raise NsiteError("site has no recorded manifest paths to mirror")
+
+        root = draft_dir(pubkey, d)
+        by_path: dict[str, tuple[Path, bytes | None]] = {}
+        if root.is_dir():
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                rel = "/" + path.relative_to(root).as_posix()
+                by_path[rel] = (path, None)
+
+        server_results: list[dict[str, Any]] = []
+        total_uploaded = 0
+        for server in servers:
+            to_upload: list[tuple[str, str, bytes]] = []
+            skipped = 0
+            missing = 0
+            for item in paths:
+                rel = str(item.get("path", ""))
+                expected = str(item.get("sha256", ""))
+                if _blossom_has(server, expected):
+                    skipped += 1
+                    continue
+                entry = by_path.get(rel)
+                if entry is None:
+                    missing += 1
+                    continue
+                data = _read_draft_blob(entry[0])
+                if data is None or _sha256_file(entry[0]) != expected:
+                    missing += 1
+                    continue
+                to_upload.append((rel, expected, data))
+            failed: list[str] = []
+            uploaded: list[str] = []
+            # one 24242 auth event per batch of up to 20 hashes
+            for start in range(0, len(to_upload), 20):
+                batch = to_upload[start : start + 20]
+                auth = _blossom_auth_event([h for _, h, _ in batch])
+                for rel, blob_hash, data in batch:
+                    ok, detail = _blossom_upload(server, blob_hash, data, auth or {})
+                    if ok:
+                        uploaded.append(rel)
+                        total_uploaded += 1
+                    else:
+                        failed.append(rel)
+            server_results.append(
+                {
+                    "server": server,
+                    "uploaded": uploaded,
+                    "skipped": skipped,
+                    "missing_from_draft": missing,
+                    "failed": failed,
+                    "ok": not failed,
+                }
+            )
+        return {
+            "action": "nsite.mirror",
+            "pubkey": pubkey,
+            "d": d,
+            "servers": server_results,
+            "total_uploaded": total_uploaded,
             "ok": True,
         }
 
@@ -946,6 +1180,16 @@ def _aggregate_from_event(event: dict[str, Any]) -> str:
         if isinstance(t, list) and len(t) >= 3 and t[0] == "path"
     ]
     return aggregate_hash(paths)
+
+
+def _paths_from_event(event: dict[str, Any]) -> list[dict[str, str]]:
+    """The manifest's path->hash list, stored on the site record so
+    ``nsite.mirror`` knows which blobs a site needs on each server."""
+    return [
+        {"path": str(t[1]), "sha256": str(t[2])}
+        for t in event.get("tags", [])
+        if isinstance(t, list) and len(t) >= 3 and t[0] == "path"
+    ]
 
 
 def _sites(state_dir: Path) -> list[dict[str, Any]]:

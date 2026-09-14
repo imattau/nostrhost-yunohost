@@ -45,6 +45,7 @@ from .nostr_operations_state import OpState
 from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models
     GatewayArgs,
     GatewayDisableArgs,
+    MirrorArgs,
     PublishArgs,
     PublishPlanArgs,
     ReachabilityArgs,
@@ -641,6 +642,12 @@ def _safe_nsite_publish_plan(**args: Any) -> dict[str, Any]:
     return _impl(**args)
 
 
+def _safe_nsite_mirror(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_mirror as _impl
+
+    return _impl(**args)
+
+
 def _safe_nsite_publish(**args: Any) -> dict[str, Any]:
     from .nostrhost.nsites.operations import _safe_nsite_publish as _impl
 
@@ -967,6 +974,15 @@ TOOLS: dict[str, ToolSpec] = {
         risk=RISK_LOW,
         reversibility=REVERSIBLE,
         description="record a client-signed kind-5128 snapshot of the current manifest",
+    ),
+    "nsite.mirror": ToolSpec(
+        name="nsite.mirror",
+        handler=_safe_nsite_mirror,
+        scope=SCOPE_NSITES_PUBLISH,
+        input_model=MirrorArgs,
+        risk=RISK_LOW,
+        reversibility=REVERSIBLE,
+        description="re-upload a site's missing blobs to the selected servers from the draft area (Phase 3b)",
     ),
     "dns.plan": ToolSpec(
         name="dns.plan",

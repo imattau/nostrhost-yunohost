@@ -592,7 +592,8 @@ def build_app(
                 "pubkey": body.get("pubkey", ""),
                 "kind": int(body.get("kind", 15128)),
                 "d": body.get("d", ""),
-                "items": body.get("items", []),
+                "items": body.get("items"),
+                "site": body.get("site", ""),
                 "servers": body.get("servers"),
                 "relays": body.get("relays"),
             },
@@ -648,6 +649,21 @@ def build_app(
                 "event": body.get("event"),
                 "plan_sha256": body.get("plan_sha256", ""),
                 "relays": body.get("relays"),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/mirror")
+    def nsite_mirror() -> Any:
+        """Re-upload a site's missing blobs to the selected servers from the
+        draft area. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.mirror",
+            {
+                "pubkey": body.get("pubkey", ""),
+                "d": body.get("d", ""),
+                "servers": body.get("servers", []),
             },
             state=_State(),
         )

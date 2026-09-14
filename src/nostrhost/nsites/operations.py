@@ -69,11 +69,23 @@ class PublishPlanArgs(_Strict):
     pubkey: str = Field(description="the site owner pubkey (hex or npub)")
     kind: int = Field(15128, description="15128 (root) or 35128 (named)")
     d: str = Field(default="", description="named-site d tag (empty for root sites)")
-    items: list[dict[str, str]] = Field(
-        description='blob inventory: [{"path": "/index.html", "sha256": "<64 hex>"}]'
+    items: list[dict[str, str]] | None = Field(
+        None, description='blob inventory: [{"path": "/index.html", "sha256": "<64 hex>"}]'
+    )
+    site: str = Field(
+        default="",
+        description="Phase 3b: read the inventory from the server-side draft area instead of items",
     )
     servers: list[str] | None = Field(None, description="Blossom server hints")
     relays: list[str] | None = Field(None, description="publish relays (defaults to host list)")
+
+
+class MirrorArgs(_Strict):
+    """nsite.mirror: re-upload a site's missing blobs to selected servers."""
+
+    pubkey: str = Field(description="the site owner pubkey (hex or npub)")
+    d: str = Field(default="", description="named-site d tag (empty for root sites)")
+    servers: list[str] = Field(description="Blossom servers to mirror onto")
 
 
 class PublishArgs(_Strict):
@@ -188,11 +200,20 @@ def _safe_nsite_validate(event: dict | None = None, **args: Any) -> dict[str, An
     return _service().validate_manifest(event)
 
 
-def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, servers: list | None = None, relays: list | None = None, **args: Any) -> dict[str, Any]:
+def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, site: str = "", servers: list | None = None, relays: list | None = None, **args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError(f"nsite.publish.plan does not accept extra args: {sorted(args)}")
     try:
-        return _service().publish_plan(pubkey, kind=kind, d=d, items=items or [], servers=servers, relays=relays)
+        return _service().publish_plan(pubkey, kind=kind, d=d, items=items, site=site, servers=servers, relays=relays)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_mirror(pubkey: str = "", d: str = "", servers: list | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.mirror does not accept extra args: {sorted(args)}")
+    try:
+        return _service().mirror(pubkey, d=d, servers=servers)
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 
