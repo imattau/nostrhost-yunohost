@@ -198,7 +198,8 @@ class OperationEngine:
         # the actor tag, so the scope must be checked against the actor, not the
         # signer — otherwise every HTTP client inherits the operator's authority
         # (MCP transition Phase 2).
-        if not self._authorized(actor.lower(), spec.scope):
+        required_scopes = (spec.scope,) + tuple(spec.required_scopes or ())
+        if not all(self._authorized(actor.lower(), scope) for scope in required_scopes):
             self._reject(record, "unauthorized")
             return True
 

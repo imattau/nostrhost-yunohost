@@ -388,6 +388,39 @@ def build_nsite_routes(domain: str, upstream: str) -> dict[str, Any]:
     }
 
 
+def build_custom_domain_route(fqdn: str, upstream: str) -> dict[str, Any]:
+    """Caddy route JSON for one attached custom FQDN (Phase 4).
+
+    Unlike the gateway origin (which serves every ``*.domain`` label), an
+    attached FQDN is served as exactly that one host — the operator's CNAME
+    only reaches this host for that name, so a wildcard matcher would claim
+    subdomains that resolve elsewhere. On-demand TLS for the FQDN is allowed
+    by the gateway's ``tls-ask`` once the mapping is in ``nsite.toml``.
+    """
+    host, _, port = upstream.rpartition(":")
+    if not host or not port.isdigit():
+        raise CaddyError(f"invalid nsite upstream {upstream!r} (expected host:port)")
+    return {
+        "@id": f"nostrhost-nsite:{fqdn}",
+        "match": [{"host": [fqdn]}],
+        "handle": [
+            {
+                "handler": "headers",
+                "response": {
+                    "set": {
+                        "X-Content-Type-Options": ["nosniff"],
+                        "Referrer-Policy": ["strict-origin-when-cross-origin"],
+                        "Cross-Origin-Opener-Policy": ["same-origin"],
+                    },
+                    "delete": ["Server"],
+                },
+            },
+            {"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]},
+        ],
+        "terminal": True,
+    }
+
+
 def _route_signature(route: dict[str, Any]) -> tuple[Any, ...]:
     """Canonical identity for idempotent comparison (ignore ``@id``)."""
     return (route.get("match"), route.get("handle"))
@@ -468,6 +501,14 @@ class CaddyAdminClient:
     def remove_nsite_routes(self, domain: str) -> None:
         """Remove the gateway origin route for ``domain`` (idempotent)."""
         self.delete_route(f"nostrhost-nsite:{domain}")
+
+    def ensure_custom_domain_route(self, fqdn: str, upstream: str) -> str:
+        """Idempotently ensure the route proxying attached ``fqdn`` (Phase 4)."""
+        return self.ensure_route(build_custom_domain_route(fqdn, upstream))
+
+    def remove_custom_domain_route(self, fqdn: str) -> None:
+        """Remove the route for attached ``fqdn`` (Phase 4, idempotent)."""
+        self.delete_route(f"nostrhost-nsite:{fqdn}")
 
     def ensure_domain_site(self, domain: str) -> str:
         """Create (or reconcile) Caddy's site for ``domain`` (domain_add)."""

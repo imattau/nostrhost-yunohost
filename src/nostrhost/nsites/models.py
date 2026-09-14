@@ -112,6 +112,26 @@ class SiteRecord(BaseModel):
     provenance: dict[str, str] = Field(default_factory=dict)
 
 
+class CustomDomainRecord(BaseModel):
+    """An attached custom FQDN (Phase 4), persisted at
+    ``state/nsites/domains/<fqdn>.json`` and rendered into ``nsite.toml``
+    §custom_domains.
+
+    ``method`` records which ownership proof the operator satisfied at attach
+    time (``cname`` to the gateway domain, or ``txt`` under
+    ``_nostrhost-site.<fqdn>``); ``verification`` keeps the expected value so
+    a re-attach after detach does not re-issue the proof from scratch.
+    """
+
+    fqdn: str
+    pubkey: str
+    d: str = ""
+    method: str = "cname"  # "cname" | "txt"
+    verification: str = ""
+    verified_at: str = ""
+    provenance: dict[str, str] = Field(default_factory=dict)
+
+
 class PublishItem(BaseModel):
     """One blob in a publish plan: path and its content sha256."""
 

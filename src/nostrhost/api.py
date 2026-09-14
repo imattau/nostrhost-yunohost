@@ -668,6 +668,41 @@ def build_app(
             state=_State(),
         )
 
+    # -- nsite custom domains (Phase 4) ------------------------------------
+
+    @app.get("/package/nsite/domain/list")
+    def nsite_domain_list() -> Any:
+        """Attached custom domains (read only)."""
+        return _run_tool("nsite.domain.list", {})
+
+    @app.post("/package/nsite/domain/attach")
+    def nsite_domain_attach() -> Any:
+        """Attach a custom FQDN to a registered site (ownership proof via
+        CNAME to the gateway domain or a TXT challenge). Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.domain.attach",
+            {
+                "fqdn": body.get("fqdn", ""),
+                "pubkey": body.get("pubkey", ""),
+                "d": body.get("d", ""),
+                "method": body.get("method", "cname"),
+                "verify": bool(body.get("verify", True)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/domain/detach")
+    def nsite_domain_detach() -> Any:
+        """Detach a custom FQDN (removes the Caddy route and marker only).
+        Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.domain.detach",
+            {"fqdn": body.get("fqdn", "")},
+            state=_State(),
+        )
+
     @app.get("/package/dns/plan/<domain>")
     def dns_plan(domain: str) -> Any:
         """Desired-vs-actual DNS plan for a domain (no changes)."""

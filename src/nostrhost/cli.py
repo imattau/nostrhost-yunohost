@@ -555,6 +555,10 @@ AGENT_LLM_SERVICE = "nostrhost-agent-llm.service"
 AGENT_INFERENCE_HOST = "127.0.0.1"
 AGENT_INFERENCE_PORT = 18080
 AGENT_HF_TOKEN_PATH = "/etc/nostrhost-agent/hf_token"
+# Shared with the resident daemon's own auto-submitter (agent/contribution_auto.go,
+# same default path) so a cycle submitted either manually or automatically is never
+# offered again through the other path.
+AGENT_CONTRIBUTION_STATE_PATH = "/var/lib/nostrhost-agent/contribution-submitted.jsonl"
 AGENT_MODE_LEVELS = ("observe", "assist", "maintain", "autonomous")
 
 
@@ -979,11 +983,44 @@ def _agent_mode_set(level: str, confirm: bool) -> dict[str, Any]:
     return {"level": level}
 
 
+def _agent_submitted_cycle_ids() -> set[str]:
+    """Cycle IDs already shared via either the manual review flow (marked by
+    _agent_mark_cycle_submitted) or the daemon's own auto-submitter
+    (contribution_auto.go), so neither path re-offers or re-sends them."""
+    path = Path(AGENT_CONTRIBUTION_STATE_PATH)
+    if not path.is_file() or path.is_symlink():
+        return set()
+    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
+def _agent_mark_cycle_submitted(cycle_id: str) -> None:
+    if not cycle_id or cycle_id in _agent_submitted_cycle_ids():
+        return
+    path = Path(AGENT_CONTRIBUTION_STATE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(cycle_id + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(path, 0o600)
+    try:
+        import pwd
+
+        agent_user = pwd.getpwnam("nostrhost-agent")
+        os.chown(path, agent_user.pw_uid, agent_user.pw_gid)
+    except KeyError:
+        pass
+
+
 def _agent_export_list() -> Any:
     if os.geteuid() != 0:
         raise NostrHostError("agent export list must be run as root")
     journal = str(Path(AGENT_STATE_DIR) / "audit.jsonl")
-    return _run_agent_tool(AGENT_EXPORT_BINARY, ["--journal", journal, "--list"])
+    summaries = _run_agent_tool(AGENT_EXPORT_BINARY, ["--journal", journal, "--list"])
+    submitted = _agent_submitted_cycle_ids()
+    if not submitted:
+        return summaries
+    return [summary for summary in summaries if summary.get("cycle_id") not in submitted]
 
 
 _CANDIDATE_ID_PATTERN = re.compile(r"^[a-f0-9-]{1,80}$")
@@ -999,6 +1036,11 @@ def _agent_export_run(cycle_id: str) -> Any:
     candidate_id = secrets.token_hex(16)
     output_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_id}.json"
     _run_agent_tool_raw(AGENT_EXPORT_BINARY, ["--journal", journal, "--cycle-id", cycle_id, "--output", str(output_path)])
+    # Recorded so a later submit can mark the *source cycle* as done -- the
+    # candidate file itself is keyed by a random id, not the cycle id.
+    cycle_ref_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_id}.cycle_id"
+    cycle_ref_path.write_text(cycle_id, encoding="utf-8")
+    os.chmod(cycle_ref_path, 0o600)
     return json.loads(output_path.read_text(encoding="utf-8")) | {"candidate_file_id": candidate_id}
 
 
@@ -1093,11 +1135,15 @@ def _agent_contribution_submit(candidate_file_id: str) -> Any:
     candidate_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.json"
     if not candidate_path.is_file() or candidate_path.is_symlink():
         raise NostrHostError("no prepared candidate with that id")
-    return _run_agent_tool(AGENT_CONTRIBUTE_BINARY, [
+    result = _run_agent_tool(AGENT_CONTRIBUTE_BINARY, [
         "--candidate", str(candidate_path),
         "--token-file", AGENT_HF_TOKEN_PATH,
         "--repo", settings["dataset_repo"],
     ])
+    cycle_ref_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.cycle_id"
+    if cycle_ref_path.is_file() and not cycle_ref_path.is_symlink():
+        _agent_mark_cycle_submitted(cycle_ref_path.read_text(encoding="utf-8").strip())
+    return result
 
 
 def _write_policy_toml(operator_npub: str) -> Path:
@@ -2539,6 +2585,48 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 raise NostrHostError(f"nsite.mirror rejected: {body.get('reason') or body.get('error') or body.get('state')}")
             return body.get("result") or body
         _guard(run, output_as)
+
+    @nsite.command("domain-attach")
+    def nsite_domain_attach(
+        fqdn: str = typer.Argument(..., help="custom FQDN to attach (e.g. example.com)"),
+        pubkey: str = typer.Argument(..., help="site owner pubkey (hex or npub)"),
+        d: str = typer.Option("", "--d", help="named-site d tag (empty for root)"),
+        method: str = typer.Option("cname", "--method", help="ownership proof: cname | txt"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Attach a custom FQDN to a registered site (Phase 4; ownership proof)."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.domain.attach",
+                {"fqdn": fqdn, "pubkey": pubkey, "d": d, "method": method, "verify": True},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.domain.attach rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("domain-detach")
+    def nsite_domain_detach(
+        fqdn: str = typer.Argument(..., help="attached custom FQDN to detach"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Detach a custom FQDN: removes the route and the state marker only."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.domain.detach",
+                {"fqdn": fqdn},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.domain.detach rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("domain-list")
+    def nsite_domain_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List attached custom domains."""
+        _guard(lambda: _run_tool("nsite.domain.list", {}), output_as)
 
     # -- logs ---------------------------------------------------------------
 

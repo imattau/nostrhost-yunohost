@@ -43,6 +43,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
 from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models
+    DomainAttachArgs,
+    DomainDetachArgs,
     GatewayArgs,
     GatewayDisableArgs,
     MirrorArgs,
@@ -201,6 +203,7 @@ class ToolSpec:
     result_model: Any = None
     risk: str = "low"  # low | medium | high
     reversibility: str = "reversible"  # reversible | partial | irreversible
+    required_scopes: tuple[str, ...] = ()  # additional scopes the caller must hold
 
     def input_schema(self) -> dict[str, Any] | None:
         """The JSON Schema for this tool's arguments, if an input model exists."""
@@ -648,6 +651,24 @@ def _safe_nsite_mirror(**args: Any) -> dict[str, Any]:
     return _impl(**args)
 
 
+def _safe_nsite_domain_list(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_domain_list as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_domain_attach(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_domain_attach as _impl
+
+    return _impl(**args)
+
+
+def _safe_nsite_domain_detach(**args: Any) -> dict[str, Any]:
+    from .nostrhost.nsites.operations import _safe_nsite_domain_detach as _impl
+
+    return _impl(**args)
+
+
 def _safe_nsite_publish(**args: Any) -> dict[str, Any]:
     from .nostrhost.nsites.operations import _safe_nsite_publish as _impl
 
@@ -983,6 +1004,33 @@ TOOLS: dict[str, ToolSpec] = {
         risk=RISK_LOW,
         reversibility=REVERSIBLE,
         description="re-upload a site's missing blobs to the selected servers from the draft area (Phase 3b)",
+    ),
+    "nsite.domain.list": ToolSpec(
+        name="nsite.domain.list",
+        handler=_safe_nsite_domain_list,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        description="attached custom domains (Phase 4)",
+    ),
+    "nsite.domain.attach": ToolSpec(
+        name="nsite.domain.attach",
+        handler=_safe_nsite_domain_attach,
+        scope=SCOPE_NSITES_ADMIN,
+        required_scopes=(SCOPE_DOMAINS_WRITE,),
+        input_model=DomainAttachArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="attach a custom FQDN to a registered site (ownership proof via CNAME or TXT; adds the Caddy route + mapping)",
+    ),
+    "nsite.domain.detach": ToolSpec(
+        name="nsite.domain.detach",
+        handler=_safe_nsite_domain_detach,
+        scope=SCOPE_NSITES_ADMIN,
+        required_scopes=(SCOPE_DOMAINS_WRITE,),
+        input_model=DomainDetachArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="detach a custom FQDN (removes the Caddy route and the state marker only)",
     ),
     "dns.plan": ToolSpec(
         name="dns.plan",

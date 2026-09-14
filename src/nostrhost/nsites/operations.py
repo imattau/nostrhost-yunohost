@@ -88,6 +88,30 @@ class MirrorArgs(_Strict):
     servers: list[str] = Field(description="Blossom servers to mirror onto")
 
 
+class DomainAttachArgs(_Strict):
+    """nsite.domain.attach: attach a custom FQDN to a registered site.
+
+    Requires ``nsites.admin`` + ``domains.write`` (Phase 4, plan §5.3).
+    """
+
+    fqdn: str = Field(description="the custom FQDN to attach (e.g. example.com)")
+    pubkey: str = Field(description="the site owner pubkey (hex or npub)")
+    d: str = Field(default="", description="named-site d tag (empty for root sites)")
+    method: str = Field(
+        default="cname",
+        description="ownership proof: 'cname' to the gateway domain, or 'txt' under _nostrhost-site.<fqdn>",
+    )
+    verify: bool = Field(
+        default=True, description="require the live DNS ownership proof (disable only for controlled tests)"
+    )
+
+
+class DomainDetachArgs(_Strict):
+    """nsite.domain.detach: remove an attached custom FQDN's route + marker."""
+
+    fqdn: str = Field(description="the attached custom FQDN to detach")
+
+
 class PublishArgs(_Strict):
     event: dict = Field(description="the signed manifest event to verify/broadcast/record")
     plan_sha256: str = Field(description="the plan digest from nsite.publish.plan")
@@ -214,6 +238,36 @@ def _safe_nsite_mirror(pubkey: str = "", d: str = "", servers: list | None = Non
         raise NostrHostError(f"nsite.mirror does not accept extra args: {sorted(args)}")
     try:
         return _service().mirror(pubkey, d=d, servers=servers)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_domain_list(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.domain.list does not accept extra args: {sorted(args)}")
+    return _service().domain_list()
+
+
+def _safe_nsite_domain_attach(fqdn: str = "", pubkey: str = "", d: str = "", method: str = "cname", verify: bool = True, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.domain.attach does not accept extra args: {sorted(args)}")
+    if not fqdn:
+        raise NostrHostError("nsite.domain.attach requires an fqdn")
+    if not pubkey:
+        raise NostrHostError("nsite.domain.attach requires a pubkey")
+    try:
+        return _service().domain_attach(fqdn, pubkey, d=d, method=method, verify=verify)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_domain_detach(fqdn: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.domain.detach does not accept extra args: {sorted(args)}")
+    if not fqdn:
+        raise NostrHostError("nsite.domain.detach requires an fqdn")
+    try:
+        return _service().domain_detach(fqdn)
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 

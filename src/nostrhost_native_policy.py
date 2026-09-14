@@ -63,6 +63,8 @@ def _native_policy_key(tool: str, args: dict[str, Any]) -> str:
         return "domains.remove"
     if tool == "dns.apply":
         return "domains.dns"
+    if tool in ("nsite.domain.attach", "nsite.domain.detach"):
+        return "nsite.domain.write"
     if tool in ("credential.set", "credential.remove"):
         return "dns.credentials.write"
     if tool == "package.reconcile":

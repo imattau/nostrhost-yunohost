@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT
-from .models import GatewayConfig, SiteRecord
+from .models import CustomDomainRecord, GatewayConfig, SiteRecord
 
 CONFIG_PATH = Path("/etc/nostrhost/nsite.toml")
 CADDY_TEMPLATE_DIR = Path("/usr/share/yunohost/conf/caddy")
@@ -64,6 +64,27 @@ def site_path(state_dir: Path, pubkey: str, d: str = "") -> Path:
     """``state/nsites/sites/<pubkey>[.<d>].json`` (implementation plan §3.2)."""
     name = pubkey if not d else f"{pubkey}.{d}"
     return nsites_state_dir(state_dir) / _SITE_DIR / f"{name}.json"
+
+
+_DOMAIN_DIR = "domains"
+
+
+def custom_domain_path(state_dir: Path, fqdn: str) -> Path:
+    """``state/nsites/domains/<fqdn>.json`` (implementation plan §3.2, Phase 4).
+
+    The plan names the path ``<fqdn>.json``; a hostile fqdn must therefore be
+    validated before this is called (``_valid_fqdn``), since the filename is
+    the fqdn itself.
+    """
+    return nsites_state_dir(state_dir) / _DOMAIN_DIR / f"{fqdn}.json"
+
+
+_HOSTNAME_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def _valid_fqdn(fqdn: str) -> bool:
+    fqdn = fqdn.rstrip(".").lower()
+    return bool(_HOSTNAME_RE.fullmatch(fqdn))
 
 
 def _pubkey_hex(pubkey: str) -> str:
@@ -245,6 +266,65 @@ def _blossom_auth_event(hashes: list[str]) -> dict[str, Any] | None:
         return None
 
 
+def _default_dns_lookup(qname: str, rtype: str) -> list[str]:
+    """Resolve ``qname`` via the host's DNS (best-effort, empty on failure).
+
+    Uses YunoHost's ``dig`` helper so the ownership check is the same one the
+    rest of the platform uses for DNS verification (plan §Phase 4). Answers
+    are returned lower-cased with a trailing dot stripped.
+    """
+    try:
+        from yunohost.utils.dns import dig
+
+        answers = dig(qname, rtype)
+    except Exception:  # noqa: BLE001 - unresolved/unavailable DNS is a failed proof
+        return []
+    if not isinstance(answers, (list, tuple)):
+        return []
+    return [str(a).strip().rstrip(".").lower() for a in answers if str(a).strip()]
+
+
+def _verify_ownership(
+    fqdn: str,
+    pubkey: str,
+    gateway_domain: str,
+    method: str,
+    verify_dns: Any,
+) -> dict[str, Any]:
+    """Check one of the two Phase 4 ownership proofs against live DNS.
+
+    ``verify_dns(qname, rtype) -> list[str]`` is the resolution helper
+    (injectable for tests; defaults to :func:`_default_dns_lookup`).
+
+    - ``cname``: the fqdn must CNAME to the gateway domain — the operator has
+      delegated the name to this host, which both proves ownership and routes
+      the site here.
+    - ``txt``: ``_nostrhost-site.<fqdn>`` must carry ``nostrhost-site:<pubkey>``
+      — the proof is bound to the site owner, so a domain can only ever be
+      attached to the pubkey it names.
+    """
+    if method == "cname":
+        targets = verify_dns(fqdn, "CNAME")
+        ok = gateway_domain.rstrip(".").lower() in targets
+        return {
+            "ok": ok,
+            "method": method,
+            "verification": gateway_domain.rstrip(".").lower(),
+            "detail": f"CNAME {fqdn} -> {gateway_domain}" if ok else f"CNAME {fqdn} resolves to {targets or 'nothing'}",
+        }
+    if method == "txt":
+        token = f"nostrhost-site:{pubkey}"
+        values = verify_dns(f"_nostrhost-site.{fqdn}", "TXT")
+        ok = any(token in v for v in values)
+        return {
+            "ok": ok,
+            "method": method,
+            "verification": token,
+            "detail": f"TXT _nostrhost-site.{fqdn} contains {token!r}" if ok else f"TXT _nostrhost-site.{fqdn} = {values or 'nothing'}",
+        }
+    return {"ok": False, "method": method, "verification": "", "detail": f"unknown ownership method {method!r}"}
+
+
 class NsiteError(ValueError):
     pass
 
@@ -311,11 +391,13 @@ class NsiteService:
         caddy: Any = _LIVE,
         systemctl: Any = _LIVE,
         config_path: Path = CONFIG_PATH,
+        verify_dns: Any = _LIVE,
     ) -> None:
         self.state_dir = state_dir or _default_state_dir()
         self.caddy = _live_caddy() if caddy is _LIVE else caddy
         self._systemctl = _systemctl if systemctl is _LIVE else systemctl
         self.config_path = Path(config_path)
+        self._verify_dns = _default_dns_lookup if verify_dns is _LIVE else verify_dns
 
     # -- state ------------------------------------------------------------
 
@@ -374,6 +456,16 @@ class NsiteService:
                 parts.append(f"kind = {site.get('kind', KIND_ROOT)}")
                 parts.append(f'd = "{site.get("d", "")}"')
             text = "\n".join(parts) + "\n"
+        domains = _custom_domains(self.state_dir)
+        if domains:
+            text = text.rstrip() + "\n"
+            for cd in domains:
+                text += (
+                    "\n[[custom_domains]]\n"
+                    f'fqdn = "{cd.get("fqdn", "")}"\n'
+                    f'pubkey = "{cd.get("pubkey", "")}"\n'
+                    f'd = "{cd.get("d", "")}"\n'
+                )
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(text, encoding="utf-8")
         try:
@@ -417,6 +509,19 @@ class NsiteService:
             return {"route": None, "note": "caddy client unavailable"}
         self.caddy.remove_nsite_routes(domain)
         return {"route": f"nostrhost-nsite:{domain}", "removed": True}
+
+    def _ensure_custom_domain(self, fqdn: str) -> dict[str, Any]:
+        """Caddy route proxying the attached FQDN to the gateway (Phase 4)."""
+        if self.caddy is None:
+            return {"route": None, "note": "caddy client unavailable"}
+        route_id = self.caddy.ensure_custom_domain_route(fqdn, GATEWAY_UPSTREAM)
+        return {"route": route_id}
+
+    def _remove_custom_domain(self, fqdn: str) -> dict[str, Any]:
+        if self.caddy is None:
+            return {"route": None, "note": "caddy client unavailable"}
+        self.caddy.remove_custom_domain_route(fqdn)
+        return {"route": f"nostrhost-nsite:{fqdn}", "removed": True}
 
     def _write_snippet(self, domain: str) -> Path:
         """Write the gateway domain's tracked Caddy snippet (caddy_nsite.conf
@@ -633,6 +738,128 @@ class NsiteService:
             raise NsiteError("site is not registered")
         record = json.loads(path.read_text(encoding="utf-8"))
         return {"site": record}
+
+    # -- custom domains (Phase 4) ------------------------------------------
+
+    def domain_list(self) -> dict[str, Any]:
+        """Attached custom domains (state/nsites/domains/*). Read-only."""
+        domains = _custom_domains(self.state_dir)
+        return {
+            "domains": domains,
+            "count": len(domains),
+        }
+
+    def domain_attach(
+        self,
+        fqdn: str,
+        pubkey: str,
+        *,
+        d: str = "",
+        method: str = "cname",
+        verify: bool = True,
+    ) -> dict[str, Any]:
+        """Attach a custom FQDN to a registered site (Phase 4).
+
+        Ownership is proven against live DNS first (``cname`` to the gateway
+        domain, or a ``nostrhost-site:<pubkey>`` TXT record under
+        ``_nostrhost-site.<fqdn>``), the FQDN must be unique across
+        ``state/nsites/domains`` and not overlap the gateway domain, and only
+        a registered site can be attached to. On success a Caddy route proxies
+        the FQDN to the gateway and the custom-domain mapping is rendered into
+        ``nsite.toml`` (so the gateway serves it and on-demand TLS allows it).
+        """
+        from .manifest import is_valid_d
+
+        fqdn = str(fqdn).rstrip(".").lower()
+        if not _valid_fqdn(fqdn):
+            raise NsiteError(f"invalid fqdn: {fqdn!r}")
+        if method not in ("cname", "txt"):
+            raise NsiteError(f"unknown ownership method {method!r} (use 'cname' or 'txt')")
+        pubkey = _pubkey_hex(pubkey)
+        if d and not is_valid_d(d):
+            raise NsiteError(f"invalid named-site d tag: {d!r}")
+
+        state = self._require_gateway()
+        gateway_domain = (state.get("config") or {}).get("domain", "")
+        if not gateway_domain:
+            raise NsiteError("gateway has no configured domain")
+
+        site_path_ = site_path(self.state_dir, pubkey, d)
+        if not site_path_.is_file():
+            raise NsiteError("site is not registered; run nsite.register first")
+
+        attached = {cd["fqdn"] for cd in _custom_domains(self.state_dir) if cd.get("fqdn")}
+        if fqdn in attached:
+            raise NsiteError(f"domain {fqdn} is already attached")
+        if fqdn == gateway_domain or fqdn.endswith("." + gateway_domain):
+            raise NsiteError(f"domain {fqdn} overlaps the gateway domain")
+        if gateway_domain.endswith("." + fqdn):
+            raise NsiteError(f"domain {fqdn} is a parent of the gateway domain")
+
+        if verify:
+            proof = _verify_ownership(fqdn, pubkey, gateway_domain, method, self._verify_dns)
+            if not proof["ok"]:
+                raise NsiteError(f"ownership proof failed: {proof['detail']}")
+        else:
+            proof = {
+                "ok": True,
+                "method": method,
+                "verification": (
+                    gateway_domain.rstrip(".").lower()
+                    if method == "cname"
+                    else f"nostrhost-site:{pubkey}"
+                ),
+                "detail": "verification skipped",
+            }
+
+        caddy = self._ensure_custom_domain(fqdn)
+        record = CustomDomainRecord(
+            fqdn=fqdn,
+            pubkey=pubkey,
+            d=d,
+            method=method,
+            verification=proof["verification"],
+            verified_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            provenance={
+                "actor": "nsite.domain.attach",
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
+        path = custom_domain_path(self.state_dir, fqdn)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record.dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self._refresh_gateway()
+        self._reload_caddy()
+        return {
+            "action": "nsite.domain.attach",
+            "fqdn": fqdn,
+            "pubkey": pubkey,
+            "d": d,
+            "method": method,
+            "verification": proof["verification"],
+            "caddy": caddy,
+            "ok": True,
+        }
+
+    def domain_detach(self, fqdn: str) -> dict[str, Any]:
+        """Detach a custom FQDN: removes the Caddy route and the state marker
+        only (plan §Phase 4) — the site itself is untouched."""
+        fqdn = str(fqdn).rstrip(".").lower()
+        path = custom_domain_path(self.state_dir, fqdn)
+        if not path.is_file():
+            raise NsiteError(f"domain {fqdn} is not attached")
+        self._require_gateway()
+        caddy = self._remove_custom_domain(fqdn)
+        path.unlink()
+        self._refresh_gateway()
+        self._reload_caddy()
+        return {
+            "action": "nsite.domain.detach",
+            "fqdn": fqdn,
+            "caddy": caddy,
+            "removed": True,
+            "ok": True,
+        }
 
     # -- draft area (Phase 3b) --------------------------------------------
 
@@ -1194,6 +1421,19 @@ def _paths_from_event(event: dict[str, Any]) -> list[dict[str, str]]:
 
 def _sites(state_dir: Path) -> list[dict[str, Any]]:
     d = nsites_state_dir(state_dir) / "sites"
+    if not d.is_dir():
+        return []
+    out = []
+    for path in sorted(d.glob("*.json")):
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return out
+
+
+def _custom_domains(state_dir: Path) -> list[dict[str, Any]]:
+    d = nsites_state_dir(state_dir) / _DOMAIN_DIR
     if not d.is_dir():
         return []
     out = []
