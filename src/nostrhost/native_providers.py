@@ -32,7 +32,23 @@ class ProviderError(RuntimeError):
     """A native provider could not apply an operation safely."""
 
 
-class PackageProvider:
+class InspectVerifiedProvider:
+    """Mixin for providers whose ``verify`` is just re-running ``inspect``.
+
+    Most native providers have no separate verification step: re-inspecting
+    the desired state *is* the verification. Providers that need a genuinely
+    different ``verify`` should not use this mixin and should define their
+    own instead.
+    """
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
+        return self.inspect(desired)
+
+
+class PackageProvider(InspectVerifiedProvider):
     """Package identity bookkeeping; resource mutations belong to providers.
 
     ``apps_dir`` (optional) is the legacy app registry (/etc/yunohost/apps):
@@ -182,9 +198,6 @@ class PackageProvider:
 
         shutil.rmtree(legacy_dir, ignore_errors=True)
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("package.remove", desired["id"], desired, reverse="package.ensure", summary=f"remove native package {desired['id']}")]
 
@@ -218,7 +231,7 @@ def _target(root: Path, absolute: str | Path) -> Path:
     return root / path.relative_to("/")
 
 
-class DirectoryProvider:
+class DirectoryProvider(InspectVerifiedProvider):
     resource_type = "directory"
 
     def __init__(self, *, root: Path = Path("/"), chown: Callable[..., Any] | None = None) -> None:
@@ -252,9 +265,6 @@ class DirectoryProvider:
             except KeyError as exc:
                 raise ProviderError(f"unknown directory owner or group: {exc.args[0]}") from exc
         return {"path": str(path), "changed": True}
-
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("directory.remove", desired["path"], {"path": desired["path"]}, reverse="directory.ensure", summary=f"remove directory {desired['path']}")]
@@ -295,14 +305,11 @@ class AccessProvider(DirectoryProvider):
             self.chown(target, uid, gid)
         return {"path": str(path), "changed": True, "count": len(targets)}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("access.remove", desired["path"], desired, reverse="access.ensure", summary=f"remove access policy from {desired['path']}")]
 
 
-class PermissionProvider:
+class PermissionProvider(InspectVerifiedProvider):
     """Reconcile an application's Portal/SSO permission without shell helpers."""
 
     resource_type = "permission"
@@ -431,15 +438,12 @@ class PermissionProvider:
         self._api().sync()
         return {"permission": permission, "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         permission = self._permission(desired)
         return [Operation("permission.remove", permission, desired, risk="medium", reverse="permission.ensure", summary=f"remove Portal permission {permission}")]
 
 
-class ConfigFileProvider:
+class ConfigFileProvider(InspectVerifiedProvider):
     """Render declared configuration files with Jinja2 and atomic writes."""
 
     resource_type = "config"
@@ -521,9 +525,6 @@ class ConfigFileProvider:
             temporary.unlink(missing_ok=True)
         return {"destination": str(target), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("config.remove", desired["destination"], {"destination": desired["destination"]}, reverse="config.ensure", summary=f"remove config {desired['destination']}")]
 
@@ -548,7 +549,7 @@ class TmpfilesProvider(DirectoryProvider):
         return {"path": str(path), "definition": str(file), "changed": True}
 
 
-class SysusersProvider:
+class SysusersProvider(InspectVerifiedProvider):
     """Declare service accounts through systemd-sysusers."""
 
     def __init__(self, *, root: Path = Path("/"), definition_dir: Path = Path("/etc/sysusers.d"), command: Callable[..., Any] | None = None) -> None:
@@ -593,14 +594,11 @@ class SysusersProvider:
         self.command(["systemd-sysusers", str(file)], check=True)
         return {"name": name, "definition": str(file), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("system_user.remove", desired["name"], {"name": desired["name"]}, reverse="system_user.ensure", summary="remove system user declaration")]
 
 
-class SecretProvider:
+class SecretProvider(InspectVerifiedProvider):
     """Store generated credentials in a mode-600 systemd credential source."""
 
     def __init__(self, *, credential_dir: Path = Path("/var/lib/nostrhost/credentials")) -> None:
@@ -631,14 +629,11 @@ class SecretProvider:
             os.chmod(target, 0o600)
         return {"name": name, "credential": str(target), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("secret.remove", desired["name"], {"name": desired["name"]}, risk="high", reverse="secret.ensure", summary="remove systemd credential")]
 
 
-class PortProvider:
+class PortProvider(InspectVerifiedProvider):
     """Check bind availability without invoking netstat/lsof shell commands."""
 
     def __init__(self, *, socket_factory: Callable[..., Any] | None = None) -> None:
@@ -666,14 +661,11 @@ class PortProvider:
             raise ProviderError(f"port is unavailable: {result['port']}")
         return result
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return []
 
 
-class SourceProvider:
+class SourceProvider(InspectVerifiedProvider):
     resource_type = "source"
 
     def __init__(self, *, root: Path = Path("/"), cache_dir: Path = Path("/var/cache/nostrhost/packages"), downloader: Callable[[str, Path], None] | None = None) -> None:
@@ -725,9 +717,6 @@ class SourceProvider:
             cached = self.cache_dir / hashlib.sha256(args["url"].encode()).hexdigest()
             shutil.copy2(archive, cached)
             return {"path": str(cached), "verified": True}
-
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("source.remove", desired["url"], {"url": desired["url"], "destination": desired.get("destination")}, reverse="source.fetch", summary="remove cached source")]
@@ -805,7 +794,7 @@ class SourceProvider:
             raise ProviderError("source is not a supported tar or zip archive")
 
 
-class RuntimeProvider:
+class RuntimeProvider(InspectVerifiedProvider):
     """Validate a declared runtime through its version command.
 
     Installation is intentionally not hidden behind a provider. Runtime
@@ -864,14 +853,11 @@ class RuntimeProvider:
         result["changed"] = False
         return result
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return []
 
 
-class FpmProvider:
+class FpmProvider(InspectVerifiedProvider):
     """Render an owned PHP-FPM pool and reload only its matching service."""
 
     resource_type = "fpm"
@@ -924,14 +910,11 @@ class FpmProvider:
         self.command(["systemctl", "reload", service], check=True)
         return {"path": str(target), "service": service, "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("fpm.remove", desired.get("app", "nostrhost"), desired, risk="medium", reverse="fpm.ensure", summary="remove PHP-FPM pool")]
 
 
-class ServiceProvider:
+class ServiceProvider(InspectVerifiedProvider):
     resource_type = "service"
 
     def __init__(self, *, unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> None:
@@ -974,9 +957,6 @@ class ServiceProvider:
         self.command(["systemctl", "daemon-reload"], check=True)
         return {"unit": str(destination), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("service.remove", desired.get("name", "nostrhost-app"), {"name": desired.get("name", "nostrhost-app")}, reverse="service.ensure", summary="remove systemd service")]
 
@@ -999,7 +979,7 @@ class ServiceProvider:
         return "\n".join(lines)
 
 
-class TimerProvider:
+class TimerProvider(InspectVerifiedProvider):
     """Render a systemd service/timer pair and activate it with systemctl."""
 
     def __init__(self, *, unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> None:
@@ -1028,15 +1008,12 @@ class TimerProvider:
         self.command(["systemctl", "enable", "--now", f"{name}.timer"], check=True)
         return {"timer": str(timer), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         name = desired.get("name", "nostrhost-timer")
         return [Operation("timer.remove", name, {"name": name}, risk="medium", reverse="timer.ensure", summary="remove systemd timer")]
 
 
-class HealthProvider:
+class HealthProvider(InspectVerifiedProvider):
     resource_type = "health"
 
     def __init__(self, *, client: Any = None) -> None:
@@ -1073,14 +1050,11 @@ class HealthProvider:
             raise ProviderError(f"health check failed after {result['attempts']} attempt(s): {detail}")
         return result
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return []
 
 
-class PolicyProvider:
+class PolicyProvider(InspectVerifiedProvider):
     """Render host policy snippets without invoking policy-manager shells."""
 
     resource_type = "policy"
@@ -1163,14 +1137,11 @@ class PolicyProvider:
         self._snapshot_state()
         return {"path": str(target), "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("policy.remove", desired["name"], desired, reverse="policy.ensure", summary="remove host policy")]
 
 
-class JsonStateProvider:
+class JsonStateProvider(InspectVerifiedProvider):
     """Persist typed settings or backup declarations as semantic state."""
 
     def __init__(self, *, state_dir: Path, resource_type: str) -> None:
@@ -1205,9 +1176,6 @@ class JsonStateProvider:
         os.chmod(temporary, 0o640)
         temporary.replace(target)
         return {"state": str(target), "changed": True}
-
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation(f"{self.resource_type}.unregister", desired["name"], desired, reverse=f"{self.resource_type}.register", summary=f"unregister {self.resource_type} state")]
@@ -1274,7 +1242,7 @@ class HookProvider(JsonStateProvider):
         super().__init__(state_dir=state_dir, resource_type="hook")
 
 
-class AptProvider:
+class AptProvider(InspectVerifiedProvider):
     resource_type = "package.apt"
 
     def __init__(self, *, cache_factory: Callable[[], Any] | None = None) -> None:
@@ -1308,15 +1276,12 @@ class AptProvider:
         cache.commit()
         return {"packages": packages, "changed": True}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         packages = desired.get("packages", [desired.get("package")])
         return [Operation("package.apt.remove", ":".join(packages), {"packages": packages}, reverse="package.apt.ensure", summary=f"remove apt packages {', '.join(packages)}")]
 
 
-class PostgresProvider:
+class PostgresProvider(InspectVerifiedProvider):
     resource_type = "database"
 
     def __init__(self, *, connection_factory: Callable[[], Any] | None = None, credential_reader: Callable[[str], str] | None = None, command: Callable[..., Any] | None = None) -> None:
@@ -1404,9 +1369,6 @@ class PostgresProvider:
             return ["pg_dump", "--dbname", name, "--format", "custom", "--file", str(path)]
         return ["pg_restore", "--dbname", name, str(path)]
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
         return [Operation("database.remove", name, {"name": name}, risk="high", reverse="database.ensure", summary=f"remove PostgreSQL database {name}")]
@@ -1493,7 +1455,7 @@ class MySQLProvider(PostgresProvider):
         return ["mysql", name, "--execute", f"source {path}"]
 
 
-class MongoProvider:
+class MongoProvider(InspectVerifiedProvider):
     """Native MongoDB database/user operations through PyMongo."""
 
     resource_type = "database"
@@ -1543,9 +1505,6 @@ class MongoProvider:
             if close:
                 close()
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         name = self._name(desired.get("name") or "nostrhost")
         return [Operation("database.remove", name, {"type": "mongodb", "name": name}, risk="high", reverse="database.ensure", summary=f"remove MongoDB database {name}")]
@@ -1589,7 +1548,7 @@ class MongoProvider:
                 close()
 
 
-class RedisProvider:
+class RedisProvider(InspectVerifiedProvider):
     """Validate and select a Redis logical database index.
 
     Redis databases are pre-created logical namespaces; the provider must not
@@ -1648,15 +1607,12 @@ class RedisProvider:
             if close:
                 close()
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         index = self._index(desired.get("name"))
         return [Operation("database.remove", str(index), {"type": "redis", "name": str(index)}, risk="medium", reverse="database.ensure", summary=f"release Redis database {index}")]
 
 
-class DatabaseProvider:
+class DatabaseProvider(InspectVerifiedProvider):
     """Dispatch database resources to their explicitly selected DB-API driver."""
 
     resource_type = "database"
@@ -1684,14 +1640,11 @@ class DatabaseProvider:
     def apply(self, operation: Operation) -> dict[str, Any]:
         return self._provider(operation.args).apply(operation)
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return self._provider(desired).remove(desired)
 
 
-class CaddyProvider:
+class CaddyProvider(InspectVerifiedProvider):
     resource_type = "web.route"
 
     def __init__(self, *, client: Any, config_builder: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
@@ -1714,15 +1667,12 @@ class CaddyProvider:
         route_id = self.client.ensure_route(route)
         return {"ensured": True, "route_id": route_id}
 
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
-
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         label = desired.get("domain") or desired.get("app") or desired.get("upstream")
         return [Operation("web.route.remove", label or "web", desired, risk="medium", reverse="web.route.ensure", summary="remove Caddy route")]
 
 
-class DnsRecordsProvider:
+class DnsRecordsProvider(InspectVerifiedProvider):
     """Enforce/remove an app's ``[dns.*]`` records through its native domain.
 
     The apply step re-runs the domain's reconciliation with the app's records
@@ -1755,9 +1705,6 @@ class DnsRecordsProvider:
         exclude_app = operation.name == "dns.records.remove"
         result = self._run(operation.args.get("app", ""), operation.args.get("domain", ""), exclude_app)
         return {"app": operation.args.get("app"), "domain": operation.args.get("domain"), "reconciled": result, "ok": True}
-
-    def verify(self, desired: dict[str, Any]) -> dict[str, Any]:
-        return self.inspect(desired)
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         app = desired.get("app")
