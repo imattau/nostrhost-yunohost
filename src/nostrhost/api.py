@@ -32,15 +32,24 @@ from yunohost.nostr_identity import (
     link_identity,
     list_identities,
     list_identities_for_username,
+    publish_to_relay,
     resolve_pubkey,
     resolve_username,
     revoke_identity,
 )
 from yunohost.nostr_operations import (
     OperationError,
+    approve_operation,
+    build_approval_template,
+    build_rejection_template,
     delegate_capability,
+    get_operation,
     grant_capability,
+    list_operations,
+    reject_operation,
     revoke_delegation,
+    validate_signed_approval,
+    validate_signed_rejection,
 )
 from nostrhost_auth.auth.nostr_verify import parse_and_verify_event
 
@@ -133,7 +142,7 @@ class _AuthErrorsPlugin:
                 rule = getattr(route, "rule", "")
             if str(rule) != "/healthz":
                 try:
-                    self.authorizer()
+                    request.environ["nostrhost.admin_pubkey"] = self.authorizer()
                 except ApiError as exc:
                     return _json_error(exc.status, exc.code, exc.message)
             try:
@@ -332,6 +341,83 @@ def build_app(
             control_relay=_config_control_relay(),
         )
 
+    # -- operations (kind-2200..2204 approval chain) -------------------------
+    #
+    # The admin console's OperationsView lists pending/past operations and
+    # approves/rejects them. There is no separate operations database - the
+    # control relay's own event store is authoritative, so list/get replay
+    # the chain (see nostr_operations.list_operations/get_operation).
+    #
+    # Approve/reject accept an optional pre-signed `event`: the browser signs
+    # it itself via a connected NIP-46 bunker (build_approval_template /
+    # build_rejection_template give it the exact event to sign) so the
+    # approval is auditable as coming from the admin's own remote signer
+    # rather than the server's local admin key. Without `event`, the route
+    # falls back to signing with the server-held admin/operator key, exactly
+    # as `nostr-opctl approve/reject` already does.
+
+    @app.get("/package/operations")
+    def package_operations_list() -> Any:
+        limit = request.query.get("limit")
+        return {"entries": list_operations(limit=int(limit) if limit else None, control_relay=_config_control_relay())}
+
+    @app.get("/package/operations/<request_id>")
+    def package_operations_get(request_id: str) -> Any:
+        entry = get_operation(request_id, control_relay=_config_control_relay())
+        if entry is None:
+            raise ApiError(404, "not_found", f"no operation {request_id!r} on the control relay")
+        return entry
+
+    @app.get("/package/operations/<request_id>/approval-template")
+    def package_operations_approval_template(request_id: str) -> Any:
+        note = request.query.get("note") or None
+        return build_approval_template(_authorized_pubkey(), request_id, note)
+
+    @app.get("/package/operations/<request_id>/rejection-template")
+    def package_operations_rejection_template(request_id: str) -> Any:
+        reason = request.query.get("reason") or None
+        return build_rejection_template(_authorized_pubkey(), request_id, reason)
+
+    @app.post("/package/operations/<request_id>/approve")
+    def package_operations_approve(request_id: str) -> Any:
+        body = _json_body()
+        signed_event = body.get("event")
+        if signed_event is not None:
+            if not isinstance(signed_event, dict):
+                raise ApiError(400, "invalid_body", "event must be a signed Nostr event object")
+            if signed_event.get("pubkey") != _authorized_pubkey():
+                raise ApiError(403, "not_authorized", "the signed approval must come from the authenticated admin")
+            event = validate_signed_approval(signed_event, request_id)
+            publish_to_relay(_config_control_relay() or "ws://127.0.0.1:4848", event)
+        else:
+            event = approve_operation(
+                request_id,
+                admin_sk=_config_admin_sk(),
+                control_relay=_config_control_relay(),
+                note=body.get("note"),
+            )
+        return {"ok": True, "request_id": request_id, "event_id": event["id"]}
+
+    @app.post("/package/operations/<request_id>/reject")
+    def package_operations_reject(request_id: str) -> Any:
+        body = _json_body()
+        signed_event = body.get("event")
+        if signed_event is not None:
+            if not isinstance(signed_event, dict):
+                raise ApiError(400, "invalid_body", "event must be a signed Nostr event object")
+            if signed_event.get("pubkey") != _authorized_pubkey():
+                raise ApiError(403, "not_authorized", "the signed rejection must come from the authenticated admin")
+            event = validate_signed_rejection(signed_event, request_id)
+            publish_to_relay(_config_control_relay() or "ws://127.0.0.1:4848", event)
+        else:
+            event = reject_operation(
+                request_id,
+                admin_sk=_config_admin_sk(),
+                control_relay=_config_control_relay(),
+                reason=body.get("reason"),
+            )
+        return {"ok": True, "request_id": request_id, "event_id": event["id"]}
+
     # -- agent (optional resident nostrhost-agent) ---------------------------
     # Thin wrappers around the CLI's `nostrhost agent ...` lifecycle so the
     # admin UI can drive the same root-owned config/service instead of a
@@ -355,6 +441,18 @@ def build_app(
         return _agent_service("disable")
 
     return app
+
+
+def _authorized_pubkey() -> str:
+    """The admin pubkey the auth plugin resolved for this request.
+
+    Always set once a route body runs (the plugin's authorizer() raises and
+    short-circuits the response otherwise) - the one exception is /healthz,
+    which never calls this."""
+    pubkey = request.environ.get("nostrhost.admin_pubkey")
+    if not pubkey:
+        raise ApiError(401, "authentication_required", "no authenticated identity for this request")
+    return pubkey
 
 
 def _json_body() -> dict[str, Any]:

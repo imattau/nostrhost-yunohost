@@ -921,15 +921,17 @@ def build_approval_template(admin_pubkey: str, request_id: str, note: str | None
     }
 
 
-def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str, Any]:
-    """Validate a remote-signed NIP-46 approval before it is published."""
-    if event.get("kind") != KIND_OPERATION_APPROVAL or event.get("pubkey") is None:
-        raise OperationError("NIP-46 signer returned a non-approval event")
+def _validate_signed_nip46_decision(event: dict[str, Any], request_id: str, *, kind: int, label: str) -> dict[str, Any]:
+    """Shared body of :func:`validate_signed_approval` and
+    :func:`validate_signed_rejection` - only the expected chain kind and the
+    error labelling differ between an approval and a rejection."""
+    if event.get("kind") != kind or event.get("pubkey") is None:
+        raise OperationError(f"NIP-46 signer returned a non-{label} event")
     tags = event.get("tags") or []
     if _e_tag(request_id)[0] not in tags:
-        raise OperationError("NIP-46 approval does not target the requested operation")
+        raise OperationError(f"NIP-46 {label} does not target the requested operation")
     if ["t", "nip46"] not in tags:
-        raise OperationError("NIP-46 approval is missing its audit marker")
+        raise OperationError(f"NIP-46 {label} is missing its audit marker")
     required = ("id", "sig", "created_at", "content")
     if any(key not in event for key in required) or not _is_hex64(str(event["id"])):
         raise OperationError("NIP-46 signer returned an incomplete event")
@@ -938,20 +940,46 @@ def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str
         separators=(",", ":"), ensure_ascii=False,
     ).encode()
     if hashlib.sha256(serialized).hexdigest() != event["id"]:
-        raise OperationError("NIP-46 approval id does not match its contents")
+        raise OperationError(f"NIP-46 {label} id does not match its contents")
     try:
         from nostr_sdk import Event
         if not Event.from_json(json.dumps(event)).verify():
-            raise OperationError("NIP-46 approval signature is invalid")
+            raise OperationError(f"NIP-46 {label} signature is invalid")
     except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
-        raise OperationError("NIP-46 approval contains invalid key or signature encoding") from exc
+        raise OperationError("NIP-46 signer returned an invalid key or signature encoding") from exc
     return event
+
+
+def validate_signed_approval(event: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Validate a remote-signed NIP-46 approval before it is published."""
+    return _validate_signed_nip46_decision(event, request_id, kind=KIND_OPERATION_APPROVAL, label="approval")
 
 
 def build_rejection(admin_sk: str, admin_pubkey: str, request_id: str, reason: str | None = None) -> dict[str, Any]:
     """Build (without publishing) a kind-2202 rejection for a request."""
     content = json.dumps({"reason": reason}, default=_json_default) if reason is not None else ""
     return _sign_event(admin_sk, admin_pubkey, KIND_OPERATION_REJECTION, content, _e_tag(request_id))
+
+
+def build_rejection_template(admin_pubkey: str, request_id: str, reason: str | None = None) -> dict[str, Any]:
+    """Build the unsigned NIP-46 rejection event passed to a remote signer.
+
+    Mirrors :func:`build_approval_template` - see its docstring."""
+    if not _is_hex64(admin_pubkey) or not _is_hex64(request_id):
+        raise OperationError("rejection pubkey and request id must be 64-hex")
+    content = json.dumps({"reason": reason}, default=_json_default) if reason is not None else ""
+    return {
+        "pubkey": admin_pubkey,
+        "created_at": int(time.time()),
+        "kind": KIND_OPERATION_REJECTION,
+        "tags": _e_tag(request_id) + [["t", "nip46"]],
+        "content": content,
+    }
+
+
+def validate_signed_rejection(event: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Validate a remote-signed NIP-46 rejection before it is published."""
+    return _validate_signed_nip46_decision(event, request_id, kind=KIND_OPERATION_REJECTION, label="rejection")
 
 
 def build_execution_started(server_sk: str, server_pubkey: str, request_id: str, *, actor_pubkey: str | None = None) -> dict[str, Any]:
@@ -1211,6 +1239,128 @@ def revoke_delegation(
 
 def _control_relay(control_relay: str | None) -> str:
     return control_relay or os.environ.get("NOSTRHOST_CONTROL_RELAY") or "ws://127.0.0.1:4848"
+
+
+# --------------------------------------------------------------------------- #
+# read side (used by the admin console's /package/operations* routes and
+# bin/nostr-opctl status) - there is no separate operations database; the
+# control relay's own event store is the source of truth, so listing
+# operations means reading the chain back and replaying the state machine.
+
+def _read_e_tag(event: dict[str, Any]) -> str | None:
+    for tag in event.get("tags") or []:
+        if tag and tag[0] == "e" and len(tag) > 1:
+            return tag[1]
+    return None
+
+
+def fetch_chain_events(relay_url: str, *, kinds: tuple[int, ...] | None = None, timeout: float = 3.0) -> list[dict[str, Any]]:
+    """REQ the chain kinds on the control relay; return the stored events.
+
+    Handles the NIP-42 AUTH challenge (control kinds are protected by
+    default), authenticating the connection as the operator - the same
+    handshake ``bin/nostr-opctl status`` performs."""
+    import secrets
+
+    from websockets.sync.client import connect
+
+    from .nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
+
+    kinds = kinds or CHAIN_KINDS
+    events: list[dict[str, Any]] = []
+    with connect(relay_url) as ws:
+        sub_id = "nostrhost-ops-" + secrets.token_hex(4)
+        req = json.dumps(["REQ", sub_id, {"kinds": list(kinds)}])
+        ws.send(req)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                msg = json.loads(ws.recv(timeout=0.5))
+            except TimeoutError:
+                continue
+            if msg[0] == "AUTH":
+                auth = default_auth()
+                if auth is not None:
+                    challenge = msg[1] if len(msg) > 1 else ""
+                    auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                    ws.send(json.dumps(["AUTH", auth_ev]))
+                    _wait_auth_ok(ws, auth_ev["id"], deadline)
+                    ws.send(req)  # re-send the REQ now that the connection is authed
+                continue
+            if msg[0] == "EVENT":
+                events.append(msg[2])
+            elif msg[0] == "EOSE":
+                break
+    return events
+
+
+def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Reduce one request's chain events (the 2200 request plus whatever
+    2201-2204 follow-ons have landed) to a single summary entry, replaying
+    the state machine in event order. Returns None for an orphaned follow-on
+    event whose request isn't in this relay snapshot."""
+    from .nostr_operations_state import InvalidTransition, next_state
+
+    request_event = next((e for e in chain if e.get("kind") == KIND_OPERATION_REQUEST), None)
+    if request_event is None:
+        return None
+    try:
+        content = json.loads(request_event.get("content") or "{}")
+    except json.JSONDecodeError:
+        content = {}
+
+    state = OpState.REQUESTED
+    for event in sorted(chain, key=lambda e: e["created_at"]):
+        if event["id"] == request_event["id"]:
+            continue
+        ok = True
+        if event.get("kind") == KIND_EXECUTION_RESULT:
+            try:
+                ok = bool(json.loads(event.get("content") or "{}").get("ok", True))
+            except json.JSONDecodeError:
+                ok = True
+        try:
+            state = next_state(state, event["kind"], ok=ok)
+        except InvalidTransition:
+            continue  # ignore out-of-order/duplicate/invalid chain events
+
+    return {
+        "id": request_event["id"],
+        "request_id": request_event["id"],
+        "tool": content.get("tool"),
+        "args": content.get("args"),
+        "pubkey": request_event.get("pubkey"),
+        "created_at": request_event.get("created_at"),
+        "state": state.value.upper(),
+    }
+
+
+def list_operations(*, limit: int | None = None, control_relay: str | None = None) -> list[dict[str, Any]]:
+    """Every operation on the control relay, newest request first."""
+    relay = _control_relay(control_relay)
+    events = fetch_chain_events(relay)
+    by_request: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        request_id = event["id"] if event.get("kind") == KIND_OPERATION_REQUEST else _read_e_tag(event)
+        if request_id is None:
+            continue
+        by_request.setdefault(request_id, []).append(event)
+
+    entries = []
+    for chain in by_request.values():
+        entry = _operation_entry(chain)
+        if entry is not None:
+            entries.append(entry)
+    entries.sort(key=lambda e: e["created_at"], reverse=True)
+    return entries[:limit] if limit else entries
+
+
+def get_operation(request_id: str, *, control_relay: str | None = None) -> dict[str, Any] | None:
+    """One operation's current summary, or None if it isn't on the relay."""
+    for entry in list_operations(control_relay=control_relay):
+        if entry["request_id"] == request_id:
+            return entry
+    return None
 
 
 # --------------------------------------------------------------------------- #
