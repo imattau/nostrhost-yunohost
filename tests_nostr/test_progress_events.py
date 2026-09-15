@@ -201,7 +201,7 @@ def test_api_events_sse_endpoint():
         build_execution_progress("a" * 64, "b" * 64, "c" * 64, stage="executing", progress=0.5),
         {"kind": 2204, "id": "r", "content": json.dumps({"ok": True})},
     ]
-    app = build_app(authorizer=lambda: "admin", event_stream=lambda request_id: iter(events))
+    app = build_app(authorizer=lambda _rule: "admin", event_stream=lambda request_id: iter(events))
     status, headers, body = wsgi_request(app, "GET", "/package/events/" + "c" * 64)
     assert status == "200"
     assert headers["Content-Type"] == "text/event-stream"
@@ -213,7 +213,7 @@ def test_api_events_sse_endpoint():
 
 
 def test_api_events_requires_auth():
-    def deny():
+    def deny(_rule=""):
         raise api_module.ApiError(401, "authentication_required", "no header")
 
     app = build_app(authorizer=deny)

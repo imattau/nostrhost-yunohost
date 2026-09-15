@@ -164,28 +164,97 @@ def _session_admin_pubkey(admins: set[str]) -> str | None:
     return None
 
 
+def _session_linked_pubkeys() -> list[str]:
+    """All linked identity pubkeys for the portal session user (order kept).
+
+    Unlike ``_session_admin_pubkey`` this does not require an identity to be
+    an admin: the scope-aware nsite routes (see ``NSITE_ROUTE_SCOPES``)
+    authorize any linked identity and check the caller's kind-31100 granted
+    scopes instead — the portal "My site" surface (D8).
+    """
+    username = _session_username()
+    if not username:
+        return []
+    try:
+        identities = resolve_username(username)
+    except Exception:  # pragma: no cover - identity store unavailable
+        identities = []
+    return [identity.pubkey for identity in identities if getattr(identity, "pubkey", None)]
+
+
+def _granted_scopes(pubkey: str) -> set[str]:
+    """The kind-31100 capability scopes granted to ``pubkey`` (best-effort).
+
+    Mirrors ``nostr_operationsd``'s subject->scope projection so the HTTP
+    routes gate a non-admin caller exactly like the signed operation chain
+    does (D8: the portal surface rides the same scope path). An unreachable
+    control relay yields an empty set — admins bypass this check entirely.
+    """
+    try:
+        grants = list_capabilities()
+    except Exception:  # noqa: BLE001 - relay/config hiccup: fail closed
+        return set()
+    for grant in grants:
+        if grant.get("pubkey") == pubkey:
+            return {str(scope) for scope in (grant.get("scopes") or [])}
+    return set()
+
+
+# Route -> required scope(s) for the nsite family. A non-admin caller (NIP-98
+# or portal session) needs one of the listed scopes via a kind-31100 grant;
+# admins bypass. Each entry mirrors its tool's scope in nostr_operations.TOOLS
+# so the HTTP surface gates exactly like the signed operation chain.
+NSITE_ROUTE_SCOPES: dict[str, tuple[str, ...]] = {
+    "/package/nsite/gateway/status": ("nsites.read",),
+    "/package/nsite/gateway/enable": ("nsites.admin",),
+    "/package/nsite/gateway/disable": ("nsites.admin",),
+    "/package/nsite/gateway/configure": ("nsites.admin",),
+    "/package/nsite/list": ("nsites.read",),
+    "/package/nsite/inspect": ("nsites.read",),
+    "/package/nsite/resolve": ("nsites.read",),
+    "/package/nsite/validate": ("nsites.read",),
+    "/package/nsite/reachability": ("nsites.read",),
+    "/package/nsite/publish/plan": ("nsites.read",),
+    "/package/nsite/register": ("nsites.admin",),
+    "/package/nsite/unregister": ("nsites.admin",),
+    "/package/nsite/publish": ("nsites.publish",),
+    "/package/nsite/snapshot": ("nsites.publish",),
+    "/package/nsite/mirror": ("nsites.publish",),
+    "/package/nsite/domain/list": ("nsites.read",),
+    "/package/nsite/domain/attach": ("nsites.admin",),
+    "/package/nsite/domain/detach": ("nsites.admin",),
+}
+
+
 def default_authorizer(
     *,
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
-) -> Callable[[], str]:
-    """NIP-98 / session authorizer: verify the request identity and require an
-    admin (operator or configured).
+    scoped_routes: dict[str, tuple[str, ...]] | None = None,
+) -> Callable[[str], str]:
+    """NIP-98 / session authorizer: verify the request identity and authorize
+    it for the requested route.
 
     Two mutually-exclusive authentication paths:
 
     - NIP-98 ``Authorization: Nostr <base64 event>`` (the existing signer
-      path): verify the event, resolve the signer pubkey to a linked identity,
-      and require the pubkey to be an admin.
+      path): verify the event and resolve the signer pubkey to a linked
+      identity.
     - Portal session cookie (``nostrhost.portal``): validate the portal
-      session, resolve the session user's linked identity, and require one of
-      its pubkeys to be an admin. This is the admin-console path: the user
-      signs in once at the portal and the same cookie authorizes the console.
+      session and resolve the session user's linked identity. This is the
+      admin-console path: the user signs in once at the portal and the same
+      cookie authorizes the console.
+
+    Routes in ``scoped_routes`` (the nsite family by default) additionally
+    accept non-admin linked identities that hold one of the route's scopes
+    (kind-31100 capability grants) — the portal "My site" surface (D8).
+    Everything else stays admin-only (operator or configured admin pubkeys).
     """
 
+    scoped_routes = NSITE_ROUTE_SCOPES if scoped_routes is None else scoped_routes
     admins = _build_admin_set(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
 
-    def authorize() -> str:
+    def resolve_callers() -> list[str]:
         header = request.headers.get("Authorization", "")
         if header.startswith("Nostr "):
             try:
@@ -203,20 +272,36 @@ def default_authorizer(
                 identity = None
             if identity is None:
                 raise ApiError(403, "identity_not_linked", "pubkey is not a linked identity")
-            if pubkey not in admins:
-                raise ApiError(403, "not_authorized", "pubkey is not an admin")
-            return pubkey
+            return [pubkey]
 
         # Portal-session path: no NIP-98 header, use the portal login cookie.
-        pubkey = _session_admin_pubkey(admins)
-        if pubkey is not None:
-            return pubkey
+        callers = _session_linked_pubkeys()
+        if callers:
+            return callers
         if _session_username() is not None:
-            raise ApiError(403, "not_authorized", "session user is not an admin")
+            raise ApiError(403, "not_authorized", "session user has no linked nostr identity")
         raise ApiError(
             401,
             "authentication_required",
             "missing NIP-98 Authorization header or portal session",
+        )
+
+    def authorize(rule: str = "") -> str:
+        callers = resolve_callers()
+        required = scoped_routes.get(str(rule))
+        if required is None or any(caller in admins for caller in callers):
+            admin = next((caller for caller in callers if caller in admins), None)
+            if admin is None:
+                raise ApiError(403, "not_authorized", "pubkey is not an admin")
+            return admin
+        for caller in callers:
+            granted = _granted_scopes(caller)
+            if any(scope in granted for scope in required):
+                return caller
+        raise ApiError(
+            403,
+            "not_authorized",
+            f"requires one of the scopes: {', '.join(sorted(required))}",
         )
 
     return authorize
@@ -228,7 +313,7 @@ class _AuthErrorsPlugin:
 
     name = "nostrhost-auth"
 
-    def __init__(self, authorizer: Callable[[], str]) -> None:
+    def __init__(self, authorizer: Callable[[str], str]) -> None:
         self.authorizer = authorizer
         self.app: Bottle | None = None
 
@@ -244,7 +329,7 @@ class _AuthErrorsPlugin:
                 rule = getattr(route, "rule", "")
             if str(rule) not in ("/package/healthz", "/package/session"):
                 try:
-                    self.authorizer()
+                    self.authorizer(str(rule))
                 except ApiError as exc:
                     return _json_error(exc.status, exc.code, exc.message)
             try:
@@ -286,7 +371,7 @@ def _default_event_stream(request_id: str) -> Any:
 
 def build_app(
     *,
-    authorizer: Callable[[], str] | None = None,
+    authorizer: Callable[[str], str] | None = None,
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
     event_stream: Callable[[str], Any] | None = None,

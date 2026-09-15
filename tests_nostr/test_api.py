@@ -73,7 +73,7 @@ def test_healthz_public_when_bottle_route_is_dict():
     """bottle 0.12's Route is a dict subclass: the auth plugin must read the
     rule from the dict, not via `.rule`, or /healthz 500s on real Debian."""
 
-    def deny_authorizer() -> str:
+    def deny_authorizer(_rule: str = "") -> str:
         raise ApiError(401, "authentication_required", "nope")
 
     plugin = api_module._AuthErrorsPlugin(authorizer=deny_authorizer)
@@ -112,7 +112,7 @@ def test_app_management_combines_catalogue_and_installations(monkeypatch):
         raise AssertionError(name)
 
     monkeypatch.setattr(api_module, "_run_tool", fake_run_tool)
-    app = build_app(authorizer=lambda: "admin")
+    app = build_app(authorizer=lambda _rule: "admin")
     status, _, body = wsgi_request(app, "GET", "/package/app/management")
     assert status == "200"
     rows = {row["id"]: row for row in json.loads(body)["apps"]}
@@ -130,7 +130,7 @@ def test_native_settings_plan_and_apply_are_bound_to_reviewed_digest(monkeypatch
     from nostrhost import native_providers
 
     monkeypatch.setattr(native_providers, "installed_package_manifest", lambda app_id, state_dir=None: manifest if app_id == "example" else None)
-    app = build_app(authorizer=lambda: "admin")
+    app = build_app(authorizer=lambda _rule: "admin")
     values = {"mode": "fast"}
     status, _, body = wsgi_request(app, "POST", "/package/app/example/settings/plan", {"values": values})
     assert status == "200"
@@ -161,7 +161,7 @@ def test_catalogue_lifecycle_apply_revalidates_plan_and_uses_signed_chain(monkey
     monkeypatch.setattr(api_module, "catalogue_lifecycle_plan", lambda app_id, action: plan)
     calls = []
     monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
-    app = build_app(authorizer=lambda: "admin")
+    app = build_app(authorizer=lambda _rule: "admin")
 
     status, _, stale = wsgi_request(app, "POST", "/package/app/example/install/apply", {"plan_sha256": "x" * 64})
     assert status == "409"
@@ -318,11 +318,147 @@ def test_session_auth_non_admin_403(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# scope-aware nsite routes (D8 portal "My site": non-admin linked identities
+# authorized per kind-31100 granted scopes, like the signed operation chain)
+
+def test_scoped_nsite_publish_requires_publish_scope(monkeypatch):
+    """A non-admin linked identity needs nsites.publish for the publish route."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    lifecycle = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.read"})
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True})
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(
+        app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
+        headers={"Authorization": _signed_header(sk, pubkey)},
+    )
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+    assert lifecycle == []
+
+
+def test_scoped_nsite_publish_granted_non_admin_ok(monkeypatch):
+    """nsites.publish grant lets a non-admin linked identity publish."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    lifecycle = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.read", "nsites.publish"})
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(
+        app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
+        headers={"Authorization": _signed_header(sk, pubkey)},
+    )
+    assert status == "200"
+    assert json.loads(body)["ok"] is True
+    assert lifecycle and lifecycle[0][0] == "nsite.publish"
+
+
+def test_scoped_nsite_read_grants_read_but_not_admin_routes(monkeypatch):
+    """nsites.read lets a non-admin use read routes but not admin ones."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    lifecycle = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.read"})
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "nsite.list", lambda **k: {"sites": []})
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True})
+    app = build_app(admin_pubkeys=())
+
+    status, _, body = wsgi_request(app, "GET", "/package/nsite/list", headers={"Authorization": _signed_header(sk, pubkey)})
+    assert status == "200"
+    assert json.loads(body)["sites"] == []
+
+    status, _, body = wsgi_request(app, "POST", "/package/nsite/gateway/enable", {"domain": "sites.example.org"}, headers={"Authorization": _signed_header(sk, pubkey)})
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+    assert lifecycle == []
+
+
+def test_scoped_nsite_admin_bypasses_scope_check(monkeypatch):
+    """An admin can publish without any kind-31100 grant."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    lifecycle = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: set())
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
+    app = build_app(admin_pubkeys=(pubkey,))
+    status, _, body = wsgi_request(
+        app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
+        headers={"Authorization": _signed_header(sk, pubkey)},
+    )
+    assert status == "200"
+    assert lifecycle and lifecycle[0][0] == "nsite.publish"
+
+
+def test_scoped_nsite_session_linked_non_admin_ok(monkeypatch):
+    """A portal session whose linked identity holds nsites.publish is allowed."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    lifecycle = []
+    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.publish"})
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(
+        app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
+    )
+    assert status == "200"
+    assert lifecycle and lifecycle[0][0] == "nsite.publish"
+
+
+def test_scoped_nsite_session_without_identity_403(monkeypatch):
+    """A portal session with no linked nostr identity cannot use nsite routes."""
+    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    monkeypatch.setattr(api_module, "resolve_username", lambda username: [])
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(app, "GET", "/package/nsite/list")
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+
+
+def test_scoped_nsite_publish_plan_requires_read_scope(monkeypatch):
+    """The plan route mirrors the operation chain: it needs nsites.read."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    plan_calls = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.publish"})
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "nsite.publish.plan", lambda **k: plan_calls.append(k) or {"plan_sha256": "0" * 64})
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(
+        app, "POST", "/package/nsite/publish/plan",
+        {"pubkey": pubkey, "kind": 15128, "items": [{"path": "/index.html", "sha256": "0" * 64}]},
+        headers={"Authorization": _signed_header(sk, pubkey)},
+    )
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+    assert plan_calls == []
+
+
+# --------------------------------------------------------------------------- #
 # operation routes (fake authorizer + monkeypatched handlers)
 
 @pytest.fixture()
 def app():
-    return build_app(authorizer=lambda: "admin-pubkey")
+    return build_app(authorizer=lambda _rule: "admin-pubkey")
 
 
 def test_get_system_version(app, monkeypatch):
