@@ -31,6 +31,12 @@ IDENTITY_SOCKET = "/run/nostrhost/identity.sock"
 PORTAL_CONFIG = "/etc/nostrhost/portal.toml"
 CLIENT_TIMEOUT = 10.0  # seconds the socket client waits for identityd
 
+# Bunker/NIP-46 session bookkeeping (visibility only - see
+# nostrhost_auth.identity.signer_sessions for why this doesn't go through
+# identityd's operator-signed event pipeline like the identities table does).
+DEFAULT_SIGNER_SESSIONS_DB = "/var/lib/nostrhost/signer_sessions.db"
+MAX_SIGNER_RELAYS = 10
+
 
 class AccountError(ValueError):
     """The identity self-service operation failed."""
@@ -102,6 +108,28 @@ def _require_session() -> str:
 def _require_linking_enabled() -> None:
     if not allow_identity_linking():
         raise LoginError("identity linking is disabled by the administrator")
+
+
+def _signer_session_store():
+    from nostrhost_auth.identity.signer_sessions import SignerSessionStore
+
+    return SignerSessionStore(
+        Path(os.environ.get("NOSTRHOST_SIGNER_SESSIONS_DB", DEFAULT_SIGNER_SESSIONS_DB))
+    )
+
+
+def _serialize_signer_session(session) -> dict:
+    from nostrhost_auth.identity.npub import hex_to_npub
+
+    return {
+        "session_id": session.session_id,
+        "remote_pubkey": session.bunker_pubkey,
+        "remote_npub": hex_to_npub(session.bunker_pubkey),
+        "relays": json.loads(session.relays),
+        "label": session.label,
+        "connected_at": session.connected_at,
+        "last_used": session.last_used,
+    }
 
 
 def _serialize_identity(identity) -> dict:
@@ -312,4 +340,78 @@ def unlink_route():
     result = identityd_request({"action": "unlink", "username": username})
     if not result.get("ok"):
         raise HTTPResponse(result.get("error") or "could not unlink identities", 502)
+    _signer_session_store().delete_all_for_username(username)
     return {"ok": True, "event_ids": result.get("event_ids", [])}
+
+
+# --------------------------------------------------------------------------- #
+# remote-signer (NIP-46 bunker) session bookkeeping
+#
+# These routes never see the browser's NIP-46 client secret key - the client
+# (public/nostr/nostr-connect-ui.js) keeps that in localStorage and only ever
+# reports the remote signer's pubkey, its relays and a label, purely so the
+# account page can show every bunker a user's browser remembers instead of
+# just one. Revoking here hides a session from that list; it does not
+# terminate the underlying bunker connection (see signer_sessions.py).
+
+def signers_route():
+    """List the session user's remembered remote-signer sessions."""
+    username = _require_session()
+    sessions = _signer_session_store().list_by_username(username)
+    return {"sessions": [_serialize_signer_session(s) for s in sessions]}
+
+
+def register_signer_route():
+    """Record (or refresh) a bunker session the client just connected to."""
+    from bottle import HTTPResponse, request
+
+    from nostrhost_auth.identity.npub import npub_to_hex
+
+    username = _require_session()
+    body = request.json or {}
+
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise HTTPResponse("session_id is required", 400)
+
+    raw_pubkey = body.get("remote_pubkey")
+    if not isinstance(raw_pubkey, str) or not raw_pubkey.strip():
+        raise HTTPResponse("remote_pubkey is required", 400)
+    try:
+        pubkey = npub_to_hex(raw_pubkey) if raw_pubkey.startswith("npub1") else raw_pubkey
+    except Exception:
+        raise HTTPResponse("remote_pubkey is not a valid pubkey or npub", 400)
+    if len(pubkey) != 64 or not all(c in "0123456789abcdefABCDEF" for c in pubkey):
+        raise HTTPResponse("remote_pubkey is not a valid pubkey or npub", 400)
+
+    relays = body.get("relays") or []
+    if not isinstance(relays, list) or not all(isinstance(r, str) for r in relays):
+        raise HTTPResponse("relays must be a list of relay URLs", 400)
+    relays = relays[:MAX_SIGNER_RELAYS]
+
+    label = body.get("label")
+    if label is not None and not isinstance(label, str):
+        raise HTTPResponse("label must be a string", 400)
+
+    try:
+        session = _signer_session_store().register(
+            session_id.strip(), username, pubkey.lower(), json.dumps(relays), label=label
+        )
+    except ValueError as exc:
+        raise HTTPResponse(str(exc), 409)
+    return {"ok": True, "session": _serialize_signer_session(session)}
+
+
+def revoke_signer_route():
+    """Forget one of the session user's remembered bunker sessions."""
+    from bottle import HTTPResponse, request
+
+    username = _require_session()
+    body = request.json or {}
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise HTTPResponse("session_id is required", 400)
+
+    if not _signer_session_store().revoke(session_id.strip(), username):
+        raise HTTPResponse("signer session not found", 404)
+    return {"ok": True}
