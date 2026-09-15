@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
-from nostr_sdk import Keys
-
+from conftest import new_key
 from yunohost.nostr_notify import (
     KIND_SERVICE_EVENT,
     KIND_SYSTEM_EVENT,
@@ -15,12 +13,6 @@ from yunohost.nostr_notify import (
     SEVERITY_WARNING,
     publish_notice,
 )
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeTransport:

@@ -12,11 +12,8 @@ fake recording tool calls.
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
-from nostr_sdk import Keys
-
 from yunohost.nostr_operations import (
     build_approval,
     build_capability,
@@ -28,13 +25,8 @@ from yunohost.nostr_operations import (
     build_rejection,
 )
 from yunohost.nostr_operations_state import OpState
+from conftest import new_key
 from yunohost.nostr_operationsd import OperationEngine, _sorted_replay
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeBackend:

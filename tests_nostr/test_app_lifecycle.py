@@ -11,11 +11,9 @@ state / restic so every gate (authorisation, policy, approval) is real.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
-from nostr_sdk import Keys
 
 from nostrhost.native_providers import NativeOperationExecutor, PackageProvider, native_providers
 from nostrhost.package_engine import (
@@ -31,11 +29,7 @@ from nostrhost.package_engine import (
 from yunohost.nostr_operations import OperationError, run_signed_chain
 from yunohost.nostr_operations_state import OpState
 
-
-def _new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
+from conftest import new_key as _new_key
 
 
 def example_package() -> dict:
