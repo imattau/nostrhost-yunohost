@@ -11,30 +11,22 @@ Run with: pytest tests_nostr/test_nostr_account.py
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
 
 import pytest
-from nostr_sdk import Keys
-
 from yunohost.nostr_account import (
     AccountError,
     allow_identity_linking,
     identityd_request,
 )
 from yunohost.nostr_identity import _build_identity_event, _store
+from conftest import new_key
 from yunohost.nostr_identityd import (
     handle_control_request,
     handle_identity_event,
     serve_control,
 )
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeTransport:

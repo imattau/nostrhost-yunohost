@@ -6,13 +6,10 @@ Run with: pytest tests_nostr/  (needs nostrhost-auth and nostr-sdk)
 from __future__ import annotations
 
 import json
-import os
 import sys
 import types
 
 import pytest
-from nostr_sdk import Keys
-
 from yunohost.nostr_identity import _sign_event, _store
 from yunohost.nostr_login import (
     LOGIN_ACTION,
@@ -22,16 +19,11 @@ from yunohost.nostr_login import (
     handle_login,
     issue_challenge,
 )
+from conftest import new_key
 from yunohost import nostr_login
 
 CHALLENGE_KIND = 22242
 DOMAIN = "nostrhost.test"
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 def _signed_challenge_event(sk, pk, *, nonce, domain=DOMAIN, action=LOGIN_ACTION):

@@ -6,13 +6,10 @@ Run with: pytest tests_nostr/  (needs nostrhost-auth and nostr-sdk)
 from __future__ import annotations
 
 import json
-import os
 import tomllib
 from pathlib import Path
 
 import pytest
-from nostr_sdk import Keys
-
 from yunohost.nostr_identity import (
     IdentityError,
     _build_identity_event,
@@ -25,13 +22,8 @@ from yunohost.nostr_identity import (
     resolve_username,
     revoke_identity,
 )
+from conftest import new_key
 from yunohost.nostr_identityd import handle_identity_event
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeAccounts:

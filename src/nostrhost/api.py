@@ -146,6 +146,59 @@ def _run_tool(name: str, args: dict[str, Any]) -> Any:
         raise ApiError(400, "operation_failed", str(exc)) from exc
 
 
+# GET routes whose entire body is a single forward to `_run_tool` with no
+# other request handling: either no arguments, or the route's own path
+# parameters passed straight through (renamed to the tool's argument name
+# where it differs). Declared once here instead of as ~26 near-identical
+# one-line route functions; a route with any extra logic (query-string
+# parsing, error handling, response post-processing, ...) stays an explicit
+# function below.
+_SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
+    ("/package/operations/<request_id>", "audit.get", {"audit_id": "request_id"}),
+    ("/package/system/version", "system.version", {}),
+    ("/package/system/status", "system.status", {}),
+    # Cached apt/app updates + pending-migrations flag (no network refresh).
+    ("/package/system/updates", "updates.check", {}),
+    ("/package/domain/list", "domain.list", {}),
+    # Intent, desired/actual DNS, diff, and routes for a native domain.
+    ("/package/domain/<domain>/inspect", "domain.inspect", {"domain": "domain"}),
+    # Nsite gateway status: enabled, mode, domain, service health.
+    ("/package/nsite/gateway/status", "nsite.gateway.status", {}),
+    # Registered sites and the gateway mode.
+    ("/package/nsite/list", "nsite.list", {}),
+    # Attached custom domains (read only).
+    ("/package/nsite/domain/list", "nsite.domain.list", {}),
+    # Desired-vs-actual DNS plan for a domain (no changes).
+    ("/package/dns/plan/<domain>", "dns.plan", {"domain": "domain"}),
+    ("/package/dns/verify/<domain>", "dns.verify", {"domain": "domain"}),
+    # DDNS watcher status: last-seen public IPs and dynamic-IP domains.
+    ("/package/dns/watch", "dns.watch", {}),
+    ("/package/dns/subscriptions", "dns.subscriptions", {}),
+    ("/package/network/public-ip", "network.public_ip", {}),
+    # Configured DNS credential references (names only, never values).
+    ("/package/credential/list", "credential.list", {}),
+    ("/package/diagnosis/ignored", "diagnosis.ignored", {}),
+    ("/package/catalog/get/<app_id>", "catalog.get", {"app_id": "app_id"}),
+    ("/package/catalog/candidates", "catalog.candidates", {}),
+    ("/package/catalog/history", "catalog.history", {}),
+    ("/package/catalog/profile", "catalog.profile.get", {}),
+    ("/package/catalog/announcements", "catalog.announcements", {}),
+    ("/package/app/list", "app.list", {}),
+    ("/package/user/list", "user.list", {}),
+    ("/package/user/group/list", "user.group.list", {}),
+    ("/package/user/permission/info/<permission>", "user.permission.info", {"permission": "permission"}),
+    ("/package/settings/get/<key>", "settings.get", {"key": "key"}),
+)
+
+
+def _register_simple_get_forwards(app: Bottle, table: tuple[tuple[str, str, dict[str, str]], ...]) -> None:
+    for path, tool, arg_map in table:
+        def handler(*, _tool: str = tool, _arg_map: dict[str, str] = arg_map, **route_args: Any) -> Any:
+            return _run_tool(_tool, {tool_arg: route_args[route_arg] for tool_arg, route_arg in _arg_map.items()})
+
+        app.get(path)(handler)
+
+
 def _build_admin_set(
     *,
     admin_pubkeys: tuple[str, ...] = (),
@@ -228,7 +281,6 @@ def _granted_scopes(pubkey: str) -> set[str]:
         if grant.get("pubkey") == pubkey:
             return {str(scope) for scope in (grant.get("scopes") or [])}
     return set()
-
 
 # Route -> required scope(s) for the nsite family. A non-admin caller (NIP-98
 # or portal session) needs one of the listed scopes via a kind-31100 grant;
@@ -429,6 +481,7 @@ def build_app(
     auth = authorizer or default_authorizer(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
     app.install(_AuthErrorsPlugin(auth))
     stream = event_stream or _default_event_stream
+    _register_simple_get_forwards(app, _SIMPLE_GET_FORWARDS)
 
     @app.get("/package/healthz")
     def healthz() -> dict[str, Any]:
@@ -497,9 +550,7 @@ def build_app(
             raise ApiError(400, "invalid_query", "'limit' must be an integer")
         return _run_tool("audit.list", {"limit": limit})
 
-    @app.get("/package/operations/<request_id>")
-    def operations_get(request_id: str) -> Any:
-        return _run_tool("audit.get", {"audit_id": request_id})
+    # (operations/<request_id> GET -> audit.get: see _SIMPLE_GET_FORWARDS)
 
     @app.post("/package/operations/<request_id>/approve")
     def operations_approve(request_id: str) -> Any:
@@ -520,20 +571,6 @@ def build_app(
         return {"ok": True, "request_id": request_id, "event_id": event.get("id")}
 
     # -- system -------------------------------------------------------------
-
-    @app.get("/package/system/version")
-    def system_version() -> Any:
-        return _run_tool("system.version", {})
-
-    @app.get("/package/system/status")
-    def system_status() -> Any:
-        """Host status (platform, hostname, load) for the Overview dashboard."""
-        return _run_tool("system.status", {})
-
-    @app.get("/package/system/updates")
-    def system_updates() -> Any:
-        """Cached apt/app updates + pending-migrations flag (no network refresh)."""
-        return _run_tool("updates.check", {})
 
     @app.post("/package/system/updates/refresh")
     def system_updates_refresh() -> Any:
@@ -565,15 +602,6 @@ def build_app(
         return _run_lifecycle("system.migrate", body, state=_State())
 
     # -- domain / dns ---------------------------------------------------------
-
-    @app.get("/package/domain/list")
-    def domain_list() -> Any:
-        return _run_tool("domain.list", {})
-
-    @app.get("/package/domain/<domain>/inspect")
-    def domain_inspect(domain: str) -> Any:
-        """Intent, desired/actual DNS, diff, and routes for a native domain."""
-        return _run_tool("domain.inspect", {"domain": domain})
 
     @app.post("/package/domain/add")
     def domain_add() -> Any:
@@ -612,11 +640,6 @@ def build_app(
         )
 
     # -- nsite gateway --------------------------------------------------------
-
-    @app.get("/package/nsite/gateway/status")
-    def nsite_gateway_status() -> Any:
-        """Nsite gateway status: enabled, mode, domain, service health."""
-        return _run_tool("nsite.gateway.status", {})
 
     @app.post("/package/nsite/gateway/enable")
     def nsite_gateway_enable() -> Any:
@@ -660,11 +683,6 @@ def build_app(
         )
 
     # -- nsite sites / publishing (Phase 3a) --------------------------------
-
-    @app.get("/package/nsite/list")
-    def nsite_list() -> Any:
-        """Registered sites and the gateway mode."""
-        return _run_tool("nsite.list", {})
 
     @app.get("/package/nsite/inspect")
     def nsite_inspect() -> Any:
@@ -802,11 +820,6 @@ def build_app(
 
     # -- nsite custom domains (Phase 4) ------------------------------------
 
-    @app.get("/package/nsite/domain/list")
-    def nsite_domain_list() -> Any:
-        """Attached custom domains (read only)."""
-        return _run_tool("nsite.domain.list", {})
-
     @app.post("/package/nsite/domain/attach")
     def nsite_domain_attach() -> Any:
         """Attach a custom FQDN to a registered site (ownership proof via
@@ -835,26 +848,12 @@ def build_app(
             state=_State(),
         )
 
-    @app.get("/package/dns/plan/<domain>")
-    def dns_plan(domain: str) -> Any:
-        """Desired-vs-actual DNS plan for a domain (no changes)."""
-        return _run_tool("dns.plan", {"domain": domain})
-
     @app.post("/package/dns/apply")
     def dns_apply() -> Any:
         """Apply the DNS plan for a domain through its provider. High-risk:
         routed through the signed operation chain (owner co-signature)."""
         body = _json_body()
         return _run_lifecycle("dns.apply", {"domain": body.get("domain", "")}, state=_State())
-
-    @app.get("/package/dns/verify/<domain>")
-    def dns_verify(domain: str) -> Any:
-        return _run_tool("dns.verify", {"domain": domain})
-
-    @app.get("/package/dns/watch")
-    def dns_watch() -> Any:
-        """DDNS watcher status: last-seen public IPs and dynamic-IP domains."""
-        return _run_tool("dns.watch", {})
 
     @app.post("/package/dns/subscribe")
     def dns_subscribe() -> Any:
@@ -872,10 +871,6 @@ def build_app(
             state=_State(),
         )
 
-    @app.get("/package/dns/subscriptions")
-    def dns_subscriptions() -> Any:
-        return _run_tool("dns.subscriptions", {})
-
     @app.post("/package/dns/unsubscribe")
     def dns_unsubscribe() -> Any:
         """Release a nostr-native free-hostname subscription and drop its
@@ -884,15 +879,6 @@ def build_app(
         return _run_lifecycle("dns.unsubscribe", {"hostname": body.get("hostname", "")}, state=_State())
 
     # -- network / dns credentials --------------------------------------------
-
-    @app.get("/package/network/public-ip")
-    def network_public_ip() -> Any:
-        return _run_tool("network.public_ip", {})
-
-    @app.get("/package/credential/list")
-    def credential_list() -> Any:
-        """Configured DNS credential references (names only, never values)."""
-        return _run_tool("credential.list", {})
 
     @app.post("/package/credential/set")
     def credential_set() -> Any:
@@ -988,10 +974,6 @@ def build_app(
                 "full": bool(body.get("full", False)),
             },
         )
-
-    @app.get("/package/diagnosis/ignored")
-    def diagnosis_ignored() -> Any:
-        return _run_tool("diagnosis.ignored", {})
 
     @app.post("/package/diagnosis/ignore")
     def diagnosis_ignore() -> Any:
@@ -1214,10 +1196,6 @@ def build_app(
                     entry["nsite"] = link
         return out
 
-    @app.get("/package/catalog/get/<app_id>")
-    def catalog_get(app_id: str) -> Any:
-        return _run_tool("catalog.get", {"app_id": app_id})
-
     @app.post("/package/catalog/publish")
     def catalog_publish() -> Any:
         body = _json_body()
@@ -1240,10 +1218,6 @@ def build_app(
         body = _json_body()
         return _run_tool("catalog.verify", {"event_or_naddr": body.get("event_or_naddr", "")})
 
-    @app.get("/package/catalog/candidates")
-    def catalog_candidates() -> Any:
-        return _run_tool("catalog.candidates", {})
-
     @app.post("/package/catalog/attest")
     def catalog_attest() -> Any:
         body = _json_body()
@@ -1257,10 +1231,6 @@ def build_app(
                 "relays": body.get("relays", ""),
             },
         )
-
-    @app.get("/package/catalog/history")
-    def catalog_history() -> Any:
-        return _run_tool("catalog.history", {})
 
     @app.get("/package/catalog/trust")
     def catalog_trust() -> Any:
@@ -1283,10 +1253,6 @@ def build_app(
         body = _json_body()
         return _run_tool("catalog.reverify", {"app_id": body.get("app_id", "")})
 
-    @app.get("/package/catalog/profile")
-    def catalog_profile_get() -> Any:
-        return _run_tool("catalog.profile.get", {})
-
     @app.post("/package/catalog/profile")
     def catalog_profile_set() -> Any:
         body = _json_body()
@@ -1302,20 +1268,12 @@ def build_app(
             },
         )
 
-    @app.get("/package/catalog/announcements")
-    def catalog_announcements() -> Any:
-        return _run_tool("catalog.announcements", {})
-
     @app.post("/package/catalog/announce")
     def catalog_announce() -> Any:
         body = _json_body()
         return _run_tool("catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
 
     # -- app ----------------------------------------------------------------
-
-    @app.get("/package/app/list")
-    def app_list() -> Any:
-        return _run_tool("app.list", {})
 
     @app.get("/package/app/management")
     def app_management() -> Any:
@@ -1486,10 +1444,6 @@ def build_app(
 
     # -- user (YunoHost accounts) ---------------------------------------------
 
-    @app.get("/package/user/list")
-    def user_list() -> Any:
-        return _run_tool("user.list", {})
-
     @app.post("/package/user/create")
     def user_create() -> Any:
         """Create a YunoHost user account/mailbox. Medium-risk: routed
@@ -1549,10 +1503,6 @@ def build_app(
 
     # -- user group -------------------------------------------------------------
 
-    @app.get("/package/user/group/list")
-    def user_group_list() -> Any:
-        return _run_tool("user.group.list", {})
-
     @app.post("/package/user/group/create")
     def user_group_create() -> Any:
         """Create a new user group. Medium-risk: routed through the signed
@@ -1596,10 +1546,6 @@ def build_app(
     def user_permission_list() -> Any:
         full = request.query.get("full", "").lower() == "true"
         return _run_tool("user.permission.list", {"full": full})
-
-    @app.get("/package/user/permission/info/<permission>")
-    def user_permission_info(permission: str) -> Any:
-        return _run_tool("user.permission.info", {"permission": permission})
 
     @app.post("/package/user/permission/add")
     def user_permission_add() -> Any:
@@ -1662,10 +1608,6 @@ def build_app(
     def settings_list() -> Any:
         full = request.query.get("full", "").lower() == "true"
         return _run_tool("settings.list", {"full": full})
-
-    @app.get("/package/settings/get/<key>")
-    def settings_get(key: str) -> Any:
-        return _run_tool("settings.get", {"key": key})
 
     @app.post("/package/settings/set")
     def settings_set() -> Any:

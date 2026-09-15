@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
-from nostr_sdk import Keys
-
+from conftest import new_key
 from yunohost.nostr_operations import (
     KIND_CAPABILITY,
     KIND_OPERATION_APPROVAL,
@@ -38,12 +36,6 @@ from yunohost.nostr_operations import (
     validate_signed_approval,
     validate_signed_rejection,
 )
-
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeTransport:

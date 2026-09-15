@@ -1830,6 +1830,14 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             _print_error(exc)
             raise typer.Exit(EXIT_ERR)
 
+    def _forward(tool: str, args: dict[str, Any], output_as: str | None = None) -> None:
+        """Run a command whose entire body is a read-only forward to
+        `_run_tool` with the command's own options passed straight through,
+        under the same error handling as `_guard`. A command with any extra
+        logic (building the args dict conditionally, calling `_run_lifecycle`,
+        post-processing the result, ...) calls `_guard` directly instead."""
+        _guard(lambda: _run_tool(tool, args), output_as)
+
     # -- system -------------------------------------------------------------
 
     system = typer.Typer(name="system", help="system information", no_args_is_help=True)
@@ -1837,7 +1845,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @system.command("version")
     def system_version(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Read-only OS/package version information."""
-        _guard(lambda: _run_tool("system.version", {}), output_as)
+        _forward("system.version", {}, output_as)
 
     @system.command("regen-conf")
     def system_regen_conf(
@@ -1871,7 +1879,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """List known migrations (pending/done filters) and their recorded state."""
-        _guard(lambda: _run_tool("system.migrations", {"pending": pending, "done": done}), output_as)
+        _forward("system.migrations", {"pending": pending, "done": done}, output_as)
 
     @system.command("migrate")
     def system_migrate(
@@ -1906,7 +1914,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Status of running services."""
-        _guard(lambda: _run_tool("service.status", {"names": names} if names else {}), output_as)
+        _forward("service.status", {"names": names} if names else {}, output_as)
 
     @service.command("restart")
     def service_restart(
@@ -1914,7 +1922,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Restart one named service (write operation)."""
-        _guard(lambda: _run_tool("service.restart", {"name": name}), output_as)
+        _forward("service.restart", {"name": name}, output_as)
 
     @service.command("control")
     def service_control(
@@ -1923,7 +1931,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Start/stop/restart one named service (write operation)."""
-        _guard(lambda: _run_tool("service.control", {"name": name, "action": action}), output_as)
+        _forward("service.control", {"name": name, "action": action}, output_as)
 
     @service.command("history")
     def service_history(
@@ -1932,7 +1940,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """systemd state + restart history for one or more services."""
-        _guard(lambda: _run_tool("service.history", {"names": names, "lines": lines}), output_as)
+        _forward("service.history", {"names": names, "lines": lines}, output_as)
 
     # -- app ----------------------------------------------------------------
 
@@ -1941,7 +1949,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @app_group.command("list")
     def app_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List installed applications."""
-        _guard(lambda: _run_tool("app.list", {}), output_as)
+        _forward("app.list", {}, output_as)
 
     @app_group.command("install")
     def app_install(
@@ -2170,7 +2178,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @domain.command("list")
     def domain_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List registered native domains."""
-        _guard(lambda: _run_tool("domain.list", {}), output_as)
+        _forward("domain.list", {}, output_as)
 
     @domain.command("inspect")
     def domain_inspect(
@@ -2178,7 +2186,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Inspect a native domain: intent, desired/actual DNS, diff, routes."""
-        _guard(lambda: _run_tool("domain.inspect", {"domain": name}), output_as)
+        _forward("domain.inspect", {"domain": name}, output_as)
 
     @domain.command("add")
     def domain_add(
@@ -2249,7 +2257,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Read-only certificate status for an already-registered domain."""
-        _guard(lambda: _run_tool("domain.cert.info", {"domain": name}), output_as)
+        _forward("domain.cert.info", {"domain": name}, output_as)
 
     @domain.command("cert-install")
     def domain_cert_install(
@@ -2276,7 +2284,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Compute the desired-vs-actual DNS plan for a domain (no changes)."""
-        _guard(lambda: _run_tool("dns.plan", {"domain": name}), output_as)
+        _forward("dns.plan", {"domain": name}, output_as)
 
     @dns.command("apply")
     def dns_apply(
@@ -2297,12 +2305,12 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Verify a domain's DNS records resolve."""
-        _guard(lambda: _run_tool("dns.verify", {"domain": name}), output_as)
+        _forward("dns.verify", {"domain": name}, output_as)
 
     @dns.command("watch")
     def dns_watch(output_as: str = typer.Option(None, "--output-as")) -> None:
         """DDNS watcher status: last-seen public IPs and dynamic domains."""
-        _guard(lambda: _run_tool("dns.watch", {}), output_as)
+        _forward("dns.watch", {}, output_as)
 
     @dns.command("subscribe")
     def dns_subscribe(
@@ -2331,7 +2339,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @dns.command("subscriptions")
     def dns_subscriptions(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List nostr-native free-hostname subscriptions (identity claims)."""
-        _guard(lambda: _run_tool("dns.subscriptions", {}), output_as)
+        _forward("dns.subscriptions", {}, output_as)
 
     @dns.command("unsubscribe")
     def dns_unsubscribe(
@@ -2355,7 +2363,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @catalog.command("list")
     def catalog_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List the trusted native catalogue projection."""
-        _guard(lambda: _run_tool("catalog.list", {}), output_as)
+        _forward("catalog.list", {}, output_as)
 
     @catalog.command("get")
     def catalog_get(
@@ -2363,7 +2371,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Resolve one app from the trusted projection."""
-        _guard(lambda: _run_tool("catalog.get", {"app_id": app_id}), output_as)
+        _forward("catalog.get", {"app_id": app_id}, output_as)
 
     @catalog.command("publish")
     def catalog_publish(
@@ -2385,7 +2393,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Verify a catalogue declaration event (id, signature, schema, trusted publisher)."""
-        _guard(lambda: _run_tool("catalog.verify", {"event_or_naddr": event}), output_as)
+        _forward("catalog.verify", {"event_or_naddr": event}, output_as)
 
     # -- updates ------------------------------------------------------------
 
@@ -2394,7 +2402,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @updates.command("check")
     def updates_check(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Pending app/system updates, from cache only (no network refresh)."""
-        _guard(lambda: _run_tool("updates.check", {}), output_as)
+        _forward("updates.check", {}, output_as)
 
     @updates.command("refresh")
     def updates_refresh(
@@ -2402,7 +2410,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Refresh cached update metadata (apt cache, app catalog sources)."""
-        _guard(lambda: _run_tool("updates.refresh", {"target": target}), output_as)
+        _forward("updates.refresh", {"target": target}, output_as)
 
     # -- nsites ------------------------------------------------------------
 
@@ -2411,7 +2419,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @nsite.command("status")
     def nsite_status(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Gateway status: enabled, mode, domain, service health."""
-        _guard(lambda: _run_tool("nsite.gateway.status", {}), output_as)
+        _forward("nsite.gateway.status", {}, output_as)
 
     @nsite.command("enable")
     def nsite_enable(
@@ -2452,7 +2460,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @nsite.command("list")
     def nsite_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Registered sites and the gateway mode."""
-        _guard(lambda: _run_tool("nsite.list", {}), output_as)
+        _forward("nsite.list", {}, output_as)
 
     @nsite.command("inspect")
     def nsite_inspect(
@@ -2461,7 +2469,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """One registered site record."""
-        _guard(lambda: _run_tool("nsite.inspect", {"pubkey": pubkey, "d": d}), output_as)
+        _forward("nsite.inspect", {"pubkey": pubkey, "d": d}, output_as)
 
     @nsite.command("register")
     def nsite_register(
@@ -2663,7 +2671,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @nsite.command("domain-list")
     def nsite_domain_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List attached custom domains."""
-        _guard(lambda: _run_tool("nsite.domain.list", {}), output_as)
+        _forward("nsite.domain.list", {}, output_as)
 
     # -- logs ---------------------------------------------------------------
 
@@ -2680,7 +2688,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Query a deliberately allowlisted set of system journals."""
-        _guard(lambda: _run_tool("logs.read", {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines}), output_as)
+        _forward("logs.read", {"units": units, "since": since, "until": until, "priority": priority, "grep": grep, "lines": lines}, output_as)
 
     @logs.command("web")
     def logs_web(
@@ -2693,7 +2701,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Read bounded, structured Nginx access/error log records."""
-        _guard(lambda: _run_tool("logs.web", {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines}), output_as)
+        _forward("logs.web", {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines}, output_as)
 
     # -- user ---------------------------------------------------------------
 
@@ -2702,7 +2710,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @user.command("list")
     def user_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List YunoHost user accounts."""
-        _guard(lambda: _run_tool("user.list", {}), output_as)
+        _forward("user.list", {}, output_as)
 
     @user.command("create")
     def user_create(
@@ -2773,7 +2781,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @user_group.command("list")
     def user_group_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List YunoHost user groups and their members."""
-        _guard(lambda: _run_tool("user.group.list", {}), output_as)
+        _forward("user.group.list", {}, output_as)
 
     @user_group.command("create")
     def user_group_create(
@@ -2827,7 +2835,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @user_permission.command("list")
     def user_permission_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List app/system permissions and allowed users/groups."""
-        _guard(lambda: _run_tool("user.permission.list", {}), output_as)
+        _forward("user.permission.list", {}, output_as)
 
     @user_permission.command("info")
     def user_permission_info(
@@ -2835,7 +2843,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """One permission's full info."""
-        _guard(lambda: _run_tool("user.permission.info", {"permission": permission}), output_as)
+        _forward("user.permission.info", {"permission": permission}, output_as)
 
     @user_permission.command("add")
     def user_permission_add(
@@ -2965,7 +2973,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @network.command("public-ip")
     def network_public_ip(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Current public IPv4/IPv6 address."""
-        _guard(lambda: _run_tool("network.public_ip", {}), output_as)
+        _forward("network.public_ip", {}, output_as)
 
     # -- credential ----------------------------------------------------------
 
@@ -3005,7 +3013,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     @credential.command("list")
     def credential_list(provider: str = typer.Option(None, "--provider", help="filter by provider"), output_as: str = typer.Option(None, "--output-as")) -> None:
         """List configured DNS credential references (names only)."""
-        _guard(lambda: _run_tool("credential.list", {"provider": provider}), output_as)
+        _forward("credential.list", {"provider": provider}, output_as)
 
     # -- package ------------------------------------------------------------
 

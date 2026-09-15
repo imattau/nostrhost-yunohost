@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import io
 import json
-import os
 
-from nostr_sdk import Keys
 from typer.testing import CliRunner
 
 from nostrhost import api as api_module
@@ -26,16 +24,12 @@ from yunohost.nostr_operations import (
     build_approval,
     execution_progress,
 )
+from conftest import new_key
 from yunohost.nostr_operationsd import OperationEngine
 
 
 # --------------------------------------------------------------------------- #
 # helpers (mirror tests_nostr/test_nostr_operationsd.py)
-
-def new_key():
-    sk = os.urandom(32).hex()
-    pk = Keys.parse(sk).public_key().to_hex()
-    return sk, pk
 
 
 class FakeBackend:
