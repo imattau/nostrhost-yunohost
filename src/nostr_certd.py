@@ -36,8 +36,6 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
-from OpenSSL import crypto  # noqa: PLC0415  (same lazy dep as certificate.py)
-
 logger = logging.getLogger("nostr-certd")
 
 CERT_FOLDER = Path("/etc/yunohost/certs")
@@ -47,16 +45,20 @@ CADDY_CERT_DIR = CADDY_STORAGE / "certificates"
 
 def _leaf_not_after(crt_path: Path) -> datetime:
     """Not-after of the leaf (first) certificate in a PEM chain, naive-UTC."""
-    with crt_path.open("rb") as f:
-        cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
-    return datetime.strptime(cert.get_notAfter().decode(), "%Y%m%d%H%M%SZ")
+    from cryptography import x509
+
+    cert = x509.load_pem_x509_certificate(crt_path.read_bytes())
+    return cert.not_valid_after
 
 
 def _leaf_issuer(crt_path: Path) -> str:
     """Issuer common name of the leaf certificate."""
-    with crt_path.open("rb") as f:
-        cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
-    return cert.get_issuer().CN
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    cert = x509.load_pem_x509_certificate(crt_path.read_bytes())
+    common_names = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return common_names[0].value if common_names else ""
 
 
 def _pem_fingerprint(path: Path) -> str:

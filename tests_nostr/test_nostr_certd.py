@@ -2,20 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-import sys
-import types
 
 import yaml
-
-# The lightweight tests_nostr environment intentionally omits PyOpenSSL.  The
-# main/managed-service tests below do not parse certificates, so provide only
-# the import surface needed to load the module.
-if importlib.util.find_spec("OpenSSL") is None:
-    openssl = types.ModuleType("OpenSSL")
-    openssl.crypto = types.SimpleNamespace()
-    sys.modules["OpenSSL"] = openssl
 
 from yunohost import nostr_certd
 

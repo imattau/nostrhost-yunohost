@@ -1,3 +1,13 @@
+yunohost (12.1.41.52) stable; urgency=low
+
+  * Replace legacy PyOpenSSL certificate parsing, key generation and CSR
+    generation with cryptography. This fixes domain.cert.info and future
+    nostrhost-certd exports on systems whose OpenSSL bindings no longer expose
+    GEN_EMAIL; certificate status does not require email metadata.
+  * Drop the now-unused direct python3-openssl package dependency.
+
+ -- NostrHost <noreply@nostrhost.org>  Tue, 15 Sep 2026 04:15:00 +0000
+
 yunohost (12.1.41.51) stable; urgency=low
 
   * Fix nostrhost-certd service health reporting by monitoring its active
