@@ -1,3 +1,19 @@
+yunohost (12.1.41.53) stable; urgency=low
+
+  * Merge the remote-signer line (origin/dev) into the release branch:
+    /nostr/signers routes for remote-signer session management,
+    bunker-signed operation approvals (approval/rejection templates plus
+    /package/operations* list/get/approve/reject routes that validate and
+    publish a browser-signed kind-2201/2202 event instead of always using
+    the server-held admin key), read-only /catalog/list and /catalog/get
+    HTTP routes, and a service.status fix for requests with no names query.
+  * nsite API routes are now scope-aware: /package/nsite/* accepts any
+    linked identity holding the matching kind-31100 granted scope
+    (nsites.read / nsites.publish / nsites.admin), enabling the portal
+    "My site" non-admin publish surface (nsites Phase 5 / D8).
+
+ -- NostrHost <noreply@nostrhost.org>  Tue, 15 Sep 2026 12:30:00 +0000
+
 yunohost (12.1.41.52) stable; urgency=low
 
   * Replace legacy PyOpenSSL certificate parsing, key generation and CSR
