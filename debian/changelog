@@ -1,3 +1,20 @@
+yunohost (12.1.41.54) stable; urgency=low
+
+  * Security review H4/H5/M10 remediation:
+    - H4: admin console access is now a host-only cookie (nostrhost.console)
+      plus a per-request X-Nostrhost-CSRF header on the session-auth admin
+      API; the /package/* native-API routes are exposed only on the primary
+      domain (caddy_domain.conf no longer routes them per-domain).
+    - H5: strict Pydantic input models and new identity.write /
+      capability.write / agent.write scopes gate the identity, capability
+      and agent daemon tools (no more permissive catch-all arguments).
+    - M10: nsite HTTP probes are pinned and block private/loopback/link-local
+      targets; relay URLs are validated to ws/wss only.
+  * Includes the dedupe refactor (origin/nostrhost #12/#13): collapsed
+    dispatch-layer, operation-wrapper and logging duplication.
+
+ -- NostrHost <noreply@nostrhost.org>  Wed, 16 Sep 2026 12:00:00 +0000
+
 yunohost (12.1.41.53) stable; urgency=low
 
   * Merge the remote-signer line (origin/dev) into the release branch:
