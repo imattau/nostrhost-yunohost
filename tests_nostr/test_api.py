@@ -18,6 +18,7 @@ import pytest
 
 from nostrhost import api as api_module
 from nostrhost.api import ApiError, build_app
+from nostrhost.core import NostrHostError
 
 
 # --------------------------------------------------------------------------- #
@@ -1013,6 +1014,34 @@ def test_get_service_status_names_query(app, monkeypatch):
     assert captured["names"] == ["caddy", "nginx"]
 
 
+def test_get_service_status_no_query(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"caddy": {"status": "running"}}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.status", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/service/status")
+    assert status == "200"
+    assert captured == {}
+    assert json.loads(body)["caddy"]["status"] == "running"
+
+
+def test_post_service_control(app, monkeypatch):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"service": kwargs["name"], "action": kwargs["action"], "status": "running"}
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.control", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/service/control", {"name": "caddy", "action": "restart"})
+    assert status == "200"
+    assert captured == {"name": "caddy", "action": "restart"}
+    assert json.loads(body)["status"] == "running"
+
+
 def test_post_app_remove_purge(app, monkeypatch):
     captured = {}
 
@@ -1454,6 +1483,36 @@ def test_post_settings_reset_all_uses_signed_chain(app, monkeypatch):
     assert calls == [("settings.reset_all", {})]
 
 
+def test_agent_init(app, monkeypatch):
+    monkeypatch.setattr(api_module, "_agent_init", lambda: {"configured": True, "agent_pubkey": "abcd"})
+    status, _, body = wsgi_request(app, "POST", "/package/agent/init")
+    assert status == "200"
+    assert json.loads(body)["agent_pubkey"] == "abcd"
+
+
+def test_agent_disable(app, monkeypatch):
+    captured = {}
+
+    def fake(action):
+        captured["action"] = action
+        return {"service": "nostrhost-agent.service", "action": action}
+
+    monkeypatch.setattr(api_module, "_agent_service", fake)
+    status, _, body = wsgi_request(app, "POST", "/package/agent/disable")
+    assert status == "200"
+    assert captured["action"] == "disable"
+
+
+def test_agent_init_error_maps_to_400(app, monkeypatch):
+    def boom():
+        raise NostrHostError("nostrhost-agent is not installed")
+
+    monkeypatch.setattr(api_module, "_agent_init", boom)
+    status, _, body = wsgi_request(app, "POST", "/package/agent/init")
+    assert status == "400"
+    assert json.loads(body)["code"] == "operation_failed"
+
+
 def test_handler_error_maps_to_400(app, monkeypatch):
     def boom(**kwargs):
         raise ApiError(400, "operation_failed", "boom")
@@ -1502,3 +1561,133 @@ def test_mcp_ca_bundle_returns_pem_when_available(app, monkeypatch):
     data = json.loads(body)
     assert data["available"] is True
     assert data["pem"] == "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"
+
+
+# --------------------------------------------------------------------------- #
+# operations (kind-2200..2204 approval chain)
+
+def test_package_operations_list(app, monkeypatch):
+    captured = {}
+
+    def fake(*, limit, control_relay):
+        captured.update({"limit": limit, "control_relay": control_relay})
+        return [{"request_id": "a" * 64, "state": "REQUESTED"}]
+
+    monkeypatch.setattr(api_module, "list_operations", fake)
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    status, _, body = wsgi_request(app, "GET", "/package/operations?limit=5")
+    assert status == "200"
+    assert captured["limit"] == 5
+    assert json.loads(body)["entries"][0]["state"] == "REQUESTED"
+
+
+def test_package_operations_get_found(app, monkeypatch):
+    monkeypatch.setattr(api_module, "get_operation", lambda rid, **kw: {"request_id": rid, "state": "APPROVED"})
+    status, _, body = wsgi_request(app, "GET", "/package/operations/" + "a" * 64)
+    assert status == "200"
+    assert json.loads(body)["state"] == "APPROVED"
+
+
+def test_package_operations_get_missing_404(app, monkeypatch):
+    monkeypatch.setattr(api_module, "get_operation", lambda rid, **kw: None)
+    status, _, body = wsgi_request(app, "GET", "/package/operations/" + "a" * 64)
+    assert status == "404"
+    assert json.loads(body)["code"] == "not_found"
+
+
+def test_package_operations_approval_template(app, monkeypatch):
+    captured = {}
+
+    def fake(admin_pubkey, request_id, note):
+        captured.update({"admin_pubkey": admin_pubkey, "request_id": request_id, "note": note})
+        return {"kind": 2201, "pubkey": admin_pubkey}
+
+    monkeypatch.setattr(api_module, "build_approval_template", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/operations/" + "a" * 64 + "/approval-template?note=looks+fine")
+    assert status == "200"
+    assert captured["admin_pubkey"] == "admin-pubkey"
+    assert captured["note"] == "looks fine"
+
+
+def test_package_operations_rejection_template(app, monkeypatch):
+    captured = {}
+
+    def fake(admin_pubkey, request_id, reason):
+        captured.update({"admin_pubkey": admin_pubkey, "request_id": request_id, "reason": reason})
+        return {"kind": 2202, "pubkey": admin_pubkey}
+
+    monkeypatch.setattr(api_module, "build_rejection_template", fake)
+    status, _, body = wsgi_request(app, "GET", "/package/operations/" + "a" * 64 + "/rejection-template")
+    assert status == "200"
+    assert captured["reason"] is None
+
+
+def test_package_operations_approve_falls_back_to_admin_key(app, monkeypatch):
+    captured = {}
+
+    def fake(request_id, **kwargs):
+        captured.update({"request_id": request_id, **kwargs})
+        return {"id": "event-id"}
+
+    monkeypatch.setattr(api_module, "approve_operation", fake)
+    monkeypatch.setattr(api_module, "_config_admin_sk", lambda: None)
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/approve", {"note": "ok"})
+    assert status == "200"
+    data = json.loads(body)
+    assert data["ok"] is True
+    assert data["event_id"] == "event-id"
+    assert captured["note"] == "ok"
+
+
+def test_package_operations_approve_with_bunker_event(app, monkeypatch):
+    signed = {"id": "e" * 64, "pubkey": "admin-pubkey", "kind": 2201, "tags": [], "content": "", "sig": "s" * 128}
+    published = {}
+
+    monkeypatch.setattr(api_module, "validate_signed_approval", lambda event, rid: event)
+    monkeypatch.setattr(api_module, "publish_to_relay", lambda relay, event: published.update({"relay": relay, "event": event}))
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: "ws://relay.test")
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/approve", {"event": signed})
+    assert status == "200"
+    data = json.loads(body)
+    assert data["event_id"] == signed["id"]
+    assert published["relay"] == "ws://relay.test"
+
+
+def test_package_operations_approve_rejects_event_from_another_pubkey(app, monkeypatch):
+    signed = {"id": "e" * 64, "pubkey": "someone-else", "kind": 2201, "tags": [], "content": "", "sig": "s" * 128}
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/approve", {"event": signed})
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+
+
+def test_package_operations_approve_rejects_non_dict_event(app):
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/approve", {"event": "not-a-dict"})
+    assert status == "400"
+    assert json.loads(body)["code"] == "invalid_body"
+
+
+def test_package_operations_reject_falls_back_to_admin_key(app, monkeypatch):
+    captured = {}
+
+    def fake(request_id, **kwargs):
+        captured.update({"request_id": request_id, **kwargs})
+        return {"id": "event-id"}
+
+    monkeypatch.setattr(api_module, "reject_operation", fake)
+    monkeypatch.setattr(api_module, "_config_admin_sk", lambda: None)
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/reject", {"reason": "no"})
+    assert status == "200"
+    assert captured["reason"] == "no"
+
+
+def test_package_operations_reject_with_bunker_event(app, monkeypatch):
+    signed = {"id": "e" * 64, "pubkey": "admin-pubkey", "kind": 2202, "tags": [], "content": "", "sig": "s" * 128}
+
+    monkeypatch.setattr(api_module, "validate_signed_rejection", lambda event, rid: event)
+    monkeypatch.setattr(api_module, "publish_to_relay", lambda relay, event: None)
+    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/reject", {"event": signed})
+    assert status == "200"
+    assert json.loads(body)["event_id"] == signed["id"]

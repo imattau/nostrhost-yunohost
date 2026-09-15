@@ -18,6 +18,7 @@ from yunohost.nostr_operations import (
     TOOLS,
     approve_operation,
     build_approval,
+    build_approval_template,
     build_capability,
     build_delegation,
     build_delegation_revocation,
@@ -25,12 +26,17 @@ from yunohost.nostr_operations import (
     build_execution_started,
     build_operation_request,
     build_rejection,
+    build_rejection_template,
+    get_operation,
     grant_capability,
     known_tools,
     list_capabilities,
+    list_operations,
     reject_operation,
     request_operation,
     tool_spec,
+    validate_signed_approval,
+    validate_signed_rejection,
 )
 
 
@@ -66,9 +72,19 @@ def test_registry_has_the_safe_tools():
         "backup.info",
         "backup.list",
         "backup.restore",
+        "catalog.announce",
+        "catalog.announcements",
+        "catalog.attest",
+        "catalog.candidates",
+        "catalog.declare",
         "catalog.get",
+        "catalog.history",
         "catalog.list",
+        "catalog.profile.get",
+        "catalog.profile.set",
         "catalog.publish",
+        "catalog.reverify",
+        "catalog.trust",
         "catalog.verify",
         "credential.list",
         "credential.remove",
@@ -246,6 +262,12 @@ def test_registry_has_the_safe_tools():
             "diagnosis.ignored",
             "catalog.list",
             "catalog.get",
+            "catalog.announcements",
+            "catalog.candidates",
+            "catalog.history",
+            "catalog.profile.get",
+            "catalog.reverify",
+            "catalog.trust",
             "updates.check",
             "updates.refresh",
             "system.migrations",
@@ -542,3 +564,149 @@ def test_operation_events_carry_first_class_actor():
     result = build_execution_result(sk, pk, request["id"], ok=True, actor_pubkey=actor)
     assert ["actor", actor] in started["tags"]
     assert ["actor", actor] in result["tags"]
+
+
+# --------------------------------------------------------------------------- #
+# NIP-46 (bunker/remote-signer) approval + rejection templates
+
+
+def _sign_with_key(sk: str, event: dict) -> dict:
+    """Fill in id/pubkey/sig exactly the way a NIP-46 bunker signer would."""
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag, Timestamp
+
+    keys = Keys.parse(sk)
+    built = (
+        EventBuilder(Kind(event["kind"]), event["content"])
+        .tags([Tag.parse(tag) for tag in event["tags"]])
+        .custom_created_at(Timestamp.from_secs(event["created_at"]))
+        .finalize(keys)
+    )
+    return {
+        "id": built.id().to_hex(),
+        "pubkey": keys.public_key().to_hex(),
+        "created_at": event["created_at"],
+        "kind": event["kind"],
+        "tags": event["tags"],
+        "content": event["content"],
+        "sig": built.signature(),
+    }
+
+
+def test_nip46_approval_round_trip():
+    admin_sk, admin_pk = new_key()
+    request_id = "d" * 64
+    template = build_approval_template(admin_pk, request_id, "looks fine")
+    signed = _sign_with_key(admin_sk, template)
+    validated = validate_signed_approval(signed, request_id)
+    assert validated["pubkey"] == admin_pk
+    assert ["t", "nip46"] in validated["tags"]
+
+
+def test_nip46_rejection_round_trip():
+    admin_sk, admin_pk = new_key()
+    request_id = "e" * 64
+    template = build_rejection_template(admin_pk, request_id, "not authorized")
+    signed = _sign_with_key(admin_sk, template)
+    validated = validate_signed_rejection(signed, request_id)
+    assert validated["pubkey"] == admin_pk
+    assert json.loads(validated["content"])["reason"] == "not authorized"
+
+
+def test_nip46_approval_rejects_wrong_request_id():
+    admin_sk, admin_pk = new_key()
+    template = build_approval_template(admin_pk, "d" * 64, None)
+    signed = _sign_with_key(admin_sk, template)
+    with pytest.raises(OperationError, match="does not target"):
+        validate_signed_approval(signed, "f" * 64)
+
+
+def test_nip46_approval_rejects_tampered_content():
+    admin_sk, admin_pk = new_key()
+    request_id = "d" * 64
+    template = build_approval_template(admin_pk, request_id, None)
+    signed = _sign_with_key(admin_sk, template)
+    signed["content"] = json.dumps({"note": "tampered"})
+    with pytest.raises(OperationError, match="does not match its contents"):
+        validate_signed_approval(signed, request_id)
+
+
+def test_nip46_rejection_rejects_wrong_kind():
+    admin_sk, admin_pk = new_key()
+    request_id = "d" * 64
+    template = build_rejection_template(admin_pk, request_id, None)
+    template["kind"] = KIND_OPERATION_APPROVAL  # signer/caller mixed up approve vs reject
+    signed = _sign_with_key(admin_sk, template)
+    with pytest.raises(OperationError, match="non-rejection"):
+        validate_signed_rejection(signed, request_id)
+
+
+# --------------------------------------------------------------------------- #
+# listing operations from the control relay's chain events
+
+
+def test_list_operations_reduces_chain_to_state(monkeypatch):
+    sk, pk = new_key()
+    admin_sk, admin_pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    approval = build_approval(admin_sk, admin_pk, request["id"])
+
+    monkeypatch.setattr(
+        "yunohost.nostr_operations.fetch_chain_events",
+        lambda relay, **kw: [request, approval],
+    )
+
+    entries = list_operations()
+    assert len(entries) == 1
+    assert entries[0]["request_id"] == request["id"]
+    assert entries[0]["tool"] == "system.version"
+    assert entries[0]["state"] == "APPROVED"
+
+
+def test_list_operations_marks_failed_result(monkeypatch):
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    started = build_execution_started(sk, pk, request["id"])
+    result = build_execution_result(sk, pk, request["id"], ok=False, error="boom")
+
+    monkeypatch.setattr(
+        "yunohost.nostr_operations.fetch_chain_events",
+        lambda relay, **kw: [request, started, result],
+    )
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "FAILED"
+
+
+def test_list_operations_ignores_orphaned_followon(monkeypatch):
+    """A 2201 whose 2200 isn't in this relay snapshot is skipped, not crashed on."""
+    admin_sk, admin_pk = new_key()
+    orphan_approval = build_approval(admin_sk, admin_pk, "a" * 64)
+
+    monkeypatch.setattr(
+        "yunohost.nostr_operations.fetch_chain_events",
+        lambda relay, **kw: [orphan_approval],
+    )
+
+    assert list_operations() == []
+
+
+def test_get_operation_returns_none_when_missing(monkeypatch):
+    monkeypatch.setattr("yunohost.nostr_operations.fetch_chain_events", lambda relay, **kw: [])
+    assert get_operation("a" * 64) is None
+
+
+def test_list_operations_respects_limit(monkeypatch):
+    sk, pk = new_key()
+    # Distinct actor tags so each request hashes to a different event id -
+    # otherwise three identical (tool, args, created_at) requests would
+    # collide onto the same id and this test wouldn't exercise the limit.
+    requests = [
+        build_operation_request(sk, pk, "system.version", {}, actor_pubkey=new_key()[1])
+        for _ in range(3)
+    ]
+
+    monkeypatch.setattr("yunohost.nostr_operations.fetch_chain_events", lambda relay, **kw: requests)
+
+    assert len(list_operations(limit=2)) == 2
+    assert len(list_operations()) == 3
