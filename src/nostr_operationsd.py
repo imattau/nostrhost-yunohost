@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .nostr_identity import (
+    _configure_daemon_logging,
     _init_headless_yunohost,
     _is_hex64,
     _operator_config,
@@ -593,7 +594,7 @@ async def subscribe_loop(
 
 def run() -> None:
     """Entry point for bin/nostr-operationsd."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _configure_daemon_logging()
     _init_headless_yunohost()
     _require_bootstrapped()
     cfg = _operator_config()

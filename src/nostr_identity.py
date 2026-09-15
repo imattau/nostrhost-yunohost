@@ -18,6 +18,7 @@ transport and store are injectable for tests.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import time
@@ -106,6 +107,13 @@ def _store(db_path: str | Path | None = None):
     from nostrhost_auth.identity.mappings import MappingStore
 
     return MappingStore(Path(db_path or os.environ.get("NOSTRHOST_IDENTITY_DB", DEFAULT_IDENTITY_DB)))
+
+
+def _configure_daemon_logging(level: int = logging.INFO) -> None:
+    """Shared ``logging.basicConfig`` for the projector/executor daemon
+    entrypoints (nostr-identityd, nostr-operationsd, nostr-permissiond, ...)
+    so their log format stays identical without each ``run()`` repeating it."""
+    logging.basicConfig(level=level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
 def _init_headless_yunohost() -> None:

@@ -40,9 +40,26 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .nostr_identity import _operator_config, _sign_event, publish_to_relay
+from .nostr_identity import _is_hex64, _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
-from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models
+from .nostrhost.domains.operations import (  # noqa: E402 - domain.*/dns.*/credential.* handlers
+    _safe_credential_list,
+    _safe_credential_remove,
+    _safe_credential_set,
+    _safe_dns_apply,
+    _safe_dns_plan,
+    _safe_dns_subscribe,
+    _safe_dns_subscriptions,
+    _safe_dns_unsubscribe,
+    _safe_dns_verify,
+    _safe_dns_watch,
+    _safe_domain_add,
+    _safe_domain_inspect,
+    _safe_domain_list,
+    _safe_domain_remove,
+    _safe_network_public_ip,
+)
+from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models + handlers
     DomainAttachArgs,
     DomainDetachArgs,
     GatewayArgs,
@@ -55,6 +72,24 @@ from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models
     SiteArgs,
     SiteRegisterArgs,
     ValidateManifestArgs,
+    _safe_gateway_configure as _safe_nsite_gateway_configure,
+    _safe_gateway_disable as _safe_nsite_gateway_disable,
+    _safe_gateway_enable as _safe_nsite_gateway_enable,
+    _safe_gateway_status as _safe_nsite_gateway_status,
+    _safe_nsite_domain_attach,
+    _safe_nsite_domain_detach,
+    _safe_nsite_domain_list,
+    _safe_nsite_inspect,
+    _safe_nsite_list,
+    _safe_nsite_mirror,
+    _safe_nsite_publish,
+    _safe_nsite_publish_plan,
+    _safe_nsite_reachability,
+    _safe_nsite_register,
+    _safe_nsite_resolve,
+    _safe_nsite_snapshot,
+    _safe_nsite_unregister,
+    _safe_nsite_validate,
 )
 
 # Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
@@ -561,202 +596,14 @@ def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None
     return {"changes": report, "_ok": all(row["status"] == "executed" for row in report)}
 
 
-def _safe_domain_list(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_domain_list as _impl
-
-    return _impl(**args)
-
-
-def _safe_domain_inspect(domain: str = "", **args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_domain_inspect as _impl
-
-    return _impl(domain=domain, **args)
-
-
-def _safe_domain_add(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_domain_add as _impl
-
-    return _impl(**args)
-
-
-def _safe_domain_remove(domain: str = "", force: bool = False, **args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_domain_remove as _impl
-
-    return _impl(domain=domain, force=force, **args)
-
-
-def _safe_nsite_gateway_status(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_gateway_status as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_gateway_enable(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_gateway_enable as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_gateway_disable(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_gateway_disable as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_gateway_configure(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_gateway_configure as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_list(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_list as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_inspect(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_inspect as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_register(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_register as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_unregister(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_unregister as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_validate(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_validate as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_publish_plan(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_publish_plan as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_mirror(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_mirror as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_domain_list(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_domain_list as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_domain_attach(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_domain_attach as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_domain_detach(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_domain_detach as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_publish(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_publish as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_snapshot(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_snapshot as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_resolve(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_resolve as _impl
-
-    return _impl(**args)
-
-
-def _safe_nsite_reachability(**args: Any) -> dict[str, Any]:
-    from .nostrhost.nsites.operations import _safe_nsite_reachability as _impl
-
-    return _impl(**args)
-
-
-def _safe_dns_plan(domain: str = "", **args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_plan as _impl
-
-    return _impl(domain=domain, **args)
-
-
-def _safe_dns_apply(domain: str = "", **args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_apply as _impl
-
-    return _impl(domain=domain, **args)
-
-
-def _safe_dns_verify(domain: str = "", **args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_verify as _impl
-
-    return _impl(domain=domain, **args)
-
-
-def _safe_dns_watch(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_watch as _impl
-
-    return _impl(**args)
-
-
-def _safe_dns_subscribe(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_subscribe as _impl
-
-    return _impl(**args)
-
-
-def _safe_dns_subscriptions(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_subscriptions as _impl
-
-    return _impl(**args)
-
-
-def _safe_dns_unsubscribe(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_dns_unsubscribe as _impl
-
-    return _impl(**args)
-
-
-def _safe_network_public_ip(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_network_public_ip as _impl
-
-    return _impl(**args)
-
-
-def _safe_credential_set(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_credential_set as _impl
-
-    return _impl(**args)
-
-
-def _safe_credential_remove(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_credential_remove as _impl
-
-    return _impl(**args)
-
-
-def _safe_credential_list(**args: Any) -> dict[str, Any]:
-    from .nostrhost.domains.operations import _safe_credential_list as _impl
-
-    return _impl(**args)
+# domain.*, nsite.* and dns.*/credential.* tools call their implementations
+# in nostrhost/domains/operations.py and nostrhost/nsites/operations.py
+# directly (imported above) — the OperationEngine invokes ToolSpec.handler
+# with **args, and those implementations already accept the right keyword
+# arguments, so a forwarding wrapper here would add nothing but another
+# place to keep in sync. Only tools with real dispatch logic (chain lookups,
+# lazy-imported backends) get a local function; see _safe_reconcile_apply
+# and _safe_rollback_apply above.
 
 
 def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
@@ -1155,10 +1002,6 @@ def _derive_pubkey(sk: str) -> str:
 
 def _e_tag(request_id: str) -> list[list[str]]:
     return [["e", request_id]]
-
-
-def _is_hex64(value: str) -> bool:
-    return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
 
 
 def _json_default(obj: Any) -> Any:
