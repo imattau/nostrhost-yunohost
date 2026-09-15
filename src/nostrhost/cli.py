@@ -184,6 +184,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "catalog.list": native_ops._safe_catalog_list,
     "catalog.get": native_ops._safe_catalog_get,
     "catalog.publish": native_ops._safe_catalog_publish,
+    "catalog.declare": native_ops._safe_catalog_declare,
     "catalog.verify": native_ops._safe_catalog_verify,
     "catalog.candidates": native_ops._safe_catalog_candidates,
     "catalog.attest": native_ops._safe_catalog_attest,

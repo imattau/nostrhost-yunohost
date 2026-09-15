@@ -1072,6 +1072,18 @@ def build_app(
         body = _json_body()
         return _run_tool("catalog.publish", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
 
+    @app.post("/package/catalog/declare")
+    def catalog_declare() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "catalog.declare",
+            {
+                "package": body.get("package"),
+                "repository": body.get("repository", ""),
+                "relays": body.get("relays", ""),
+            },
+        )
+
     @app.post("/package/catalog/verify")
     def catalog_verify() -> Any:
         body = _json_body()

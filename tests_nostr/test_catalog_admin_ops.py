@@ -48,6 +48,9 @@ def cli_fake(monkeypatch, boot):
         if "publish" in sub:
             assert stdin_data is not None
             return {"event_id": json.loads(stdin_data)["id"], "published": 1, "failed": 0, "relays": [{"relay": "ws://127.0.0.1:4848"}]}
+        if sub[0] == "ingest":
+            assert stdin_data is not None
+            return {"changed": True, "event_id": json.loads(stdin_data)["id"]}
         if sub[0] == "list":
             return {
                 "entries": [
@@ -106,6 +109,47 @@ def test_candidates_excludes_already_attested(boot, cli_fake, app_list_fake, tmp
     no._write_json_atomic(no._catalog_attestation_ledger_path(), [{"app_id": "other-app", "publisher": OTHER_PUBLISHER}])
     result = no._safe_catalog_candidates()
     assert result["candidates"] == []
+
+
+# --------------------------------------------------------------------------- #
+# declare
+
+def test_declare_signs_new_declaration_from_manifest(boot, cli_fake):
+    import nostrhost.native_ops as no
+
+    package = {"app": {"id": "my-native-app", "version": "0.2.0"}}
+    result = no._safe_catalog_declare(package=package, repository="https://git.example.com/my-native-app.git")
+    assert result["app_id"] == "my-native-app"
+
+    pub_call = next(c for c in cli_fake if "publish" in c[0])
+    event = json.loads(pub_call[1])
+    assert event["pubkey"] == boot["publisher_pubkey"]
+    assert event["kind"] == 32267
+    tags = dict((t[0], t[1]) for t in event["tags"])
+    assert tags["d"] == "my-native-app"
+    assert tags["platform"] == "native"
+    assert tags["repository"] == "https://git.example.com/my-native-app.git"
+    assert tags["version"] == "0.2.0"
+    assert tags["commit"] == tags["manifest"].split(":", 1)[1]
+    assert tags["manifest"] == tags["content"]
+
+    from nostr_sdk import Event
+
+    assert Event.from_json(json.dumps(event)).verify()
+
+
+def test_declare_requires_repository(boot, cli_fake):
+    import nostrhost.native_ops as no
+
+    with pytest.raises(OperationError, match="repository"):
+        no._safe_catalog_declare(package={"app": {"id": "x", "version": "1"}}, repository="")
+
+
+def test_declare_rejects_invalid_manifest(boot, cli_fake):
+    import nostrhost.native_ops as no
+
+    with pytest.raises(OperationError, match="invalid native package"):
+        no._safe_catalog_declare(package={"nope": True}, repository="https://git.example.com/x.git")
 
 
 # --------------------------------------------------------------------------- #

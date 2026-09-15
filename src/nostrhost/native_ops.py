@@ -211,6 +211,15 @@ class CatalogPublishArgs(_Strict):
     )
 
 
+class CatalogDeclareArgs(_Strict):
+    package: dict[str, Any] = Field(..., description="a native package manifest, the same object sent to package.plan")
+    repository: str = Field(..., description="a URL where this exact manifest content is published, for provenance")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
+    )
+
+
 class CatalogCandidatesArgs(_Strict):
     pass
 
@@ -802,6 +811,73 @@ def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> d
     content_json = json.dumps({"name": coordinate.get("version") or app_id, "architectures": archs}, separators=(",", ":"))
 
     cfg = _operator_config()
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
+
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
+    return {
+        "app_id": app_id,
+        "publisher_pubkey": cfg.publisher_pubkey,
+        "event_id": event["id"],
+        "published": result,
+        "ingested": ingest,
+    }
+
+
+def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
+    """Declare a brand-new app in the catalogue from an authored native
+    package manifest - the missing link between the package-authoring
+    screen's "review plan" and actually getting the package installable by
+    anyone else.
+
+    Unlike catalog.publish (which re-declares an *existing* trusted
+    catalogue entry), this builds a fresh kind-32267 declaration from a
+    manifest that has never been declared before. It reuses package.plan's
+    own validation and its exact manifest_sha256 (package_plan_envelope's
+    canonical-JSON hash) as the authoritative provenance hash, so a
+    declaration can never drift from what package.plan would compute for
+    the same manifest.
+
+    This does not (yet) independently re-clone `repository` to confirm the
+    manifest actually lives there the way catalog.reverify does for
+    YunoHost-style git packages - the Go catalogue library's repository
+    verification assumes a manifest.toml layout, not this project's native
+    JSON package schema. `repository` is provenance the admin asserts, not
+    yet independently checked; commit/manifest/content hashes are all the
+    manifest's own content hash, since a native package has no separate
+    build artifact distinct from its manifest.
+    """
+    if extra:
+        raise OperationError(f"catalog.declare does not accept extra args: {sorted(extra)}")
+    if not isinstance(package, dict):
+        raise OperationError("catalog.declare requires a package object")
+    if not repository:
+        raise OperationError("catalog.declare requires a repository URL where this exact manifest is published")
+
+    from nostrhost.package_engine import package_plan_envelope
+
+    try:
+        envelope = package_plan_envelope(package)
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"invalid native package: {exc}") from exc
+
+    app_id = envelope["package"]["id"]
+    version = envelope["package"]["version"]
+    manifest_hash = envelope["manifest_sha256"]
+
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    cfg = _operator_config()
+    tags = [
+        ["d", app_id],
+        ["platform", "native"],
+        ["repository", repository],
+        ["version", version],
+        ["commit", manifest_hash],
+        ["manifest", f"sha256:{manifest_hash}"],
+        ["content", f"sha256:{manifest_hash}"],
+    ]
+    content_json = json.dumps({"name": app_id}, separators=(",", ":"))
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
 
     result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
@@ -2134,6 +2210,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="catalog.publish", handler=_safe_catalog_publish, scope=SCOPE_CATALOG_PUBLISH,
         input_model=CatalogPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
         description="re-declare a trusted app under the node's catalogue publisher key and publish it (admin approval)",
+    ),
+    "catalog.declare": ToolSpec(
+        name="catalog.declare", handler=_safe_catalog_declare, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogDeclareArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="declare a new app in the catalogue from an authored native package manifest (admin approval)",
     ),
     "catalog.candidates": ToolSpec(
         name="catalog.candidates", handler=_safe_catalog_candidates, scope=SCOPE_CATALOG_READ,
