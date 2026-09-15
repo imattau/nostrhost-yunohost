@@ -79,6 +79,39 @@ class Harness:
         return [e for e in self.published if e["kind"] == kind]
 
 
+def test_non_admin_capability_grant_is_ignored():
+    """A kind-31100 grant authored by anyone other than an admin is not
+    authoritative (defense in depth on top of the relay's author rule)."""
+    h = Harness()
+    _, victim_pk = new_key()
+    ev = build_capability(h.agent_sk, h.agent_pk, victim_pk, "agent", ["app.install", "system.upgrade"])
+    assert not h.engine.handle_event(ev)
+    assert h.engine.scopes[victim_pk] == set()
+
+
+def test_restart_replay_does_not_reexecute_terminal_request():
+    """A daemon restart re-feeds the stored chain from the relay. A request
+    that already reached a terminal 2204 result must NOT execute again."""
+    h = Harness()
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
+    request_id = ev["id"]
+    assert handled and h.approve(request_id)
+    assert h.engine.state(request_id) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+
+    # Simulate a fresh daemon: empty records, then rebuild from a replay that
+    # includes the terminal result before re-feeding the request chain.
+    h.engine.records.clear()
+    h.engine.mark_executed({request_id})
+    h.engine.handle_event(ev)
+    h.engine.handle_event(build_approval(h.admin_sk, h.admin_pk, request_id))
+    h.engine.handle_event(build_execution_started(h.server_sk, h.server_pk, request_id))
+
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+    assert h.engine.state(request_id) is None or h.engine.state(request_id) != OpState.EXECUTING
+
+
 def _content(ev):
     return json.loads(ev["content"])
 
@@ -146,17 +179,45 @@ def test_owner_policy_requires_operator_approval():
     assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
 
 
-def test_e2e_preserves_actor_separately_from_request_signer():
+def test_e2e_actor_binding_rejects_non_admin_impersonation():
+    """A low-trust requester (the agent key) must NOT be able to name another
+    pubkey in the actor tag to inherit its scopes — the daemon rejects it
+    before any authorization check."""
     h = Harness()
     _, actor_pk = new_key()
     h.grant(["services.restart"], subject_pk=actor_pk)
     ev = build_operation_request(h.agent_sk, h.agent_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
     assert h.engine.handle_event(ev)
-    assert h.engine.records[ev["id"]].requester == h.agent_pk
-    assert h.engine.records[ev["id"]].actor == actor_pk
-    assert h.approve(ev["id"])
-    assert ["actor", actor_pk] in h.events_by_kind(2203)[0]["tags"]
-    assert ["actor", actor_pk] in h.events_by_kind(2204)[0]["tags"]
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert _content(h.events_by_kind(2204)[0])["reason"] == "unauthorized_actor"
+    assert h.backend.calls == []
+
+
+def test_trusted_broker_can_relay_actor_without_being_admin():
+    """M6: a scoped node key explicitly configured as a broker may relay the
+    authenticated client's npub in the actor tag — so the MCP never needs the
+    operator key — but is still not an admin."""
+    h = Harness()
+    broker_sk, broker_pk = new_key()
+    _, actor_pk = new_key()
+    h.grant(["services.restart"], subject_pk=actor_pk)
+    assert broker_pk not in h.engine._admins
+
+    engine = OperationEngine(
+        publish=h.published.append,
+        server_sk=h.server_sk,
+        admins=[h.admin_pk],
+        backend=h.backend,
+        brokers=[broker_pk],
+    )
+    engine.handle_event(build_capability(h.admin_sk, h.admin_pk, actor_pk, "agent", ["services.restart"]))
+    ev = build_operation_request(broker_sk, broker_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
+    assert engine.handle_event(ev)
+    assert engine.records[ev["id"]].actor == actor_pk
+    # Accepted and parked for approval (service.restart is approval-gated) —
+    # the key point is it was NOT auto-rejected for an unauthorized actor.
+    assert engine.records[ev["id"]].state == OpState.REQUESTED
+    assert h.backend.calls == []
 
 
 def test_actor_scope_gates_request_not_requester():
@@ -175,6 +236,36 @@ def test_actor_scope_gates_request_not_requester():
     assert h.engine.handle_event(ev2)
     assert h.engine.state(ev2["id"]) == OpState.SUCCEEDED
     assert ["actor", actor_pk] in h.events_by_kind(2204)[0]["tags"]
+
+
+def test_h5_identity_write_scope_gates_new_tools():
+    """H5: the newly registered identity/capability/agent writes are real
+    daemon operations — a non-admin needs the corresponding scope and a
+    request without it is auto-rejected."""
+    h = Harness()
+    # no grant -> rejected
+    ev, handled = h.request("identity.link", {"username": "alice", "pubkey_or_npub": "ab" * 32})
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+    assert h.backend.calls == []
+
+    # identity.write grant -> accepted and parked for approval
+    h.grant(["identity.write"])
+    ev2, handled2 = h.request("identity.link", {"username": "alice", "pubkey_or_npub": "ab" * 32, "signer_type": "nip07"})
+    assert handled2
+    assert h.engine.state(ev2["id"]) == OpState.REQUESTED
+    assert h.approve(ev2["id"])
+    assert h.engine.state(ev2["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls[0][0] == "identity.link"
+
+    # capability.write grant -> capability.grant runs through the chain
+    h.grant(["capability.write"])
+    ev3, handled3 = h.request("capability.grant", {"pubkey": "cd" * 32, "scopes": ["apps.read"]})
+    assert handled3
+    assert h.approve(ev3["id"])
+    assert h.engine.state(ev3["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls[1][0] == "capability.grant"
 
 
 def test_e2e_denied_requester_is_auto_rejected():

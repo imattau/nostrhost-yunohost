@@ -126,11 +126,13 @@ class OperationEngine:
         restic: Any = None,
         policy: Callable[[str, dict[str, Any], str], dict[str, Any] | bool | None] | None = None,
         policy_owner: str | None = None,
+        brokers: tuple[str, ...] | list[str] = (),
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
         self._server_pubkey = _derive_pubkey(server_sk)
         self._admins = tuple(admins)
+        self._brokers = tuple(brokers)
         self._backend = backend or YnhExecutorBackend()
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
@@ -140,6 +142,15 @@ class OperationEngine:
         self.scopes: dict[str, set[str]] = defaultdict(set)
         self.delegations: dict[str, dict[str, Any]] = {}
         self.revoked_delegations: set[str] = set()
+        # Request ids that already reached a terminal execution result (2204).
+        # Rebuilt from a fresh-connect replay before any request is re-fed, so
+        # a daemon restart can never re-run an already-executed write.
+        self.executed: set[str] = set()
+
+    def mark_executed(self, request_ids: set[str]) -> None:
+        """Record request ids whose execution already reached a terminal
+        result (used when rebuilding state from a relay replay)."""
+        self.executed.update(request_ids)
 
     # -- event intake ------------------------------------------------------ #
 
@@ -170,6 +181,11 @@ class OperationEngine:
             return False
         if request_id in self.records:
             return False  # replay of an already-seen request
+        if request_id in self.executed:
+            # This request already ran to a terminal result (a prior daemon
+            # run, or a replay rebuild). Never re-execute it: re-feeding its
+            # request/approval events on restart must be a no-op.
+            return False
 
         try:
             body = json.loads(event.get("content") or "{}")
@@ -187,6 +203,19 @@ class OperationEngine:
 
         record = OperationRecord(request_id=request_id, tool=tool, args=args, requester=requester, actor=actor.lower())
         self.records[request_id] = record
+
+        # Bind the `actor` tag to an authorised signer. The MCP adapter signs
+        # as a trusted node key and carries the authenticated client's npub in
+        # the actor tag, so a request naming a *different* actor than the
+        # signing key may only come from an admin or a configured trusted
+        # broker. Any other allowlisted writer (agent/notice/publisher — all
+        # low-trust) impersonating an admin here would otherwise bypass the
+        # scope check below. A broker is a scoped node key that is NOT an
+        # admin: it relays the client's actor, so it never needs the operator
+        # key (M6), while still not being able to impersonate arbitrary keys.
+        if actor != requester and requester not in self._admins and requester not in self._brokers:
+            self._reject(record, "unauthorized_actor")
+            return True
 
         spec = tool_spec(tool)
         if spec is None:
@@ -292,12 +321,19 @@ class OperationEngine:
             return False
         if kind == KIND_EXECUTION_RESULT:
             record.result = body
+            self.executed.add(request_id)
         return True
 
     def handle_capability(self, event: dict[str, Any]) -> bool:
-        """Project a 31100 grant: subject pubkey -> granted scopes."""
+        """Project a 31100 grant: subject pubkey -> granted scopes.
+
+        Only admin-authored grants are authoritative. The relay rejects forged
+        31100 at write time too, but the daemon re-checks so a relay policy
+        regression cannot silently expand scopes."""
         subject = _d_tag(event)
         if not subject:
+            return False
+        if event.get("pubkey") not in self._admins:
             return False
         try:
             body = json.loads(event.get("content") or "{}")
@@ -578,6 +614,21 @@ async def subscribe_loop(
                             # time the connection out during replay bursts.
                             await asyncio.to_thread(engine.handle_event, msg[2])
                     elif msg[0] == "EOSE":
+                        # Rebuild the set of already-executed request ids from
+                        # the terminal results in this replay BEFORE feeding
+                        # the sorted chain, so a daemon restart can never
+                        # re-run an approved write (the replayed 2200/2201
+                        # would otherwise execute again before the replayed
+                        # 2203/2204 arrive).
+                        terminal = {
+                            eid
+                            for ev in replay
+                            if int(ev.get("kind") or 0) == KIND_EXECUTION_RESULT
+                            for eid in [_e_tag(ev)]
+                            if eid
+                        }
+                        if terminal:
+                            engine.mark_executed(terminal)
                         for ev in _sorted_replay(replay):
                             await asyncio.to_thread(engine.handle_event, ev)
                         replay.clear()
@@ -608,7 +659,7 @@ def run() -> None:
         policy = None
     engine = OperationEngine(
         publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
-        restic=restic, policy=policy, policy_owner=cfg.operator_pubkey,
+        restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
     )
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
@@ -627,12 +678,13 @@ def run() -> None:
             restic=restic,
             policy=policy,
             policy_owner=cfg.operator_pubkey,
+            brokers=cfg.broker_pubkeys,
         )
     except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
         logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
         engine = OperationEngine(
             publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
-            restic=restic, policy=policy, policy_owner=cfg.operator_pubkey,
+            restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
         )
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))

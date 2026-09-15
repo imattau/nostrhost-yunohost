@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from typing import Any, Callable
 from urllib.parse import urlunsplit
 
@@ -26,21 +27,13 @@ from bottle import Bottle, HTTPResponse, request
 
 from .cli import (
     _agent_contribution_settings_get,
-    _agent_contribution_settings_set,
-    _agent_contribution_share,
-    _agent_contribution_submit,
     _agent_export_get,
     _agent_export_list,
-    _agent_export_run,
     _agent_init,
     _agent_mode_get,
-    _agent_mode_set,
-    _agent_model_download,
     _agent_model_profile,
     _agent_model_recommend,
-    _agent_model_select,
     _agent_model_status,
-    _agent_service,
     _agent_status,
     _TOOL_HANDLERS,
     _State,
@@ -54,26 +47,21 @@ from yunohost.nostr_identity import (
     IdentityError,
     _operator_config,
     _parse_pubkey,
-    link_identity,
     list_identities,
     list_identities_for_username,
     publish_to_relay,
     resolve_pubkey,
     resolve_username,
-    revoke_identity,
 )
 from yunohost.nostr_operations import (
     OperationError,
     approve_operation,
     build_approval_template,
     build_rejection_template,
-    delegate_capability,
     get_operation,
-    grant_capability,
     list_capabilities,
     list_operations,
     reject_operation,
-    revoke_delegation,
     validate_signed_approval,
     validate_signed_rejection,
 )
@@ -211,24 +199,57 @@ def _build_admin_set(
     return admins
 
 
-def _session_username() -> str | None:
-    """The session user from the ``nostrhost.portal`` cookie, or None.
+def _session_infos() -> dict[str, Any] | None:
+    """The current portal session payload (admin credential), or None.
 
-    Reuses the portal session validation (Authenticator.get_session_cookie)
-    so the native API shares the portal's sign-in state: once a user signs in
-    at the portal, the same cookie authenticates the admin console — no second
-    login or NIP-07 signer needed.
+    Reads the host-only ``nostrhost.admin`` cookie first — the separate admin
+    credential minted alongside the domain-wide SSO cookie (H4). Falls back to
+    the SSO cookie so nodes minted before the split keep working.
     """
     try:
-        from yunohost.nostr_account import _session_username as portal_session_user
-    except Exception:  # pragma: no cover - import fallback
-        portal_session_user = None
-    if portal_session_user is None:
-        return None
-    try:
-        return portal_session_user()
+        from yunohost.authenticators.ldap_ynhuser import Authenticator
+
+        infos = Authenticator().get_admin_cookie()
     except Exception:  # pragma: no cover - session store hiccup
         return None
+    return dict(infos) if isinstance(infos, dict) else None
+
+
+def _session_csrf_token(infos: dict[str, Any] | None) -> str:
+    """The expected CSRF token for ``infos`` (empty when there is no session)."""
+    if not infos:
+        return ""
+    from yunohost.authenticators.ldap_ynhuser import session_csrf_token
+
+    return session_csrf_token(infos)
+
+
+def _require_csrf_header(infos: dict[str, Any] | None) -> None:
+    """H4: cookie-session requests must carry the per-request CSRF token.
+
+    NIP-98 requests authenticate with a signed bearer header (unforgeable,
+    CSRF-safe) and skip this. The portal-session path is cookie-based, so it
+    requires ``X-Nostrhost-CSRF`` — a token only same-origin JS can read (the
+    public ``/package/session`` probe) and only the holder of ``infos`` can
+    compute. A cross-origin page cannot set a custom header without a CORS
+    preflight (which the API does not allow for other origins), so a subdomain
+    XSS can no longer ride the domain-wide SSO cookie to drive the admin API.
+    """
+    header = request.headers.get("X-Nostrhost-CSRF", "")
+    if not header or not secrets.compare_digest(header, _session_csrf_token(infos)):
+        raise ApiError(403, "csrf_required", "cookie-session requests require a valid X-Nostrhost-CSRF header")
+
+
+def _session_username() -> str | None:
+    """The session user from the admin session cookie, or None.
+
+    Reuses the portal session validation (Authenticator.get_admin_cookie) so
+    the native API shares the portal's sign-in state: once a user signs in at
+    the portal, the same host-only admin credential authenticates the admin
+    console — no second login or NIP-07 signer needed.
+    """
+    infos = _session_infos()
+    return str(infos.get("user")) if infos and infos.get("user") else None
 
 
 def _session_admin_pubkey(admins: set[str]) -> str | None:
@@ -253,13 +274,17 @@ def _session_linked_pubkeys() -> list[str]:
     Unlike ``_session_admin_pubkey`` this does not require an identity to be
     an admin: the scope-aware nsite routes (see ``NSITE_ROUTE_SCOPES``)
     authorize any linked identity and check the caller's kind-31100 granted
-    scopes instead — the portal "My site" surface (D8).
+    scopes instead — the portal "My site" surface (D8). Callers must already
+    have validated the session's CSRF token (see ``_require_csrf_header``).
     """
-    username = _session_username()
+    infos = _session_infos()
+    if not infos:
+        return []
+    username = infos.get("user")
     if not username:
         return []
     try:
-        identities = resolve_username(username)
+        identities = resolve_username(str(username))
     except Exception:  # pragma: no cover - identity store unavailable
         identities = []
     return [identity.pubkey for identity in identities if getattr(identity, "pubkey", None)]
@@ -364,11 +389,29 @@ def default_authorizer(
                 raise ApiError(403, "identity_not_linked", "pubkey is not a linked identity")
             return [pubkey]
 
-        # Portal-session path: no NIP-98 header, use the portal login cookie.
-        callers = _session_linked_pubkeys()
+        # Portal-session path: no NIP-98 header, use the admin session cookie.
+        # H4: this cookie-based path requires the per-request CSRF token, so a
+        # cross-origin page (even a same-site subdomain XSS) cannot drive the
+        # admin API by riding the domain-wide SSO cookie.
+        infos = _session_infos()
+        if infos is None:
+            raise ApiError(
+                401,
+                "authentication_required",
+                "missing NIP-98 Authorization header or portal session",
+            )
+        _require_csrf_header(infos)
+        username = infos.get("user")
+        if not username:
+            raise ApiError(401, "authentication_required", "invalid portal session")
+        try:
+            identities = resolve_username(str(username))
+        except Exception:  # noqa: BLE001 - identity store unavailable
+            identities = []
+        callers = [identity.pubkey for identity in identities if getattr(identity, "pubkey", None)]
         if callers:
             return callers
-        if _session_username() is not None:
+        if username:
             raise ApiError(403, "not_authorized", "session user has no linked nostr identity")
         raise ApiError(
             401,
@@ -495,15 +538,19 @@ def build_app(
         Unlike every other route this is intentionally NOT admin-gated: the
         console uses it to decide whether to show the console, redirect to the
         portal login, or refuse non-admin access. It never leaks secrets —
-        only the session user's username + admin flag.
+        only the session user's username + admin flag, plus the per-session
+        CSRF token the console must echo on cookie-authenticated requests
+        (H4). The token is only useful same-origin (no CORS for other
+        origins), so exposing it here does not weaken the CSRF protection.
         """
-        username = _session_username()
+        infos = _session_infos()
+        username = infos.get("user") if infos else None
         pubkey = None
         admin_pubkey = None
         admins = _build_admin_set(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
         if username is not None:
             try:
-                identities = resolve_username(username)
+                identities = resolve_username(str(username))
             except Exception:  # pragma: no cover - identity store unavailable
                 identities = []
             for identity in identities:
@@ -521,6 +568,7 @@ def build_app(
             # non-admin session still has a pubkey to display.
             "pubkey": admin_pubkey or pubkey,
             "admin": admin_pubkey is not None,
+            "csrf_token": _session_csrf_token(infos),
         }
 
     @app.get("/package/events/<request_id>")
@@ -1069,15 +1117,17 @@ def build_app(
 
     @app.post("/package/agent/init")
     def agent_init() -> Any:
-        return _agent_init()
+        # H5: agent writes route through the signed operation chain (policy /
+        # approval / audit) instead of a direct handler call.
+        return _run_lifecycle("agent.init", {}, state=_State())
 
     @app.post("/package/agent/enable")
     def agent_enable() -> Any:
-        return _agent_service("enable")
+        return _run_lifecycle("agent.enable", {}, state=_State())
 
     @app.post("/package/agent/disable")
     def agent_disable() -> Any:
-        return _agent_service("disable")
+        return _run_lifecycle("agent.disable", {}, state=_State())
 
     @app.get("/package/agent/models/profile")
     def agent_models_profile() -> Any:
@@ -1090,12 +1140,16 @@ def build_app(
     @app.post("/package/agent/models/download")
     def agent_models_download() -> Any:
         body = _json_body()
-        return _agent_model_download(body.get("model_id", ""), bool(body.get("evaluation_only", False)))
+        return _run_lifecycle(
+            "agent.model.download",
+            {"model_id": body.get("model_id", ""), "evaluation_only": bool(body.get("evaluation_only", False))},
+            state=_State(),
+        )
 
     @app.post("/package/agent/models/select")
     def agent_models_select() -> Any:
         body = _json_body()
-        return _agent_model_select(body.get("model_id", ""))
+        return _run_lifecycle("agent.model.select", {"model_id": body.get("model_id", "")}, state=_State())
 
     @app.get("/package/agent/models/status")
     def agent_models_status() -> Any:
@@ -1108,7 +1162,9 @@ def build_app(
     @app.post("/package/agent/mode")
     def agent_mode_set() -> Any:
         body = _json_body()
-        return _agent_mode_set(body.get("level", ""), bool(body.get("confirm", False)))
+        return _run_lifecycle(
+            "agent.mode.set", {"level": body.get("level", ""), "confirm": bool(body.get("confirm", False))}, state=_State()
+        )
 
     @app.get("/package/agent/export/list")
     def agent_export_list() -> Any:
@@ -1120,7 +1176,7 @@ def build_app(
     @app.post("/package/agent/export/run")
     def agent_export_run() -> Any:
         body = _json_body()
-        return _agent_export_run(body.get("cycle_id", ""))
+        return _run_lifecycle("agent.export.run", {"cycle_id": body.get("cycle_id", "")}, state=_State())
 
     @app.get("/package/agent/export/<candidate_file_id>")
     def agent_export_get(candidate_file_id: str) -> Any:
@@ -1134,24 +1190,26 @@ def build_app(
     def agent_contribution_settings_set() -> Any:
         """Touches Hugging Face credentials and, via auto_submit, can flip on
         the resident daemon submitting every completed cycle with no click
-        needed. Same admin-only NIP-98/session trust level as
-        agent_init/agent_enable above -- this is a local admin-API setting,
-        not a host operation, so it does not go through the
-        nostr-operationsd signed tool chain."""
+        needed. Admin-only, and routed through the signed operation chain so
+        the toggle and its approval are audited (H5)."""
         body = _json_body()
-        return _agent_contribution_settings_set(
-            body.get("dataset_repo", ""),
-            body.get("token") or None,
-            bool(body.get("auto_submit", False)),
+        return _run_lifecycle(
+            "agent.contribution.settings.set",
+            {
+                "dataset_repo": body.get("dataset_repo", ""),
+                "token": body.get("token") or None,
+                "auto_submit": bool(body.get("auto_submit", False)),
+            },
+            state=_State(),
         )
 
     @app.post("/package/agent/contribution/submit")
     def agent_contribution_submit() -> Any:
         """Causes real network egress of exactly one already-prepared candidate
-        file the admin explicitly chose. Same admin-only trust level as
-        above."""
+        file the admin explicitly chose. Admin-only, approval-gated via the
+        signed operation chain."""
         body = _json_body()
-        return _agent_contribution_submit(body.get("candidate_file_id", ""))
+        return _run_lifecycle("agent.contribution.submit", {"candidate_file_id": body.get("candidate_file_id", "")}, state=_State())
 
     @app.post("/package/agent/contribution/share")
     def agent_contribution_share() -> Any:
@@ -1160,9 +1218,9 @@ def build_app(
         so the UI no longer needs a separate prepare-then-review step before
         sharing; the redaction plus the community repo's own CI validation
         are the safeguards, on this path exactly as on automatic submission.
-        Same admin-only trust level as above."""
+        Approval-gated via the signed operation chain."""
         body = _json_body()
-        return _agent_contribution_share(body.get("cycle_id", ""))
+        return _run_lifecycle("agent.contribution.share", {"cycle_id": body.get("cycle_id", "")}, state=_State())
 
     # -- catalog --------------------------------------------------------------
 
@@ -1199,18 +1257,19 @@ def build_app(
     @app.post("/package/catalog/publish")
     def catalog_publish() -> Any:
         body = _json_body()
-        return _run_tool("catalog.publish", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
+        # H5: catalogue writes go through the signed operation chain (policy /
+        # approval / audit), not a direct handler call.
+        return _run_lifecycle(
+            "catalog.publish", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")}, state=_State()
+        )
 
     @app.post("/package/catalog/declare")
     def catalog_declare() -> Any:
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "catalog.declare",
-            {
-                "package": body.get("package"),
-                "repository": body.get("repository", ""),
-                "relays": body.get("relays", ""),
-            },
+            {"package": body.get("package"), "repository": body.get("repository", ""), "relays": body.get("relays", "")},
+            state=_State(),
         )
 
     @app.post("/package/catalog/verify")
@@ -1221,7 +1280,7 @@ def build_app(
     @app.post("/package/catalog/attest")
     def catalog_attest() -> Any:
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "catalog.attest",
             {
                 "app_id": body.get("app_id", ""),
@@ -1230,6 +1289,7 @@ def build_app(
                 "comment": body.get("comment", ""),
                 "relays": body.get("relays", ""),
             },
+            state=_State(),
         )
 
     @app.get("/package/catalog/trust")
@@ -1256,7 +1316,7 @@ def build_app(
     @app.post("/package/catalog/profile")
     def catalog_profile_set() -> Any:
         body = _json_body()
-        return _run_tool(
+        return _run_lifecycle(
             "catalog.profile.set",
             {
                 "name": body.get("name", ""),
@@ -1266,12 +1326,15 @@ def build_app(
                 "website": body.get("website", ""),
                 "relays": body.get("relays", ""),
             },
+            state=_State(),
         )
 
     @app.post("/package/catalog/announce")
     def catalog_announce() -> Any:
         body = _json_body()
-        return _run_tool("catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
+        return _run_lifecycle(
+            "catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")}, state=_State()
+        )
 
     # -- app ----------------------------------------------------------------
 
@@ -1673,24 +1736,24 @@ def build_app(
     @app.post("/package/identity/link")
     def identity_link() -> Any:
         body = _json_body()
-        return link_identity(
-            body.get("username", ""),
-            body.get("pubkey_or_npub", ""),
-            operator_sk=_config_operator_sk(),
-            control_relay=_config_control_relay(),
-            signer_type=body.get("signer_type", "unknown"),
-            label=body.get("label"),
-            enabled=bool(body.get("enabled", True)),
+        # H5: identity writes route through the signed operation chain; the
+        # operator key never travels in the args (the handler reads config).
+        return _run_lifecycle(
+            "identity.link",
+            {
+                "username": body.get("username", ""),
+                "pubkey_or_npub": body.get("pubkey_or_npub", ""),
+                "signer_type": body.get("signer_type", "unknown"),
+                "label": body.get("label"),
+                "enabled": bool(body.get("enabled", True)),
+            },
+            state=_State(),
         )
 
     @app.post("/package/identity/revoke")
     def identity_revoke() -> Any:
         body = _json_body()
-        return revoke_identity(
-            body.get("pubkey_or_npub", ""),
-            operator_sk=_config_operator_sk(),
-            control_relay=_config_control_relay(),
-        )
+        return _run_lifecycle("identity.revoke", {"pubkey_or_npub": body.get("pubkey_or_npub", "")}, state=_State())
 
     # -- capability -----------------------------------------------------------
 
@@ -1701,33 +1764,27 @@ def build_app(
     @app.post("/package/capability/grant")
     def capability_grant() -> Any:
         body = _json_body()
-        return grant_capability(
-            body.get("pubkey", ""),
-            body.get("scopes", []),
-            type_=body.get("type", "agent"),
-            admin_sk=_config_admin_sk(),
-            control_relay=_config_control_relay(),
+        # H5: capability writes route through the signed operation chain; the
+        # admin signing key never travels in the args.
+        return _run_lifecycle(
+            "capability.grant",
+            {"pubkey": body.get("pubkey", ""), "scopes": body.get("scopes", []), "type_": body.get("type", "agent")},
+            state=_State(),
         )
 
     @app.post("/package/capability/delegate")
     def capability_delegate() -> Any:
         body = _json_body()
-        return delegate_capability(
-            body.get("pubkey", ""),
-            body.get("scopes", []),
-            int(body.get("expires_at", 0)),
-            delegator_sk=_config_operator_sk(),
-            control_relay=_config_control_relay(),
+        return _run_lifecycle(
+            "capability.delegate",
+            {"pubkey": body.get("pubkey", ""), "scopes": body.get("scopes", []), "expires_at": int(body.get("expires_at", 0))},
+            state=_State(),
         )
 
     @app.post("/package/capability/revoke")
     def capability_revoke() -> Any:
         body = _json_body()
-        return revoke_delegation(
-            body.get("delegation_id", ""),
-            delegator_sk=_config_operator_sk(),
-            control_relay=_config_control_relay(),
-        )
+        return _run_lifecycle("capability.revoke", {"delegation_id": body.get("delegation_id", "")}, state=_State())
 
     # -- mcp endpoint (Caddy route + CA trust, `nostrhost mcp route`) --------
 

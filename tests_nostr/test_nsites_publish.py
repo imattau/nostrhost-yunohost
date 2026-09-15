@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from nostrhost.nsites import operations, service
+from nostrhost.nsites.service import NsiteError
 from nostrhost.nsites.manifest import aggregate_hash
 from nostrhost.nsites.models import GatewayConfig
 
@@ -442,6 +443,7 @@ def test_resolve_rejects_bad_label(tmp_path: Path):
 def test_reachability_probes_relays_and_servers(tmp_path: Path, monkeypatch):
     svc = make_service(tmp_path)
     monkeypatch.setattr(service, "_query_relay_events", lambda *a, **k: [])
+    monkeypatch.setattr(service, "_validate_relay_url", lambda relay, allow_private=False: None)
     monkeypatch.setattr(
         service, "_http_probe",
         lambda url, timeout=5.0: {"url": url, "ok": True, "status": 200},
@@ -449,6 +451,51 @@ def test_reachability_probes_relays_and_servers(tmp_path: Path, monkeypatch):
     result = svc.reachability(relays=["wss://relay.test"], servers=["https://blossom.test"])
     assert result["relays"][0]["ok"] is True
     assert result["servers"][0]["ok"] is True
+
+
+def test_validate_probe_url_rejects_private_and_bad_targets():
+    """M10: probe targets must be HTTP(S) without credentials/fragments and
+    must not resolve to private/loopback/link-local addresses."""
+    with pytest.raises(NsiteError, match="private, loopback"):
+        service._validate_probe_url("http://127.0.0.1:8196/internal/status", allow_private=False)
+    with pytest.raises(NsiteError, match="private, loopback"):
+        service._validate_probe_url("http://169.254.169.254/latest/meta-data/", allow_private=False)
+    with pytest.raises(NsiteError, match="credentials"):
+        service._validate_probe_url("https://user:pass@example.com/x", allow_private=False)
+    with pytest.raises(NsiteError, match="HTTP"):
+        service._validate_probe_url("ftp://example.com/x", allow_private=False)
+    with pytest.raises(NsiteError, match="fragment"):
+        service._validate_probe_url("https://example.com/x#frag", allow_private=False)
+    # allow_private permits the same loopback target for operator-configured
+    # egress (e.g. a local Blossom server).
+    assert "127.0.0.1" in service._validate_probe_url("http://127.0.0.1:8196/x", allow_private=True)
+
+
+def test_validate_relay_url_rejects_private_and_non_ws():
+    with pytest.raises(NsiteError, match="ws:// or wss://"):
+        service._validate_relay_url("http://relay.example.com")
+    with pytest.raises(NsiteError, match="private, loopback"):
+        service._validate_relay_url("ws://127.0.0.1:4848")
+    with pytest.raises(NsiteError, match="credentials"):
+        service._validate_relay_url("wss://user:pass@relay.example.com")
+
+
+def test_http_probe_blocks_private_targets():
+    """_http_probe must refuse a loopback/metadata target without dialing it."""
+    out = service._http_probe("http://127.0.0.1:9/", timeout=1.0)
+    assert out["ok"] is False
+    assert "private, loopback" in out["error"]
+
+
+def test_reachability_rejects_private_server_probe(tmp_path: Path, monkeypatch):
+    """A private/metadata server in the reachability list is refused with an
+    error, never dialed."""
+    svc = make_service(tmp_path)
+    monkeypatch.setattr(service, "_query_relay_events", lambda *a, **k: [])
+    result = svc.reachability(servers=["http://169.254.169.254/latest/meta-data/"])
+    assert result["servers"][0]["ok"] is False
+    assert "private, loopback" in result["servers"][0]["error"]
+    assert result["relays"] == []
 
 
 # ---------------------------------------------------------------------------

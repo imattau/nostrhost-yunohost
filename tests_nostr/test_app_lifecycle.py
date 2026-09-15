@@ -146,6 +146,39 @@ def test_run_signed_chain_failed_execution_is_reported_not_raised():
     body = h.chain("package.reconcile", {"plan": _envelope(example_package())})
     assert body["ok"] is False
     assert "backend boom" in body["error"]
+
+
+def test_run_signed_chain_catalog_publish_executes():
+    """H5: the catalogue write tools must run through the signed chain
+    (policy/approval/audit), not a bare handler call."""
+    h = Harness(policy=allowing_policy)
+    body = h.chain("catalog.publish", {"app_id": "demo_app", "relays": "ws://r"})
+    assert body["ok"] is True
+    assert h.backend.calls[0][0] == "catalog.publish"
+    assert h.recorder.history == ["pre", "post"]
+
+
+def test_run_signed_chain_identity_link_executes():
+    h = Harness(policy=allowing_policy)
+    body = h.chain("identity.link", {"username": "alice", "pubkey_or_npub": "ab" * 32, "signer_type": "nip07"})
+    assert body["ok"] is True
+    assert h.backend.calls[0][0] == "identity.link"
+    assert h.backend.calls[0][1]["username"] == "alice"
+
+
+def test_run_signed_chain_capability_grant_executes():
+    h = Harness(policy=allowing_policy)
+    body = h.chain("capability.grant", {"pubkey": "cd" * 32, "scopes": ["apps.read"], "type_": "agent"})
+    assert body["ok"] is True
+    assert h.backend.calls[0][0] == "capability.grant"
+
+
+def test_run_signed_chain_agent_mode_set_executes():
+    h = Harness(policy=allowing_policy)
+    body = h.chain("agent.mode.set", {"level": "consent", "confirm": True})
+    assert body["ok"] is True
+    assert h.backend.calls[0][0] == "agent.mode.set"
+    assert h.backend.calls[0][1]["confirm"] is True
     assert h.recorder.history == ["pre", "post"]
 
 

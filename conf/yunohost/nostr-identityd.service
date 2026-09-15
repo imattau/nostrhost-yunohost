@@ -20,8 +20,15 @@ RuntimeDirectoryPreserve=yes
 # /home/yunohost.backup) -- see that unit's comment before assuming drift.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
+# Linking a new identity (kind-31102) makes this daemon call
+# yunohost.user.user_create directly (YnhAccountBackend.ensure_user), which
+# shells out to useradd -m -- the same shadow-utils lock + /home homedir
+# write this fork's other account-creating daemons need. ProtectSystem=full/
+# ProtectHome=true are intentionally NOT set here, for the same reason and
+# verified the same way as nostr-api.service/nostr-operationsd.service: even
+# with these exact paths re-granted via ReadWritePaths, useradd's lock on
+# /etc/passwd and the /home homedir creation both still fail under Protect*
+# on this systemd/kernel combination ("useradd: cannot lock /etc/passwd").
 ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
 
 [Install]

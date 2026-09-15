@@ -278,7 +278,7 @@ def test_nip05_caddy_route():
 def test_portal_routes_host_and_path_anded():
     from nostrhost.caddy_admin import build_portal_routes
 
-    routes = {r["@id"]: r for r in build_portal_routes("w4.test")}
+    routes = {r["@id"]: r for r in build_portal_routes("w4.test", expose_native_api=True)}
     # YunoHost and native API endpoints are unconditional reverse proxies
     assert routes["nostrhost-api:w4.test"]["match"] == [{"host": ["w4.test"], "path": ["/nostrhost/api/*"]}]
     # api/portalapi strip their /nostrhost/... prefix before proxying (the
@@ -294,6 +294,35 @@ def test_portal_routes_host_and_path_anded():
     for route in routes.values():
         assert all(set(m) == {"host", "path"} for m in route["match"])
         assert route["terminal"] is True
+
+
+def test_portal_routes_hide_native_api_by_default():
+    """H4: /package/* (the native admin API) must NOT be routed on app
+    subdomains — only the primary admin domain exposes it. The bare portal
+    routes for a non-primary domain omit the native-api route entirely."""
+    from nostrhost.caddy_admin import build_portal_routes
+
+    routes = {r["@id"]: r for r in build_portal_routes("app.w4.test")}
+    assert "nostrhost-native-api:app.w4.test" not in routes
+    # the SSO/portalapi surface stays (forward_auth needs it)
+    assert "nostrhost-api:app.w4.test" in routes
+    assert "nostrhost-portalapi:app.w4.test" in routes
+
+
+def test_native_api_exposed_only_on_primary_domain(tmp_path):
+    """H4: the DomainService only routes /package/* for the flagged primary
+    domain; until one exists it keeps the legacy (pre-split) behaviour."""
+    from nostrhost.domains.models import DomainResource
+    from nostrhost.domains.service import DomainService, save_domain
+
+    service = DomainService(state_dir=tmp_path, caddy=None)
+    # legacy: no primary flagged yet -> the surface stays exposed
+    assert service._expose_native_api("w4.test") is True
+
+    save_domain(tmp_path, DomainResource(name="w4.test", primary=True))
+    save_domain(tmp_path, DomainResource(name="app.w4.test", primary=False))
+    assert service._expose_native_api("w4.test") is True
+    assert service._expose_native_api("app.w4.test") is False
 
 
 def test_portal_admin_route_uses_nostrhost_prefix(monkeypatch):

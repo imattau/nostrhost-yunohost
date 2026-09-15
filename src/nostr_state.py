@@ -166,9 +166,13 @@ def _manifest(
     restic_snapshot: str = "",
     required: bool = False,
     health: str = "pending",
+    error: str = "",
     actor_pubkey: str = "",
     plan_sha256: str = "",
 ) -> str:
+    health_lines = f"[health]\nresult = {_tquote(health)}\n"
+    if error:
+        health_lines += f"error = {_tquote(error)}\n"
     return (
         "[state]\n"
         f"schema = {STATE_SCHEMA}\n"
@@ -184,8 +188,7 @@ def _manifest(
         f"restic_snapshot = {_tquote(restic_snapshot)}\n"
         f"required = {'true' if required else 'false'}\n"
         "\n"
-        "[health]\n"
-        f"result = {_tquote(health)}\n"
+        f"{health_lines}"
     )
 
 
@@ -564,6 +567,7 @@ class StateRepo:
         restic_snapshot: str = "",
         required: bool = False,
         health: str = "pending",
+        error: str = "",
         actor_pubkey: str = "",
         plan_sha256: str = "",
         message: str | None = None,
@@ -573,7 +577,7 @@ class StateRepo:
         self.ensure()
         self._render(tree)
         (self.path / "manifest.toml").write_text(
-            _manifest(known_good=known_good, op_event_id=op_event_id, phase=phase, restic_snapshot=restic_snapshot, required=required, health=health, actor_pubkey=actor_pubkey, plan_sha256=plan_sha256)
+            _manifest(known_good=known_good, op_event_id=op_event_id, phase=phase, restic_snapshot=restic_snapshot, required=required, health=health, error=error, actor_pubkey=actor_pubkey, plan_sha256=plan_sha256)
         )
         self._git(["add", "-A"])
         msg = message or "state snapshot"
@@ -583,6 +587,12 @@ class StateRepo:
             msg += f" op={op_event_id}"
         if health:
             msg += f" health={health}"
+        if error:
+            # Collapsed to one line and capped: this is a `git log` one-liner,
+            # not the full record — the manifest's [health].error carries the
+            # untruncated message.
+            oneline = " ".join(error.split())[:200]
+            msg += f" error={oneline!r}"
         self._git(["commit", "-m", msg, "--allow-empty"])
         rev = self._git(["rev-parse", "HEAD"]).strip()
         if known_good:
@@ -860,11 +870,17 @@ class StateRecorder:
         )
 
     def post(self, request_id: str, tool: str, ok: bool, result: dict[str, Any], *, actor: str = "", args: dict[str, Any] | None = None) -> str:
+        # A failed execution's real cause lives in `result["error"]`
+        # (nostr_operationsd._execute's except-block) or occasionally
+        # `result["reason"]`; without this the manifest only ever recorded
+        # health=failed with no way to tell *why* after the fact.
+        error = "" if ok else str(result.get("error") or result.get("reason") or "")
         return self.snapshot(
             op_event_id=request_id,
             phase="post",
             known_good=bool(ok),
             health="passed" if ok else "failed",
+            error=error,
             tool=tool,
             data_affecting=tool in DATA_AFFECTING_TOOLS,
             actor=actor,
@@ -883,6 +899,7 @@ class StateRecorder:
         phase: str = "",
         known_good: bool = False,
         health: str = "pending",
+        error: str = "",
         tool: str = "",
         data_affecting: bool = False,
         actor: str = "",
@@ -901,6 +918,7 @@ class StateRecorder:
             restic_snapshot=restic,
             required=data_affecting,
             health=health,
+            error=error,
             actor_pubkey=actor,
             plan_sha256=plan_sha256,
             message=f"operation {tool} actor={actor}" if tool and actor else (f"operation {tool}" if tool else None),

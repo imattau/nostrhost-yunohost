@@ -19,12 +19,24 @@ User=root
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=read-only
-ProtectSystem=full
 # The executor is the single writer to the engine (roadmap §6); the broadened
 # native surface (firewall, backup, user, app lifecycle, diagnosis, system
 # upgrade) writes the yunohost state/log dirs, so they are explicit read-write
-# mounts alongside the NostrHost state dirs. Everything else stays read-only.
+# mounts. user.create/user.group.create/user.permission.add (nostrhost/
+# accounts.py, LDAP-free native accounts) additionally shell out to
+# useradd/groupadd/gpasswd/chpasswd, which lock and rewrite /etc/passwd,
+# /etc/shadow, /etc/group, /etc/gshadow via shadow-utils' own atomic-write-
+# plus-lock protocol, and useradd -m creates the new homedir under /home.
+# ProtectSystem=full/ProtectHome=read-only are intentionally NOT set here
+# (unlike the narrower /etc/yunohost-style subpaths below, which work fine
+# under Protect*): verified live that shadow-utils' locking of /etc/group
+# and useradd's mkdir under /home both still fail even when the exact same
+# paths are re-granted via ReadWritePaths -- systemd's read-only remount and
+# the ReadWritePaths override don't compose cleanly for a path Protect*
+# already covers, on this systemd/kernel combination. Without this, native
+# account writes reaching the executor via the signed operation chain fail
+# with "groupadd ... exit status 10" / "useradd: cannot create directory"
+# regardless of the requester's own admin rights.
 ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt /etc/caddy
 
 [Install]

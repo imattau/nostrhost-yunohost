@@ -486,7 +486,30 @@ class DomainService:
     def _ensure_portal_routes(self, name: str) -> list[str]:
         if self.caddy is None:
             return ["no-caddy"]
-        return self.caddy.ensure_portal_routes(name)
+        return self.caddy.ensure_portal_routes(name, expose_native_api=self._expose_native_api(name))
+
+    def _expose_native_api(self, name: str) -> bool:
+        """H4: the native admin API (/package/*) is only routed on the primary
+        admin domain, so a subdomain app XSS cannot reach the admin surface.
+
+        Legacy fallback: if no registered domain is flagged ``primary`` the
+        surface stays exposed (preserving pre-split behaviour); as soon as one
+        domain is flagged primary, only that domain exposes it.
+        """
+        domain = load_domain(self.state_dir, name)
+        if domain is not None and domain.primary:
+            return True
+        return not self._has_primary_domain()
+
+    def _has_primary_domain(self) -> bool:
+        base = domain_state_dir(self.state_dir)
+        if not base.is_dir():
+            return False
+        for path in base.glob("*.json"):
+            domain = load_domain(self.state_dir, path.stem)
+            if domain is not None and domain.primary:
+                return True
+        return False
 
     def _dependents(self, name: str) -> list[str]:
         """Native apps whose ``[web]`` domain is this domain or a subdomain,

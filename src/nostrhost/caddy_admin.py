@@ -201,7 +201,7 @@ def _spa_route_handle(root: str, prefix: str) -> list[dict[str, Any]]:
     ]
 
 
-def build_portal_routes(domain: str) -> list[dict[str, Any]]:
+def build_portal_routes(domain: str, *, expose_native_api: bool = False) -> list[dict[str, Any]]:
     """The per-domain portal/SSO surface an auth-required app needs.
 
     The authd ``forward_auth`` 302s unauthenticated requests to
@@ -209,6 +209,11 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
     portal-api / admin paths a browser needs), the redirect lands on a 404
     and an auth app's health check fails even though its backend is up.
     Mirrors the per-domain Caddyfile handlers the testbed writes by hand.
+
+    ``expose_native_api`` controls whether the native control-plane API
+    (``/package/*`` → 8190) is routed on this domain. H4: it must ONLY be
+    exposed on the primary admin domain — never on app subdomains — so a
+    subdomain app XSS cannot reach the admin API surface at all.
     """
     routes: list[dict[str, Any]] = [
         {
@@ -231,13 +236,16 @@ def build_portal_routes(domain: str) -> list[dict[str, Any]]:
             ],
             "terminal": True,
         },
-        {
-            "@id": f"nostrhost-native-api:{domain}",
-            "match": [{"host": [domain], "path": ["/package/*"]}],
-            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8190"}]}],
-            "terminal": True,
-        },
     ]
+    if expose_native_api:
+        routes.append(
+            {
+                "@id": f"nostrhost-native-api:{domain}",
+                "match": [{"host": [domain], "path": ["/package/*"]}],
+                "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:8190"}]}],
+                "terminal": True,
+            }
+        )
     for root, tag, prefix in (
         ("/usr/share/nostrhost/portal", "sso", "/nostrhost/sso"),
         ("/usr/share/nostrhost/admin", "admin", "/nostrhost/admin"),

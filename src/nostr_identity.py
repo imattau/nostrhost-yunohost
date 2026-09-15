@@ -98,6 +98,7 @@ class OperatorConfig:
     notifier_sk: str
     notifier_pubkey: str
     admins: tuple[str, ...] = field(default_factory=tuple)
+    broker_pubkeys: tuple[str, ...] = field(default_factory=tuple)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +148,20 @@ def _init_headless_yunohost() -> None:
     from yunohost.utils.logging import init_logging
 
     init_logging(interface="cli", debug=False, quiet=True)
+
+    # init_logging() calls logging.config.dictConfig(disable_existing_loggers=
+    # True) with only "yunohost"/"moulinette" in its `loggers` config -- dictConfig
+    # silently sets `.disabled = True` on every other already-created logger,
+    # including every nostr-*d daemon's own module-level logger (e.g.
+    # nostr_operationsd's, whose _execute() relies on logger.error(...) to
+    # record why a write failed). A disabled logger drops every record with
+    # no error and no trace, so a real execution failure became invisible
+    # everywhere the moment this function ran once. Re-enable them so they
+    # keep propagating to root's handlers (yunohost-cli.log under this
+    # config) instead of vanishing.
+    for _name, _logger in list(logging.Logger.manager.loggerDict.items()):
+        if isinstance(_logger, logging.Logger) and (_name.startswith("nostr-") or _name.startswith("nostrhost-")):
+            _logger.disabled = False
 
 
 def _to_identity(rec: Any) -> Identity:
@@ -273,6 +288,7 @@ def bootstrap_node(
         f'notifier_sk = "{notifier_sk}"',
         f'control_relay = "{relay}"',
         'admins = ["' + '", "'.join(admin_pubkeys) + '"]',
+        "broker_pubkeys = []",
     ]
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text("\n".join(lines) + "\n")
@@ -341,6 +357,7 @@ def bootstrap_node(
         "notifier_sk": notifier_sk,
         "notifier_pubkey": notifier_pk,
         "admins": admin_pubkeys,
+        "broker_pubkeys": [],
         "control_relay": relay,
     }
 
@@ -450,8 +467,10 @@ def _operator_config(
         admins = file_admins if isinstance(file_admins, list) else []
     if not admins:
         admins = [operator_pubkey]
+    file_brokers = conf.get("broker_pubkeys")
+    brokers = tuple(b for b in (file_brokers if isinstance(file_brokers, list) else []) if _is_hex64(b))
     return OperatorConfig(
-        sk, operator_pubkey, relay, srv, server_pubkey, pub, publisher_pubkey, ntf, notifier_pubkey, tuple(admins)
+        sk, operator_pubkey, relay, srv, server_pubkey, pub, publisher_pubkey, ntf, notifier_pubkey, tuple(admins), brokers
     )
 
 

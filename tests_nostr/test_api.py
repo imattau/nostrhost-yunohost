@@ -61,6 +61,23 @@ def wsgi_request(app, method, path, body=None, headers=None, raw_body=None):
 
 
 # --------------------------------------------------------------------------- #
+# portal-session test helpers (H4)
+
+def _fake_session_infos(username, session_id="test-session-id"):
+    """A fabricated admin-cookie payload (id/host/user/pwd), matching what
+    Authenticator().get_admin_cookie() returns in production."""
+    return {"id": session_id, "host": "test", "user": username, "pwd": "x", "email": "", "fullname": ""}
+
+
+def _session_headers(monkeypatch, infos, secret="test-secret"):
+    """Pin the session secret and return the matching CSRF request header."""
+    from yunohost.authenticators import ldap_ynhuser
+
+    monkeypatch.setattr(ldap_ynhuser, "SESSION_SECRET", lambda: secret)
+    return {"X-Nostrhost-CSRF": ldap_ynhuser.session_csrf_token(infos, secret=secret)}
+
+
+# --------------------------------------------------------------------------- #
 # healthz + public
 
 def test_healthz_is_public():
@@ -90,10 +107,26 @@ def test_healthz_public_when_bottle_route_is_dict():
 # --------------------------------------------------------------------------- #
 # auth
 
-def _signed_header(sk_hex: str, pubkey_hex: str) -> str:
+def _signed_header(
+    sk_hex: str,
+    pubkey_hex: str,
+    method: str = "GET",
+    path: str = "/",
+    body_bytes: bytes = b"",
+) -> str:
+    """A correct NIP-98 (kind-27235) Authorization header bound to exactly
+    one request: u=method=payload tags matching the request URL/method/body
+    as the API reconstructs it (the WSGI harness below serves as
+    http://test:80)."""
+    import hashlib
+
     from yunohost.nostr_identity import _sign_event
 
-    event = _sign_event(sk_hex, pubkey_hex, 27235, "", [["u", "https://nostrhost.local/"], ["method", "GET"]])
+    url = f"http://test{path}"
+    tags = [["u", url], ["method", method]]
+    if body_bytes:
+        tags.append(["payload", hashlib.sha256(body_bytes).hexdigest()])
+    event = _sign_event(sk_hex, pubkey_hex, 27235, "", tags)
     return "Nostr " + base64.b64encode(json.dumps(event).encode()).decode()
 
 
@@ -186,7 +219,128 @@ def test_invalid_signature_401():
     bad = "Nostr " + base64.b64encode(b'{"kind":1,"content":"x"}').decode()
     status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": bad})
     assert status == "401"
-    assert json.loads(body)["code"] == "invalid_signature"
+    assert json.loads(body)["code"] == "invalid_nip98"
+
+
+def test_nip98_rejects_non_27235_event(monkeypatch):
+    """Regression for the critical admin-auth bypass: a validly signed event
+    that is NOT a kind-27235 NIP-98 request (e.g. a public kind-1 note, a
+    relay-auth challenge) must never authenticate an API request."""
+    from yunohost.nostr_identity import _sign_event
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    # Correct signature, wrong kind — signed for the exact request otherwise.
+    event = _sign_event(sk, pubkey, 1, "hello world", [["u", "http://test/package/system/version"], ["method", "GET"]])
+    header = "Nostr " + base64.b64encode(json.dumps(event).encode()).decode()
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    app = build_app(admin_pubkeys=(pubkey,))
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": header})
+    assert status == "401"
+    assert json.loads(body)["code"] == "invalid_nip98"
+
+
+def test_nip98_rejects_stale_event(monkeypatch):
+    """A correctly-kind, correctly-signed but old NIP-98 event must be refused
+    (no indefinite replay of a captured credential)."""
+    import time
+
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag, Timestamp
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    stale = int(time.time()) - 3600
+    event = (
+        EventBuilder(Kind(27235), "")
+        .tags([Tag.parse(t) for t in [["u", "http://test/package/system/version"], ["method", "GET"]]])
+        .custom_created_at(Timestamp.from_secs(stale))
+        .finalize(Keys.parse(sk))
+    )
+    raw = {
+        "id": event.id().to_hex(),
+        "pubkey": pubkey,
+        "created_at": stale,
+        "kind": 27235,
+        "tags": [["u", "http://test/package/system/version"], ["method", "GET"]],
+        "content": "",
+        "sig": event.signature(),
+    }
+    header = "Nostr " + base64.b64encode(json.dumps(raw).encode()).decode()
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    app = build_app(admin_pubkeys=(pubkey,))
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": header})
+    assert status == "401"
+
+
+def test_nip98_rejects_wrong_url_and_method(monkeypatch):
+    from yunohost.nostr_identity import _sign_event
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=(pubkey,))
+
+    # Signed for a different URL than the one requested.
+    wrong_url = _sign_event(sk, pubkey, 27235, "", [["u", "http://test:80/package/other"], ["method", "GET"]])
+    status, _, _ = wsgi_request(
+        app, "GET", "/package/system/version",
+        headers={"Authorization": "Nostr " + base64.b64encode(json.dumps(wrong_url).encode()).decode()},
+    )
+    assert status == "401"
+
+    # Signed with the wrong method.
+    wrong_method = _sign_event(sk, pubkey, 27235, "", [["u", "http://test:80/package/system/version"], ["method", "POST"]])
+    status, _, _ = wsgi_request(
+        app, "GET", "/package/system/version",
+        headers={"Authorization": "Nostr " + base64.b64encode(json.dumps(wrong_method).encode()).decode()},
+    )
+    assert status == "401"
+
+
+def test_nip98_replay_rejected(monkeypatch):
+    """The same valid NIP-98 event must be accepted once and rejected on replay."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=(pubkey,))
+    header = _signed_header(sk, pubkey, "GET", "/package/system/version")
+
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": header})
+    assert status == "200"
+
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": header})
+    assert status == "401"
+    assert json.loads(body)["code"] == "invalid_nip98"
+
+
+def test_nip98_post_payload_bound(monkeypatch):
+    """A POST NIP-98 event must carry a payload tag matching the body, and the
+    body must be readable by the route after the authorizer consumed it."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    calls = []
+    monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: _fake_identity(p))
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: calls.append(args) or {"ok": True, "request_id": "r" * 64})
+    app = build_app(admin_pubkeys=(pubkey,))
+    body = {"plan_sha256": "0" * 64}
+    status, _, resp = wsgi_request(
+        app, "POST", "/package/nsite/publish", body,
+        headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/publish", json.dumps(body).encode())},
+    )
+    assert status == "200"
+    # The body reached the handler intact (the route normalises missing keys
+    # to None; the real check is that the sha256 payload bound to `body` was
+    # accepted and the parsed body made it through after the authorizer read it).
+    assert calls and calls[0]["plan_sha256"] == body["plan_sha256"]
 
 
 def test_valid_signed_event_but_not_linked_403():
@@ -196,7 +350,7 @@ def test_valid_signed_event_but_not_linked_403():
     pubkey = _derive_pubkey(sk)
     app = build_app(admin_pubkeys=(pubkey,))
     status, _, body = wsgi_request(
-        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey)}
+        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey, "GET", "/package/system/version")}
     )
     # resolve_pubkey (real) returns None for an unlinked key -> 403
     assert status == "403"
@@ -225,7 +379,7 @@ def test_authorized_nip98_admin_ok(monkeypatch):
 
     app = build_app(admin_pubkeys=(pubkey,))
     status, _, body = wsgi_request(
-        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey)}
+        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey, "GET", "/package/system/version")}
     )
     assert status == "200"
     assert json.loads(body)["version"] == "1"
@@ -239,7 +393,7 @@ def test_non_admin_pubkey_403(monkeypatch):
     monkeypatch.setattr(api_module, "resolve_pubkey", lambda p: object())
     app = build_app(admin_pubkeys=())  # operator/admin set empty
     status, _, body = wsgi_request(
-        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey)}
+        app, "GET", "/package/system/version", headers={"Authorization": _signed_header(sk, pubkey, "GET", "/package/system/version")}
     )
     assert status == "403"
 
@@ -261,7 +415,9 @@ def test_session_endpoint_admin(monkeypatch):
 
     sk = secrets.token_hex(32)
     pubkey = _derive_pubkey(sk)
-    monkeypatch.setattr(api_module, "_session_username", lambda: "admin")
+    infos = _fake_session_infos("admin")
+    _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
     app = build_app(admin_pubkeys=(pubkey,))
     status, _, body = wsgi_request(app, "GET", "/package/session")
@@ -271,6 +427,8 @@ def test_session_endpoint_admin(monkeypatch):
     assert out["username"] == "admin"
     assert out["pubkey"] == pubkey
     assert out["admin"] is True
+    # H4: the probe hands the console the per-session CSRF token.
+    assert out["csrf_token"]
 
 
 def test_session_endpoint_non_admin(monkeypatch):
@@ -278,7 +436,9 @@ def test_session_endpoint_non_admin(monkeypatch):
 
     sk = secrets.token_hex(32)
     pubkey = _derive_pubkey(sk)
-    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    infos = _fake_session_infos("alice")
+    _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
     app = build_app(admin_pubkeys=())  # not an admin
     status, _, body = wsgi_request(app, "GET", "/package/session")
@@ -289,19 +449,55 @@ def test_session_endpoint_non_admin(monkeypatch):
 
 
 def test_session_auth_admin_ok(monkeypatch):
-    """A valid portal session whose linked identity is an admin authorizes the
-    API without any NIP-98 header — the unified single sign-in path."""
+    """A valid admin session (host-only admin cookie + CSRF token) authorizes
+    the API without any NIP-98 header — the unified single sign-in path."""
     from yunohost.nostr_operations import _derive_pubkey
 
     sk = secrets.token_hex(32)
     pubkey = _derive_pubkey(sk)
-    monkeypatch.setattr(api_module, "_session_username", lambda: "admin")
+    infos = _fake_session_infos("admin")
+    headers = _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
+    monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=(pubkey,))
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers=headers)
+    assert status == "200"
+    assert json.loads(body)["version"] == "1"
+
+
+def test_session_auth_requires_csrf_token(monkeypatch):
+    """H4: a cookie-session request WITHOUT the per-request CSRF token is
+    rejected even when the session is a valid admin — the whole point is that
+    a subdomain XSS riding the SSO cookie cannot drive the admin API."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    infos = _fake_session_infos("admin")
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
     monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
     app = build_app(admin_pubkeys=(pubkey,))
     status, _, body = wsgi_request(app, "GET", "/package/system/version")
-    assert status == "200"
-    assert json.loads(body)["version"] == "1"
+    assert status == "403"
+    assert json.loads(body)["code"] == "csrf_required"
+
+
+def test_session_auth_rejects_wrong_csrf_token(monkeypatch):
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    infos = _fake_session_infos("admin")
+    _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
+    monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=(pubkey,))
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"X-Nostrhost-CSRF": "forged"})
+    assert status == "403"
+    assert json.loads(body)["code"] == "csrf_required"
 
 
 def test_session_auth_non_admin_403(monkeypatch):
@@ -310,10 +506,12 @@ def test_session_auth_non_admin_403(monkeypatch):
 
     sk = secrets.token_hex(32)
     pubkey = _derive_pubkey(sk)
-    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    infos = _fake_session_infos("alice")
+    headers = _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
     app = build_app(admin_pubkeys=())
-    status, _, body = wsgi_request(app, "GET", "/package/system/version")
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers=headers)
     assert status == "403"
     assert json.loads(body)["code"] == "not_authorized"
 
@@ -335,7 +533,7 @@ def test_scoped_nsite_publish_requires_publish_scope(monkeypatch):
     app = build_app(admin_pubkeys=())
     status, _, body = wsgi_request(
         app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
-        headers={"Authorization": _signed_header(sk, pubkey)},
+        headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/publish", json.dumps({"event": {"id": "x"}, "plan_sha256": "0" * 64}).encode())},
     )
     assert status == "403"
     assert json.loads(body)["code"] == "not_authorized"
@@ -355,7 +553,7 @@ def test_scoped_nsite_publish_granted_non_admin_ok(monkeypatch):
     app = build_app(admin_pubkeys=())
     status, _, body = wsgi_request(
         app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
-        headers={"Authorization": _signed_header(sk, pubkey)},
+        headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/publish", json.dumps({"event": {"id": "x"}, "plan_sha256": "0" * 64}).encode())},
     )
     assert status == "200"
     assert json.loads(body)["ok"] is True
@@ -375,11 +573,11 @@ def test_scoped_nsite_read_grants_read_but_not_admin_routes(monkeypatch):
     monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True})
     app = build_app(admin_pubkeys=())
 
-    status, _, body = wsgi_request(app, "GET", "/package/nsite/list", headers={"Authorization": _signed_header(sk, pubkey)})
+    status, _, body = wsgi_request(app, "GET", "/package/nsite/list", headers={"Authorization": _signed_header(sk, pubkey, "GET", "/package/nsite/list")})
     assert status == "200"
     assert json.loads(body)["sites"] == []
 
-    status, _, body = wsgi_request(app, "POST", "/package/nsite/gateway/enable", {"domain": "sites.example.org"}, headers={"Authorization": _signed_header(sk, pubkey)})
+    status, _, body = wsgi_request(app, "POST", "/package/nsite/gateway/enable", {"domain": "sites.example.org"}, headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/gateway/enable", json.dumps({"domain": "sites.example.org"}).encode())})
     assert status == "403"
     assert json.loads(body)["code"] == "not_authorized"
     assert lifecycle == []
@@ -398,7 +596,7 @@ def test_scoped_nsite_admin_bypasses_scope_check(monkeypatch):
     app = build_app(admin_pubkeys=(pubkey,))
     status, _, body = wsgi_request(
         app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
-        headers={"Authorization": _signed_header(sk, pubkey)},
+        headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/publish", json.dumps({"event": {"id": "x"}, "plan_sha256": "0" * 64}).encode())},
     )
     assert status == "200"
     assert lifecycle and lifecycle[0][0] == "nsite.publish"
@@ -411,13 +609,16 @@ def test_scoped_nsite_session_linked_non_admin_ok(monkeypatch):
     sk = secrets.token_hex(32)
     pubkey = _derive_pubkey(sk)
     lifecycle = []
-    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    infos = _fake_session_infos("alice")
+    headers = _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [_fake_identity(pubkey)])
     monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.publish"})
     monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: lifecycle.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
     app = build_app(admin_pubkeys=())
     status, _, body = wsgi_request(
         app, "POST", "/package/nsite/publish", {"event": {"id": "x"}, "plan_sha256": "0" * 64},
+        headers=headers,
     )
     assert status == "200"
     assert lifecycle and lifecycle[0][0] == "nsite.publish"
@@ -425,10 +626,12 @@ def test_scoped_nsite_session_linked_non_admin_ok(monkeypatch):
 
 def test_scoped_nsite_session_without_identity_403(monkeypatch):
     """A portal session with no linked nostr identity cannot use nsite routes."""
-    monkeypatch.setattr(api_module, "_session_username", lambda: "alice")
+    infos = _fake_session_infos("alice")
+    headers = _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
     monkeypatch.setattr(api_module, "resolve_username", lambda username: [])
     app = build_app(admin_pubkeys=())
-    status, _, body = wsgi_request(app, "GET", "/package/nsite/list")
+    status, _, body = wsgi_request(app, "GET", "/package/nsite/list", headers=headers)
     assert status == "403"
     assert json.loads(body)["code"] == "not_authorized"
 
@@ -444,13 +647,14 @@ def test_scoped_nsite_publish_plan_requires_read_scope(monkeypatch):
     monkeypatch.setattr(api_module, "_granted_scopes", lambda p: {"nsites.publish"})
     monkeypatch.setitem(api_module._TOOL_HANDLERS, "nsite.publish.plan", lambda **k: plan_calls.append(k) or {"plan_sha256": "0" * 64})
     app = build_app(admin_pubkeys=())
-    status, _, body = wsgi_request(
+    body = {"pubkey": pubkey, "kind": 15128, "items": [{"path": "/index.html", "sha256": "0" * 64}]}
+    status, _, body_resp = wsgi_request(
         app, "POST", "/package/nsite/publish/plan",
-        {"pubkey": pubkey, "kind": 15128, "items": [{"path": "/index.html", "sha256": "0" * 64}]},
-        headers={"Authorization": _signed_header(sk, pubkey)},
+        body,
+        headers={"Authorization": _signed_header(sk, pubkey, "POST", "/package/nsite/publish/plan", json.dumps(body).encode())},
     )
     assert status == "403"
-    assert json.loads(body)["code"] == "not_authorized"
+    assert json.loads(body_resp)["code"] == "not_authorized"
     assert plan_calls == []
 
 
@@ -988,17 +1192,16 @@ def test_post_firewall_reload_uses_signed_chain(app, monkeypatch):
     assert calls == [("firewall.reload", {"skip_upnp": True})]
 
 
-def test_post_service_restart(app, monkeypatch):
-    captured = {}
-
-    def fake(**kwargs):
-        captured.update(kwargs)
-        return {"service": kwargs["name"]}
-
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.restart", fake)
+def test_post_service_restart_uses_signed_chain(app, monkeypatch):
+    """service.restart is a write with real consequences: it must go through
+    the signed operation chain (policy + approval), not a direct tool call."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
     status, _, body = wsgi_request(app, "POST", "/package/service/restart", {"name": "caddy"})
     assert status == "200"
-    assert captured["name"] == "caddy"
+    assert calls == [("service.restart", {"name": "caddy"})]
 
 
 def test_get_service_status_names_query(app, monkeypatch):
@@ -1028,31 +1231,26 @@ def test_get_service_status_no_query(app, monkeypatch):
     assert json.loads(body)["caddy"]["status"] == "running"
 
 
-def test_post_service_control(app, monkeypatch):
-    captured = {}
-
-    def fake(**kwargs):
-        captured.update(kwargs)
-        return {"service": kwargs["name"], "action": kwargs["action"], "status": "running"}
-
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.control", fake)
+def test_post_service_control_uses_signed_chain(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
     status, _, body = wsgi_request(app, "POST", "/package/service/control", {"name": "caddy", "action": "restart"})
     assert status == "200"
-    assert captured == {"name": "caddy", "action": "restart"}
-    assert json.loads(body)["status"] == "running"
+    assert calls == [("service.control", {"name": "caddy", "action": "restart"})]
 
 
-def test_post_app_remove_purge(app, monkeypatch):
-    captured = {}
-
-    def fake(**kwargs):
-        captured.update(kwargs)
-        return {"app": kwargs["app"]}
-
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "app.remove", fake)
+def test_post_app_remove_uses_signed_chain(app, monkeypatch):
+    """app.remove is data-loss-capable: it must go through the signed
+    operation chain, not a direct tool call."""
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
     status, _, body = wsgi_request(app, "POST", "/package/app/remove", {"app": "immich", "purge": True})
     assert status == "200"
-    assert captured == {"app": "immich", "purge": True}
+    assert calls == [("app.remove", {"app": "immich", "purge": True})]
 
 
 def test_user_list(app, monkeypatch):
@@ -1283,17 +1481,19 @@ def test_identity_list_username(app, monkeypatch):
 
 
 def test_identity_link(app, monkeypatch):
-    captured = {}
+    calls = []
 
-    def fake(username, pubkey_or_npub, **kwargs):
-        captured.update({"username": username, "pubkey_or_npub": pubkey_or_npub, **kwargs})
-        return {"kind": 31102}
+    def fake(tool, args, state):
+        calls.append((tool, args))
+        return {"ok": True, "request_id": "r" * 64}
 
-    monkeypatch.setattr(api_module, "link_identity", fake)
-    monkeypatch.setattr(api_module, "_config_operator_sk", lambda: None)
-    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    monkeypatch.setattr(api_module, "_run_lifecycle", fake)
     status, _, body = wsgi_request(app, "POST", "/package/identity/link", {"username": "alice", "pubkey_or_npub": "npub1test", "signer_type": "nip07"})
     assert status == "200"
+    assert calls[0][0] == "identity.link"
+    assert calls[0][1]["username"] == "alice"
+    assert calls[0][1]["pubkey_or_npub"] == "npub1test"
+    assert calls[0][1]["signer_type"] == "nip07"
 
 
 def test_catalog_list_wraps_bare_list(app, monkeypatch):
@@ -1324,17 +1524,17 @@ def test_agent_status_route(app, monkeypatch):
 
 
 def test_agent_service_routes(app, monkeypatch):
-    captured = []
+    calls = []
 
-    def fake(action):
-        captured.append(action)
-        return {"service": "nostrhost-agent.service", "action": action, "config_path": "/x"}
+    def fake(tool, args, state):
+        calls.append((tool, args))
+        return {"ok": True, "result": {"action": tool.split(".")[1]}, "request_id": "r" * 64}
 
-    monkeypatch.setattr(api_module, "_agent_service", fake)
+    monkeypatch.setattr(api_module, "_run_lifecycle", fake)
     status, _, body = wsgi_request(app, "POST", "/package/agent/enable", {})
     assert status == "200"
-    assert json.loads(body)["action"] == "enable"
-    assert captured == ["enable"]
+    assert json.loads(body)["result"]["action"] == "enable"
+    assert calls == [("agent.enable", {})]
 
 
 def test_identity_dict_uses_username(monkeypatch):
@@ -1362,18 +1562,17 @@ def test_json_safe_serializes_datetimes():
 
 
 def test_capability_grant(app, monkeypatch):
-    captured = {}
+    calls = []
 
-    def fake(pubkey, scopes, **kwargs):
-        captured.update({"pubkey": pubkey, "scopes": scopes, **kwargs})
-        return {"kind": 31100}
+    def fake(tool, args, state):
+        calls.append((tool, args))
+        return {"ok": True, "request_id": "r" * 64}
 
-    monkeypatch.setattr(api_module, "grant_capability", fake)
-    monkeypatch.setattr(api_module, "_config_admin_sk", lambda: None)
-    monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
+    monkeypatch.setattr(api_module, "_run_lifecycle", fake)
     status, _, body = wsgi_request(app, "POST", "/package/capability/grant", {"pubkey": "abcd", "scopes": ["apps.read"], "type": "agent"})
     assert status == "200"
-    assert captured["scopes"] == ["apps.read"]
+    assert calls[0][0] == "capability.grant"
+    assert calls[0][1]["scopes"] == ["apps.read"]
 
 
 def test_capability_list(app, monkeypatch):
@@ -1484,40 +1683,48 @@ def test_post_settings_reset_all_uses_signed_chain(app, monkeypatch):
 
 
 def test_agent_init(app, monkeypatch):
-    monkeypatch.setattr(api_module, "_agent_init", lambda: {"configured": True, "agent_pubkey": "abcd"})
+    calls = []
+
+    def fake(tool, args, state):
+        calls.append((tool, args))
+        return {"ok": True, "result": {"configured": True, "agent_pubkey": "abcd"}, "request_id": "r" * 64}
+
+    monkeypatch.setattr(api_module, "_run_lifecycle", fake)
     status, _, body = wsgi_request(app, "POST", "/package/agent/init")
     assert status == "200"
-    assert json.loads(body)["agent_pubkey"] == "abcd"
+    assert json.loads(body)["result"]["agent_pubkey"] == "abcd"
+    assert calls == [("agent.init", {})]
 
 
 def test_agent_disable(app, monkeypatch):
-    captured = {}
+    calls = []
 
-    def fake(action):
-        captured["action"] = action
-        return {"service": "nostrhost-agent.service", "action": action}
+    def fake(tool, args, state):
+        calls.append((tool, args))
+        return {"ok": True, "result": {"action": "disable"}, "request_id": "r" * 64}
 
-    monkeypatch.setattr(api_module, "_agent_service", fake)
+    monkeypatch.setattr(api_module, "_run_lifecycle", fake)
     status, _, body = wsgi_request(app, "POST", "/package/agent/disable")
     assert status == "200"
-    assert captured["action"] == "disable"
+    assert json.loads(body)["result"]["action"] == "disable"
+    assert calls == [("agent.disable", {})]
 
 
 def test_agent_init_error_maps_to_400(app, monkeypatch):
-    def boom():
+    def boom(tool, args, state):
         raise NostrHostError("nostrhost-agent is not installed")
 
-    monkeypatch.setattr(api_module, "_agent_init", boom)
+    monkeypatch.setattr(api_module, "_run_lifecycle", boom)
     status, _, body = wsgi_request(app, "POST", "/package/agent/init")
     assert status == "400"
     assert json.loads(body)["code"] == "operation_failed"
 
 
 def test_handler_error_maps_to_400(app, monkeypatch):
-    def boom(**kwargs):
+    def boom(tool, args, state):
         raise ApiError(400, "operation_failed", "boom")
 
-    monkeypatch.setitem(api_module._TOOL_HANDLERS, "service.restart", boom)
+    monkeypatch.setattr(api_module, "_run_lifecycle", boom)
     status, _, body = wsgi_request(app, "POST", "/package/service/restart", {"name": "caddy"})
     assert status == "400"
     assert json.loads(body)["code"] == "operation_failed"
@@ -1526,6 +1733,22 @@ def test_handler_error_maps_to_400(app, monkeypatch):
 def test_invalid_json_body_400(app):
     status, _, _ = wsgi_request(app, "POST", "/package/service/restart", raw_body=b"{not json")
     assert status == "400"
+
+
+def test_internal_error_does_not_leak_exception(app, monkeypatch):
+    """M18: an unexpected exception must not echo its message (paths, config
+    snippets, provider errors) back to the caller."""
+
+    def boom(tool, args, state):
+        raise RuntimeError("/etc/nostrhost/operator.toml secret=abc123")
+
+    monkeypatch.setattr(api_module, "_run_lifecycle", boom)
+    status, _, body = wsgi_request(app, "POST", "/package/service/restart", {"name": "caddy"})
+    assert status == "500"
+    out = json.loads(body)
+    assert out["code"] == "internal_error"
+    assert "operator.toml" not in json.dumps(out)
+    assert "abc123" not in json.dumps(out)
 
 
 def test_unknown_route_404(app):

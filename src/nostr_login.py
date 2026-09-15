@@ -420,7 +420,12 @@ def auth_request_route():
         username = None
 
     if fwd_uri is not None:
-        host = request.get_header("X-Forwarded-Host") or request.get_header("host") or ""
+        # The Host header is authoritative: Caddy preserves the client-facing
+        # host on the forward_auth subrequest. X-Forwarded-Host is only a
+        # fallback — a front that does not overwrite it (unlike Caddy) would
+        # otherwise let a client influence permission matching and the
+        # redirect target by sending a forged X-Forwarded-Host (M12).
+        host = request.get_header("host") or request.get_header("X-Forwarded-Host") or ""
         proto = request.get_header("X-Forwarded-Proto") or "https"
         match_uri = fwd_uri.split("?", 1)[0]
         # Permission URIs in the SSOwat conf are bare DNS names (no port).

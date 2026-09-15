@@ -12,8 +12,22 @@ User=root
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
+# LDAP is gone: user.create/user.group.create/user.permission.add etc. shell
+# out to useradd/groupadd/gpasswd/chpasswd (nostrhost/accounts.py), which
+# lock and rewrite /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow via
+# shadow-utils' own atomic-write-plus-lock protocol, and useradd -m creates
+# the new homedir under /home. ProtectSystem=full/ProtectHome=true are
+# intentionally NOT set here: verified live (systemd-run with the exact
+# same properties) that shadow-utils' locking of /etc/group and useradd's
+# mkdir under /home both still fail even when the exact same paths are
+# re-granted via ReadWritePaths -- systemd's read-only remount and the
+# ReadWritePaths override don't compose cleanly for a path that Protect*
+# already covers, on this systemd/kernel combination. Without this, every
+# native account write from this service fails with "groupadd ... exit
+# status 10" / "useradd: cannot create directory", surfacing to the admin
+# UI as an opaque "operation rejected" regardless of the caller's own
+# admin rights (see the OperationError fallback-chain fix in client.ts and
+# the [health].error manifest field for how that failure now surfaces).
 ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/nostrhost-agent /var/lib/nostrhost-agent
 
 [Install]

@@ -16,15 +16,19 @@ targets — all bounded.
 from __future__ import annotations
 
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .manifest import KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT
 from .models import CustomDomainRecord, GatewayConfig, SiteRecord
@@ -208,11 +212,164 @@ def _query_relay_events(
     return events
 
 
-def _http_probe(url: str, timeout: float = 5.0) -> dict[str, Any]:
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects (a redirect could bounce the probe to an
+    internal address after the initial target was validated)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that dials a pre-validated IP while keeping the
+    hostname in the request (Host header)."""
+
+    def __init__(self, host, port=None, *, pinned_ip, timeout=None, **kwargs):
+        super().__init__(host, port, timeout=timeout, **kwargs)
+        self._pinned = (pinned_ip, self.port)
+
+    def _create_connection(self, addr, timeout=None, source_address=None):
+        return socket.create_connection(self._pinned, timeout, source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that dials a pre-validated IP; SNI and certificate
+    verification still use the real hostname."""
+
+    def __init__(self, host, port=None, *, pinned_ip, timeout=None, **kwargs):
+        super().__init__(host, port, timeout=timeout, **kwargs)
+        self._pinned = (pinned_ip, self.port)
+
+    def _create_connection(self, addr, timeout=None, source_address=None):
+        return socket.create_connection(self._pinned, timeout, source_address)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, *, pinned_ip: str, port: int) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+        self._port = port
+
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req, pinned_ip=self._pinned_ip, port=self._port)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, *, pinned_ip: str, port: int) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+        self._port = port
+
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, pinned_ip=self._pinned_ip, port=self._port)
+
+
+def _validate_probe_url(url: str, *, allow_private: bool) -> set[str]:
+    """Validate `url` and resolve its target host, returning the resolved IPs.
+
+    Rejects non-HTTP(S) URLs, embedded credentials, fragments and (unless
+    ``allow_private``) targets resolving to private/loopback/link-local/
+    reserved/multicast addresses. Callers must pin the connection to one of
+    the returned IPs (see ``_pinned_probe_opener``) so a hostname cannot
+    rebind to an internal address between this check and the connect (M10).
+    """
     try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise NsiteError(f"invalid probe URL: {exc}") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise NsiteError("url must be an HTTP(S) URL without embedded credentials")
+    if len(url) > 4096 or parsed.fragment:
+        raise NsiteError("url is too long or contains a fragment")
+    effective_port = port if port is not None else (443 if parsed.scheme == "https" else 80)
+    if not 1 <= effective_port <= 65535:
+        raise NsiteError("URL port is out of range")
+    try:
+        addresses = {
+            ipaddress.ip_address(result[4][0])
+            for result in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise NsiteError(f"could not resolve probe host: {exc}") from exc
+    if allow_private:
+        return {str(addr) for addr in addresses}
+    if any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+        for address in addresses
+    ):
+        raise NsiteError("private, loopback, link-local, reserved, unspecified, and multicast probe targets are disabled")
+    return {str(addr) for addr in addresses}
+
+
+def _pinned_probe_opener(url: str, *, allow_private: bool) -> urllib.request.OpenerDirector:
+    """A no-redirect opener whose HTTP(S) connections are pinned to one
+    validated target IP — closes the DNS-rebinding window (M10)."""
+    addresses = _validate_probe_url(url, allow_private=allow_private)
+    if not addresses:
+        raise NsiteError("could not resolve probe host")
+    parsed = urlsplit(url)
+    pinned = sorted(addresses)[0]
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    return urllib.request.build_opener(
+        _PinnedHTTPHandler(pinned_ip=pinned, port=port),
+        _PinnedHTTPSHandler(pinned_ip=pinned, port=port),
+        _NoRedirectHandler(),
+    )
+
+
+def _validate_relay_url(relay_url: str, *, allow_private: bool = False) -> None:
+    """Validate a relay probe target (M10): ws/wss only, no embedded
+    credentials, and (by default) no private/loopback/link-local address."""
+    try:
+        parsed = urlsplit(relay_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise NsiteError(f"invalid relay URL: {exc}") from exc
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname or parsed.username or parsed.password:
+        raise NsiteError("relay URL must be a ws:// or wss:// URL without embedded credentials")
+    if len(relay_url) > 4096 or parsed.fragment:
+        raise NsiteError("relay URL is too long or contains a fragment")
+    try:
+        addresses = {
+            ipaddress.ip_address(result[4][0])
+            for result in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise NsiteError(f"could not resolve relay host: {exc}") from exc
+    if allow_private:
+        return
+    if any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+        for address in addresses
+    ):
+        raise NsiteError("private, loopback, link-local, reserved, unspecified, and multicast relay targets are disabled")
+
+
+def _http_probe(url: str, timeout: float = 5.0, *, allow_private: bool = False) -> dict[str, Any]:
+    """HEAD a URL through a connection pinned to a validated target IP.
+
+    The probe never follows redirects and (by default) refuses targets that
+    resolve to private/loopback addresses, so ``nsite.reachability`` cannot be
+    an SSRF into the metadata service or internal hosts (M10).
+    """
+    try:
+        opener = _pinned_probe_opener(url, allow_private=allow_private)
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-provided target, bounded
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - pinned to validated IP, bounded
             return {"url": url, "ok": True, "status": resp.status}
+    except NsiteError as exc:
+        return {"url": url, "ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "ok": False, "error": str(exc)}
 
@@ -249,10 +406,17 @@ def _read_draft_blob(path: Path) -> bytes | None:
 
 
 def _blossom_has(server: str, sha256: str, timeout: float = 8.0) -> bool:
-    """HEAD a blob on a Blossom server (BUD-01); True when present."""
+    """HEAD a blob on a Blossom server (BUD-01); True when present.
+
+    The connection is pinned to a validated target IP (M10) so the server
+    cannot rebind between resolution and connect; private targets stay
+    allowed because Blossom servers are operator-configured.
+    """
+    url = f"{server}/{sha256}"
     try:
-        req = urllib.request.Request(f"{server}/{sha256}", method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured server
+        opener = _pinned_probe_opener(url, allow_private=True)
+        req = urllib.request.Request(url, method="HEAD")
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - pinned to validated IP, bounded
             return resp.status == 200
     except Exception:  # noqa: BLE001 - a missing/unreachable blob is reported, not raised
         return False
@@ -261,19 +425,25 @@ def _blossom_has(server: str, sha256: str, timeout: float = 8.0) -> bool:
 def _blossom_upload(
     server: str, sha256: str, data: bytes, auth_event: dict[str, Any], timeout: float = 60.0
 ) -> tuple[bool, str]:
-    """PUT a blob to a Blossom server with a kind-24242 auth event (BUD-02/03)."""
+    """PUT a blob to a Blossom server with a kind-24242 auth event (BUD-02/03).
+
+    The connection is pinned to a validated target IP (M10) so the server
+    cannot rebind between resolution and connect.
+    """
     import base64
 
     payload = json.dumps(auth_event, separators=(",", ":")).encode("utf-8")
     header = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    url = f"{server}/upload?sha256={sha256}"
     req = urllib.request.Request(
-        f"{server}/upload?sha256={sha256}",
+        url,
         data=data,
         method="PUT",
         headers={"Authorization": f"Nostr {header}", "Content-Type": "application/octet-stream"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured server
+        opener = _pinned_probe_opener(url, allow_private=True)
+        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - pinned to validated IP, bounded
             return resp.status == 200, str(resp.status)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
@@ -1490,6 +1660,12 @@ class NsiteService:
             raise NsiteError("resolve needs a label or a pubkey")
 
         lookup_relays = [r for r in (relays or []) if r]
+        # M10: caller-supplied relays are validated (ws/wss only, no private/
+        # loopback targets) so resolve cannot be an SSRF vector. Config-default
+        # relays are operator-trusted and left untouched.
+        if relays:
+            for relay in lookup_relays:
+                _validate_relay_url(relay)
         if not lookup_relays:
             state = self._state()
             config = state.get("config") or {}
@@ -1548,10 +1724,19 @@ class NsiteService:
     ) -> dict[str, Any]:
         """Probe relay (WebSocket) and server (HTTP HEAD) reachability.
 
-        Bounded per target; results are advisory only.
+        Bounded per target; results are advisory only. Targets are validated
+        first (M10): only ws/wss relays and HTTP(S) servers are accepted,
+        embedded credentials are refused, and targets resolving to private/
+        loopback/link-local addresses are rejected so the probe cannot be an
+        SSRF into internal hosts.
         """
         relay_results: list[dict[str, Any]] = []
         for relay in (relays or []):
+            try:
+                _validate_relay_url(relay)
+            except NsiteError as exc:
+                relay_results.append({"relay": relay, "ok": False, "error": str(exc)})
+                continue
             started = time.time()
             try:
                 _query_relay_events(relay, {"kinds": []}, limit=1, timeout=timeout)

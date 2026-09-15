@@ -163,6 +163,9 @@ SCOPE_SETTINGS_WRITE = "settings.write"
 SCOPE_NSITES_READ = "nsites.read"
 SCOPE_NSITES_ADMIN = "nsites.admin"
 SCOPE_NSITES_PUBLISH = "nsites.publish"
+SCOPE_IDENTITY_WRITE = "identity.write"
+SCOPE_CAPABILITY_WRITE = "capability.write"
+SCOPE_AGENT_WRITE = "agent.write"
 KNOWN_SCOPES = frozenset(
     {
         SCOPE_SERVER_READ,
@@ -207,6 +210,9 @@ KNOWN_SCOPES = frozenset(
         SCOPE_NSITES_READ,
         SCOPE_NSITES_ADMIN,
         SCOPE_NSITES_PUBLISH,
+        SCOPE_IDENTITY_WRITE,
+        SCOPE_CAPABILITY_WRITE,
+        SCOPE_AGENT_WRITE,
     }
 )
 
@@ -291,6 +297,70 @@ class RollbackApplyArgs(_Strict):
 
 class StateReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the approved reconciliation plan for the state layer")
+
+
+class IdentityLinkArgs(_Strict):
+    username: str = Field(description="the YunoHost account to link")
+    pubkey_or_npub: str = Field(description="the npub/hex pubkey to link to the account")
+    signer_type: str = Field(default="unknown", description="nip07 | nip46 | passkey | unknown")
+    label: str | None = Field(default=None, description="optional display label for the identity")
+    enabled: bool = Field(default=True, description="whether the identity link is active")
+
+
+class IdentityRevokeArgs(_Strict):
+    pubkey_or_npub: str = Field(description="the npub/hex pubkey whose link to revoke")
+
+
+class CapabilityGrantArgs(_Strict):
+    pubkey: str = Field(description="the subject pubkey to grant scopes to")
+    scopes: list[str] = Field(description="the scopes to grant (empty list revokes)")
+    type_: str = Field(default="agent", description="grant type: agent | service | …")
+
+
+class CapabilityDelegateArgs(_Strict):
+    pubkey: str = Field(description="the delegate pubkey")
+    scopes: list[str] = Field(description="the scopes to delegate")
+    expires_at: int = Field(description="unix timestamp the delegation expires at")
+
+
+class CapabilityRevokeArgs(_Strict):
+    delegation_id: str = Field(description="the delegation event id to revoke")
+
+
+class _EmptyArgs(_Strict):
+    pass
+
+
+class AgentModelDownloadArgs(_Strict):
+    model_id: str = Field(description="the model identifier to download")
+    evaluation_only: bool = Field(default=False, description="only fetch the evaluation harness")
+
+
+class AgentModelSelectArgs(_Strict):
+    model_id: str = Field(description="the model identifier to activate")
+
+
+class AgentModeSetArgs(_Strict):
+    level: str = Field(description="the agent operation mode level")
+    confirm: bool = Field(default=False, description="acknowledge the mode's implications")
+
+
+class AgentExportRunArgs(_Strict):
+    cycle_id: str = Field(description="the completed agent cycle to export")
+
+
+class AgentContributionSettingsSetArgs(_Strict):
+    dataset_repo: str = Field(description="the Hugging Face dataset repo")
+    token: str | None = Field(default=None, description="Hugging Face token (stored, never returned)")
+    auto_submit: bool = Field(default=False, description="submit every completed cycle automatically")
+
+
+class AgentContributionSubmitArgs(_Strict):
+    candidate_file_id: str = Field(description="the prepared candidate file to submit")
+
+
+class AgentContributionShareArgs(_Strict):
+    cycle_id: str = Field(description="the completed agent cycle to redact and share")
 
 
 class DomainAddArgs(_Strict):
@@ -612,6 +682,148 @@ def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     from .nostr_operationsd import YnhExecutorBackend
 
     return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
+
+
+# -- identity / capability / agent writes (H5) ------------------------------ #
+#
+# These are admin-only host-plane operations. Each handler pulls the ambient
+# operator/admin keys from the fork config itself, so the secret key never
+# travels in the operation's ``args`` (and never leaks into state snapshots
+# or the audit trail). Routing them through the signed chain gives them the
+# same policy / approval / audit boundary as every other write.
+
+def _safe_identity_link(
+    username: str = "",
+    pubkey_or_npub: str = "",
+    *,
+    signer_type: str = "unknown",
+    label: str | None = None,
+    enabled: bool = True,
+    **extra: Any,
+) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"identity.link does not accept extra args: {sorted(extra)}")
+    from .nostr_identity import link_identity
+
+    return link_identity(
+        username, pubkey_or_npub, signer_type=signer_type, label=label, enabled=bool(enabled)
+    )
+
+
+def _safe_identity_revoke(pubkey_or_npub: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"identity.revoke does not accept extra args: {sorted(extra)}")
+    from .nostr_identity import revoke_identity
+
+    return revoke_identity(pubkey_or_npub)
+
+
+def _safe_capability_grant(pubkey: str = "", scopes: list[str] | None = None, type_: str = "agent", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"capability.grant does not accept extra args: {sorted(extra)}")
+    if not pubkey:
+        raise OperationError("capability.grant requires a pubkey")
+    return grant_capability(pubkey, list(scopes or []), type_=type_)
+
+
+def _safe_capability_delegate(pubkey: str = "", scopes: list[str] | None = None, expires_at: int = 0, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"capability.delegate does not accept extra args: {sorted(extra)}")
+    if not pubkey:
+        raise OperationError("capability.delegate requires a pubkey")
+    return delegate_capability(pubkey, list(scopes or []), int(expires_at))
+
+
+def _safe_capability_revoke(delegation_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"capability.revoke does not accept extra args: {sorted(extra)}")
+    if not delegation_id:
+        raise OperationError("capability.revoke requires a delegation_id")
+    return revoke_delegation(delegation_id)
+
+
+def _safe_agent_init(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.init does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_init
+
+    return _agent_init()
+
+
+def _safe_agent_service(action: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.{action or 'service'} does not accept extra args: {sorted(extra)}")
+    if action not in ("enable", "disable"):
+        raise OperationError("agent.enable/disable requires an action")
+    from .nostrhost.cli import _agent_service
+
+    return _agent_service(action)
+
+
+def _safe_agent_enable(**extra: Any) -> dict[str, Any]:
+    return _safe_agent_service("enable", **extra)
+
+
+def _safe_agent_disable(**extra: Any) -> dict[str, Any]:
+    return _safe_agent_service("disable", **extra)
+
+
+def _safe_agent_model_download(model_id: str = "", evaluation_only: bool = False, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.model.download does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_model_download
+
+    return _agent_model_download(model_id, bool(evaluation_only))
+
+
+def _safe_agent_model_select(model_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.model.select does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_model_select
+
+    return _agent_model_select(model_id)
+
+
+def _safe_agent_mode_set(level: str = "", confirm: bool = False, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.mode.set does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_mode_set
+
+    return _agent_mode_set(level, bool(confirm))
+
+
+def _safe_agent_export_run(cycle_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.export.run does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_export_run
+
+    return _agent_export_run(cycle_id)
+
+
+def _safe_agent_contribution_settings_set(
+    dataset_repo: str = "", token: str | None = None, auto_submit: bool = False, **extra: Any
+) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.contribution.settings.set does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_contribution_settings_set
+
+    return _agent_contribution_settings_set(dataset_repo, token, bool(auto_submit))
+
+
+def _safe_agent_contribution_submit(candidate_file_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.contribution.submit does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_contribution_submit
+
+    return _agent_contribution_submit(candidate_file_id)
+
+
+def _safe_agent_contribution_share(cycle_id: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"agent.contribution.share does not accept extra args: {sorted(extra)}")
+    from .nostrhost.cli import _agent_contribution_share
+
+    return _agent_contribution_share(cycle_id)
 
 
 # The default registry: read-only tools plus write operations gated by scope
@@ -955,6 +1167,111 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_DNS_CREDENTIALS_READ,
         require_approval=False,
         description="list configured DNS credential references (names only, never values)",
+    ),
+    "identity.link": ToolSpec(
+        name="identity.link",
+        handler=_safe_identity_link,
+        scope=SCOPE_IDENTITY_WRITE,
+        input_model=IdentityLinkArgs,
+        description="link a YunoHost account to an npub (publishes kind 31102 as the operator)",
+    ),
+    "identity.revoke": ToolSpec(
+        name="identity.revoke",
+        handler=_safe_identity_revoke,
+        scope=SCOPE_IDENTITY_WRITE,
+        input_model=IdentityRevokeArgs,
+        description="revoke an npub identity link (publishes an enabled:false kind 31102)",
+    ),
+    "capability.grant": ToolSpec(
+        name="capability.grant",
+        handler=_safe_capability_grant,
+        scope=SCOPE_CAPABILITY_WRITE,
+        input_model=CapabilityGrantArgs,
+        description="publish a kind-31100 capability grant for a subject pubkey (admin-only meta-op)",
+    ),
+    "capability.delegate": ToolSpec(
+        name="capability.delegate",
+        handler=_safe_capability_delegate,
+        scope=SCOPE_CAPABILITY_WRITE,
+        input_model=CapabilityDelegateArgs,
+        description="publish a signed, server-scoped delegation (admin-only meta-op)",
+    ),
+    "capability.revoke": ToolSpec(
+        name="capability.revoke",
+        handler=_safe_capability_revoke,
+        scope=SCOPE_CAPABILITY_WRITE,
+        input_model=CapabilityRevokeArgs,
+        description="publish a signed revocation for a delegation event (admin-only meta-op)",
+    ),
+    "agent.init": ToolSpec(
+        name="agent.init",
+        handler=_safe_agent_init,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=_EmptyArgs,
+        description="provision the resident agent (keys, service, config)",
+    ),
+    "agent.enable": ToolSpec(
+        name="agent.enable",
+        handler=_safe_agent_enable,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=_EmptyArgs,
+        description="start the resident agent service",
+    ),
+    "agent.disable": ToolSpec(
+        name="agent.disable",
+        handler=_safe_agent_disable,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=_EmptyArgs,
+        description="stop the resident agent service",
+    ),
+    "agent.model.download": ToolSpec(
+        name="agent.model.download",
+        handler=_safe_agent_model_download,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentModelDownloadArgs,
+        description="download and register an agent model",
+    ),
+    "agent.model.select": ToolSpec(
+        name="agent.model.select",
+        handler=_safe_agent_model_select,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentModelSelectArgs,
+        description="select the active agent model",
+    ),
+    "agent.mode.set": ToolSpec(
+        name="agent.mode.set",
+        handler=_safe_agent_mode_set,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentModeSetArgs,
+        description="set the resident agent's operation mode",
+    ),
+    "agent.export.run": ToolSpec(
+        name="agent.export.run",
+        handler=_safe_agent_export_run,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentExportRunArgs,
+        description="run a data export cycle for a completed agent cycle",
+    ),
+    "agent.contribution.settings.set": ToolSpec(
+        name="agent.contribution.settings.set",
+        handler=_safe_agent_contribution_settings_set,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentContributionSettingsSetArgs,
+        description="set contribution settings (dataset repo, HF token, auto-submit)",
+    ),
+    "agent.contribution.submit": ToolSpec(
+        name="agent.contribution.submit",
+        handler=_safe_agent_contribution_submit,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentContributionSubmitArgs,
+        description="submit one prepared candidate file to the community dataset",
+    ),
+    "agent.contribution.share": ToolSpec(
+        name="agent.contribution.share",
+        handler=_safe_agent_contribution_share,
+        scope=SCOPE_AGENT_WRITE,
+        input_model=AgentContributionShareArgs,
+        description="redact and submit one completed agent cycle in a single call",
     ),
     **_native_tools(),
 }

@@ -44,6 +44,35 @@ SESSION_SECRET_PATH = Path("/etc/yunohost/.ssowat_cookie_secret")
 SESSION_FOLDER = Path("/var/cache/yunohost-portal/sessions")
 SESSION_VALIDITY = 3 * 24 * 3600  # 3 days
 
+# The SSO cookie is domain-wide (Domain=<host>, sent to every subdomain) so
+# apps behind forward_auth can share one sign-in. The admin cookie is the
+# SEPARATE host-only admin credential (H4): no Domain attribute, so the
+# browser only sends it to the exact host that minted it — a subdomain app
+# cannot receive it at all. The native API requires it (with a per-request
+# CSRF token) for cookie-session authorization, so a subdomain XSS can no
+# longer ride the domain-wide SSO cookie to drive the admin API.
+SESSION_COOKIE = "nostrhost.portal"
+# The host-only admin credential. Deliberately NOT named "nostrhost.admin":
+# that name is taken by the legacy Moulinette admin cookie at
+# /nostrhost/api (ldap_admin.py), which would shadow ours on that path.
+ADMIN_COOKIE = "nostrhost.console"
+
+
+def session_csrf_token(infos: Mapping[str, Any], *, secret: str | None = None) -> str:
+    """Per-session CSRF token: HMAC of the session id under the server secret.
+
+    Returned by the native API's public ``/package/session`` probe, which only
+    same-origin code can read (no CORS for other origins). The native API
+    requires it on every cookie-authenticated request, so a cross-origin
+    page — even a same-site subdomain XSS — cannot forge the custom header a
+    cookie ride-along would need.
+    """
+    import hmac
+
+    secret = secret if secret is not None else SESSION_SECRET()
+    session_id = str(infos.get("id") or "")
+    return hmac.new(secret.encode(), f"csrf:{session_id}".encode(), hashlib.sha256).hexdigest()
+
 
 def _host_domain(host: str) -> str:
     """Strip a ``:port`` suffix from a Host header value.
@@ -220,14 +249,30 @@ class Authenticator(BaseAuthenticator):  # type: ignore
 
         is_dev = Path("/etc/yunohost/.portal-api-allowed-cors-origins").exists()
 
+        token = jwt.encode(infos, SESSION_SECRET(), algorithm="HS256")
+
+        # Domain-wide SSO cookie: shared across subdomains for forward_auth.
         response.set_cookie(
-            "nostrhost.portal",
-            jwt.encode(infos, SESSION_SECRET(), algorithm="HS256"),
+            SESSION_COOKIE,
+            token,
             secure=True,
             httponly=True,
             path="/",
             samesite="lax" if not is_dev else None,
             domain=f".{_host_domain(request.get_header('host'))}",
+            max_age=SESSION_VALIDITY
+            - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
+        )
+        # Host-only admin credential (H4): no Domain attribute, so only the
+        # minting host ever receives it. The native admin API authenticates
+        # cookie sessions against this cookie (with a per-request CSRF token).
+        response.set_cookie(
+            ADMIN_COOKIE,
+            token,
+            secure=True,
+            httponly=True,
+            path="/",
+            samesite="lax" if not is_dev else None,
             max_age=SESSION_VALIDITY
             - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
         )
@@ -237,10 +282,21 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         session_file.touch(exist_ok=True)
 
     def get_session_cookie(self, decrypt_pwd: bool = False) -> Mapping[str, Any]:
+        return self._decode_session_cookie(SESSION_COOKIE, decrypt_pwd=decrypt_pwd)
+
+    def get_admin_cookie(self, decrypt_pwd: bool = False) -> Mapping[str, Any]:
+        """The host-only admin credential, with the SSO cookie as a fallback
+        for nodes where the admin cookie was minted before this split (H4)."""
+        try:
+            return self._decode_session_cookie(ADMIN_COOKIE, decrypt_pwd=decrypt_pwd)
+        except Exception:
+            return self._decode_session_cookie(SESSION_COOKIE, decrypt_pwd=decrypt_pwd)
+
+    def _decode_session_cookie(self, cookie_name: str, *, decrypt_pwd: bool = False) -> Mapping[str, Any]:
         from bottle import request, response
 
         try:
-            token = request.get_cookie("nostrhost.portal", default="").encode()
+            token = request.get_cookie(cookie_name, default="").encode()
             infos = jwt.decode(
                 token,
                 SESSION_SECRET(),
@@ -262,7 +318,8 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         self.purge_expired_session_files()
         session_file = SESSION_FOLDER / infos["id"]
         if not session_file.exists():
-            response.delete_cookie("nostrhost.portal", path="/")
+            response.delete_cookie(SESSION_COOKIE, path="/")
+            response.delete_cookie(ADMIN_COOKIE, path="/")
             raise YunohostAuthenticationError("session_expired")
 
         # Otherwise, we 'touch' the file to extend the validity
@@ -270,17 +327,29 @@ class Authenticator(BaseAuthenticator):  # type: ignore
 
         is_dev = Path("/etc/yunohost/.portal-api-allowed-cors-origins").exists()
 
-        # We also re-set the cookie such that validity is also extended on browser side
+        # We also re-set the cookies such that validity is also extended on browser side
         response.set_cookie(
-            "nostrhost.portal",
+            SESSION_COOKIE,
             request.get_cookie(
-                "nostrhost.portal"
+                SESSION_COOKIE
             ),  # Reuse the same token to avoid recomputing stuff (saves a bit of CPU / delay I suppose?)
             secure=True,
             httponly=True,
             path="/",
             samesite="lax" if not is_dev else None,
             domain=f".{_host_domain(request.get_header('host'))}",
+            max_age=SESSION_VALIDITY
+            - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
+        )
+        response.set_cookie(
+            ADMIN_COOKIE,
+            request.get_cookie(
+                ADMIN_COOKIE
+            ),
+            secure=True,
+            httponly=True,
+            path="/",
+            samesite="lax" if not is_dev else None,
             max_age=SESSION_VALIDITY
             - 600,  # remove 1 minute such that cookie expires on the browser slightly sooner on browser side, just to help desimbuigate edge case near the expiration limit
         )
@@ -294,7 +363,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         from bottle import response
 
         try:
-            infos = self.get_session_cookie()
+            infos = self.get_admin_cookie()
             session_file = SESSION_FOLDER / infos["id"]
             session_file.unlink()
         except Exception as e:
@@ -302,7 +371,8 @@ class Authenticator(BaseAuthenticator):  # type: ignore
                 f"User logged out, but failed to properly invalidate the session : {e}"
             )
 
-        response.delete_cookie("nostrhost.portal", path="/")
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(ADMIN_COOKIE, path="/")
 
     def purge_expired_session_files(self) -> None:
         for session_file in SESSION_FOLDER.iterdir():
