@@ -1067,6 +1067,99 @@ def build_app(
     def catalog_get(app_id: str) -> Any:
         return _run_tool("catalog.get", {"app_id": app_id})
 
+    @app.post("/package/catalog/publish")
+    def catalog_publish() -> Any:
+        body = _json_body()
+        return _run_tool("catalog.publish", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
+
+    @app.post("/package/catalog/declare")
+    def catalog_declare() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "catalog.declare",
+            {
+                "package": body.get("package"),
+                "repository": body.get("repository", ""),
+                "relays": body.get("relays", ""),
+            },
+        )
+
+    @app.post("/package/catalog/verify")
+    def catalog_verify() -> Any:
+        body = _json_body()
+        return _run_tool("catalog.verify", {"event_or_naddr": body.get("event_or_naddr", "")})
+
+    @app.get("/package/catalog/candidates")
+    def catalog_candidates() -> Any:
+        return _run_tool("catalog.candidates", {})
+
+    @app.post("/package/catalog/attest")
+    def catalog_attest() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "catalog.attest",
+            {
+                "app_id": body.get("app_id", ""),
+                "publisher": body.get("publisher", ""),
+                "claim": body.get("claim", ""),
+                "comment": body.get("comment", ""),
+                "relays": body.get("relays", ""),
+            },
+        )
+
+    @app.get("/package/catalog/history")
+    def catalog_history() -> Any:
+        return _run_tool("catalog.history", {})
+
+    @app.get("/package/catalog/trust")
+    def catalog_trust() -> Any:
+        query = request.query
+        required_checks = [item for item in query.get("required_checks", "").split(",") if item]
+        trusted_verifiers = [item for item in query.get("trusted_verifiers", "").split(",") if item]
+        min_attestations = query.get("min_attestations", "")
+        return _run_tool(
+            "catalog.trust",
+            {
+                "attestation_policy": query.get("attestation_policy", "off"),
+                "min_attestations": int(min_attestations) if min_attestations.isdigit() else 0,
+                "required_checks": required_checks,
+                "trusted_verifiers": trusted_verifiers,
+            },
+        )
+
+    @app.post("/package/catalog/reverify")
+    def catalog_reverify() -> Any:
+        body = _json_body()
+        return _run_tool("catalog.reverify", {"app_id": body.get("app_id", "")})
+
+    @app.get("/package/catalog/profile")
+    def catalog_profile_get() -> Any:
+        return _run_tool("catalog.profile.get", {})
+
+    @app.post("/package/catalog/profile")
+    def catalog_profile_set() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "catalog.profile.set",
+            {
+                "name": body.get("name", ""),
+                "about": body.get("about", ""),
+                "picture": body.get("picture", ""),
+                "nip05": body.get("nip05", ""),
+                "website": body.get("website", ""),
+                "relays": body.get("relays", ""),
+            },
+        )
+
+    @app.get("/package/catalog/announcements")
+    def catalog_announcements() -> Any:
+        return _run_tool("catalog.announcements", {})
+
+    @app.post("/package/catalog/announce")
+    def catalog_announce() -> Any:
+        body = _json_body()
+        return _run_tool("catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")})
+
     # -- app ----------------------------------------------------------------
 
     @app.get("/package/app/list")

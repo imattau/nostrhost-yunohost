@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -208,6 +209,75 @@ class CatalogPublishArgs(_Strict):
         default="ws://127.0.0.1:4848",
         description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
     )
+
+
+class CatalogDeclareArgs(_Strict):
+    package: dict[str, Any] = Field(..., description="a native package manifest, the same object sent to package.plan")
+    repository: str = Field(..., description="a URL where this exact manifest content is published, for provenance")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
+    )
+
+
+class CatalogCandidatesArgs(_Strict):
+    pass
+
+
+class CatalogAttestArgs(_Strict):
+    app_id: str = Field(..., description="the app id being endorsed")
+    publisher: str = Field(..., description="the declaration publisher's hex pubkey being endorsed")
+    claim: Literal["recommend", "tested"] = Field(..., description="the endorsement claim")
+    comment: str = Field(default="", description="an optional free-text comment attached to the endorsement")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the endorsement to",
+    )
+
+
+class CatalogHistoryArgs(_Strict):
+    pass
+
+
+class CatalogTrustArgs(_Strict):
+    attestation_policy: Literal["off", "prefer", "require"] = Field(
+        default="off", description="the CI-attestation policy mode to evaluate every declaration against"
+    )
+    min_attestations: int = Field(default=0, ge=0, description="minimum acceptable attestations to count a revision verified (0 = default of 1)")
+    required_checks: list[str] = Field(default_factory=list, description="required CI check names; empty means any overall pass result is acceptable")
+    trusted_verifiers: list[str] = Field(default_factory=list, description="trusted attestation verifier keys; empty means trust any verifier")
+
+
+class CatalogReverifyArgs(_Strict):
+    app_id: str = Field(..., description="the app id to independently re-check against its declared repository and commit")
+
+
+class CatalogProfileGetArgs(_Strict):
+    pass
+
+
+class CatalogProfileSetArgs(_Strict):
+    name: str = Field(default="", description="the catalogue publisher's display name")
+    about: str = Field(default="", description="a short bio for the catalogue publisher")
+    picture: str = Field(default="", description="a picture URL for the catalogue publisher")
+    nip05: str = Field(default="", description="a NIP-05 identifier for the catalogue publisher")
+    website: str = Field(default="", description="a website URL for the catalogue publisher")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the profile to",
+    )
+
+
+class CatalogAnnounceArgs(_Strict):
+    app_id: str = Field(..., description="the app id to announce, must be one of this node's own published declarations")
+    relays: str = Field(
+        default="ws://127.0.0.1:4848",
+        description="comma-separated relay ws:// or wss:// URLs to publish the announcement to",
+    )
+
+
+class CatalogAnnouncementsArgs(_Strict):
+    pass
 
 
 class UpdatesCheckArgs(_Strict):
@@ -658,11 +728,17 @@ def _trusted_publishers() -> str:
     return _operator_config().publisher_pubkey
 
 
-def _catalog_cli(subcommand: list[str], stdin_data: bytes | None = None) -> dict[str, Any]:
-    """Run the native catalogue CLI and parse its JSON stdout."""
+def _catalog_cli(subcommand: list[str], stdin_data: bytes | None = None, extra_flags: list[str] | None = None) -> dict[str, Any]:
+    """Run the native catalogue CLI and parse its JSON stdout.
+
+    extra_flags are inserted before the subcommand name - the Go CLI's flag
+    package stops parsing flags at the first positional argument, so a flag
+    like --app-id or --attestation-policy that a specific subcommand reads
+    must precede it, not follow it.
+    """
     import subprocess
 
-    cmd = [CATALOG_BIN, "--publishers", _trusted_publishers(), "--state", CATALOG_STATE, *subcommand]
+    cmd = [CATALOG_BIN, "--publishers", _trusted_publishers(), "--state", CATALOG_STATE, *(extra_flags or []), *subcommand]
     try:
         proc = subprocess.run(cmd, input=stdin_data, capture_output=True, timeout=60)
     except FileNotFoundError:
@@ -746,6 +822,351 @@ def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> d
         "published": result,
         "ingested": ingest,
     }
+
+
+def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
+    """Declare a brand-new app in the catalogue from an authored native
+    package manifest - the missing link between the package-authoring
+    screen's "review plan" and actually getting the package installable by
+    anyone else.
+
+    Unlike catalog.publish (which re-declares an *existing* trusted
+    catalogue entry), this builds a fresh kind-32267 declaration from a
+    manifest that has never been declared before. It reuses package.plan's
+    own validation and its exact manifest_sha256 (package_plan_envelope's
+    canonical-JSON hash) as the authoritative provenance hash, so a
+    declaration can never drift from what package.plan would compute for
+    the same manifest.
+
+    This does not (yet) independently re-clone `repository` to confirm the
+    manifest actually lives there the way catalog.reverify does for
+    YunoHost-style git packages - the Go catalogue library's repository
+    verification assumes a manifest.toml layout, not this project's native
+    JSON package schema. `repository` is provenance the admin asserts, not
+    yet independently checked; commit/manifest/content hashes are all the
+    manifest's own content hash, since a native package has no separate
+    build artifact distinct from its manifest.
+    """
+    if extra:
+        raise OperationError(f"catalog.declare does not accept extra args: {sorted(extra)}")
+    if not isinstance(package, dict):
+        raise OperationError("catalog.declare requires a package object")
+    if not repository:
+        raise OperationError("catalog.declare requires a repository URL where this exact manifest is published")
+
+    from nostrhost.package_engine import package_plan_envelope
+
+    try:
+        envelope = package_plan_envelope(package)
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"invalid native package: {exc}") from exc
+
+    app_id = envelope["package"]["id"]
+    version = envelope["package"]["version"]
+    manifest_hash = envelope["manifest_sha256"]
+
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    cfg = _operator_config()
+    tags = [
+        ["d", app_id],
+        ["platform", "native"],
+        ["repository", repository],
+        ["version", version],
+        ["commit", manifest_hash],
+        ["manifest", f"sha256:{manifest_hash}"],
+        ["content", f"sha256:{manifest_hash}"],
+    ]
+    content_json = json.dumps({"name": app_id}, separators=(",", ":"))
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
+
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
+    return {
+        "app_id": app_id,
+        "publisher_pubkey": cfg.publisher_pubkey,
+        "event_id": event["id"],
+        "published": result,
+        "ingested": ingest,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# catalogue admin page (Phase 6) — endorsements, trust dashboard, on-demand
+# reverification, publisher profile, and release announcements. Every event
+# built here is signed with the node's publisher key the same way
+# catalog.publish already is (_sign_event, never leaving this process), then
+# handed to the catalogue CLI's kind-agnostic "publish" subcommand for pure
+# transport - the CLI itself never accepts a private key. Local bookkeeping
+# (endorsement/announcement history, the "already announced" dedup, and the
+# last-published profile fields) lives in small JSON files next to the
+# catalogue state file rather than inside the Go projection, since none of it
+# is relay-sourced truth the way the trusted declarations/attestations are.
+
+def _catalog_attestation_ledger_path() -> str:
+    return os.environ.get("NOSTRHOST_CATALOG_ATTESTATION_LEDGER", "/var/lib/nostrhost/catalogue-attestations.json")
+
+
+def _catalog_announce_ledger_path() -> str:
+    return os.environ.get("NOSTRHOST_CATALOG_ANNOUNCE_LEDGER", "/var/lib/nostrhost/catalogue-announcements.json")
+
+
+def _catalog_profile_state_path() -> str:
+    return os.environ.get("NOSTRHOST_CATALOG_PROFILE_STATE", "/var/lib/nostrhost/catalogue-profile.json")
+
+
+def _read_json_list(path: str) -> list[dict[str, Any]]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _read_json_object(path: str) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_atomic(path: str, value: Any) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o750, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(dir=directory, prefix=".catalogue-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle)
+        os.chmod(temporary_path, 0o640)
+        os.replace(temporary_path, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def _catalog_entries() -> list[dict[str, Any]]:
+    listing = _catalog_cli(["list"])
+    entries = listing.get("entries") if isinstance(listing, dict) else listing
+    return entries if isinstance(entries, list) else []
+
+
+def _safe_catalog_candidates(**args: Any) -> dict[str, Any]:
+    """Installed apps declared by a publisher other than this node, that this
+    node has not already endorsed - the attest screen's candidate list."""
+    if args:
+        raise OperationError(f"catalog.candidates does not accept extra args: {sorted(args)}")
+
+    from yunohost.nostr_identity import _operator_config
+
+    from .cli import _TOOL_HANDLERS
+
+    self_pubkey = _operator_config().publisher_pubkey
+    installed = _TOOL_HANDLERS["app.list"]().get("apps", {})
+    if not isinstance(installed, dict):
+        installed = {}
+    attested = {
+        (record.get("app_id"), record.get("publisher"))
+        for record in _read_json_list(_catalog_attestation_ledger_path())
+    }
+
+    candidates = []
+    for entry in _catalog_entries():
+        declaration = entry.get("declaration") if isinstance(entry, dict) else None
+        if not isinstance(declaration, dict):
+            continue
+        app_id = declaration.get("AppID")
+        publisher = declaration.get("Publisher")
+        if not app_id or not publisher or publisher == self_pubkey:
+            continue
+        if app_id not in installed:
+            continue
+        if (app_id, publisher) in attested:
+            continue
+        candidates.append(
+            {
+                "app_id": app_id,
+                "publisher": publisher,
+                "version": declaration.get("Version"),
+                "name": declaration.get("Name") or app_id,
+            }
+        )
+    return {"candidates": candidates}
+
+
+def _safe_catalog_attest(
+    app_id: str = "", publisher: str = "", claim: str = "", comment: str = "", relays: str = "", **extra: Any
+) -> dict[str, Any]:
+    """Publish a kind-30079 curator endorsement for another publisher's
+    declaration, mirroring internal/curation.Build's exact tag/content shape
+    so the Go catalogue library can parse events built here."""
+    if extra:
+        raise OperationError(f"catalog.attest does not accept extra args: {sorted(extra)}")
+    if not app_id or not publisher:
+        raise OperationError("catalog.attest requires an app_id and publisher")
+    if claim not in ("recommend", "tested"):
+        raise OperationError("catalog.attest claim must be recommend or tested")
+
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    cfg = _operator_config()
+    if publisher == cfg.publisher_pubkey:
+        raise OperationError("catalog.attest cannot endorse this node's own declaration")
+    tags = [["a", f"32267:{publisher}:{app_id}"], ["claim", claim]]
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 30079, comment, tags)
+
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    ledger = _read_json_list(_catalog_attestation_ledger_path())
+    ledger.append(
+        {
+            "app_id": app_id,
+            "publisher": publisher,
+            "claim": claim,
+            "comment": comment,
+            "event_id": event["id"],
+            "created_at": event["created_at"],
+        }
+    )
+    _write_json_atomic(_catalog_attestation_ledger_path(), ledger)
+    return {"app_id": app_id, "publisher": publisher, "event_id": event["id"], "published": result}
+
+
+def _safe_catalog_history(**args: Any) -> dict[str, Any]:
+    """Every endorsement this node has published, most recent first."""
+    if args:
+        raise OperationError(f"catalog.history does not accept extra args: {sorted(args)}")
+    history = sorted(_read_json_list(_catalog_attestation_ledger_path()), key=lambda record: record.get("created_at", 0), reverse=True)
+    return {"history": history}
+
+
+def _safe_catalog_trust(
+    attestation_policy: str = "off",
+    min_attestations: int = 0,
+    required_checks: list[str] | None = None,
+    trusted_verifiers: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Every accepted declaration's trust picture under the given CI-attestation
+    policy: what this node has verified, what CI-backed attestations exist for
+    its exact revision, and what the policy decides as a result."""
+    if extra:
+        raise OperationError(f"catalog.trust does not accept extra args: {sorted(extra)}")
+    extra_flags = ["--attestation-policy", attestation_policy]
+    if min_attestations:
+        extra_flags += ["--min-attestations", str(min_attestations)]
+    if required_checks:
+        extra_flags += ["--required-checks", ",".join(required_checks)]
+    if trusted_verifiers:
+        extra_flags += ["--trusted-verifiers", ",".join(trusted_verifiers)]
+    result = _catalog_cli(["trust"], extra_flags=extra_flags)
+    entries = result if isinstance(result, list) else result.get("raw", [])
+    return {"entries": entries if isinstance(entries, list) else []}
+
+
+def _safe_catalog_reverify(app_id: str = "", **extra: Any) -> dict[str, Any]:
+    """Independently re-check one accepted declaration on demand: re-clone its
+    repository at the declared commit and recompute both hashes, rather than
+    trusting whatever was true at ingestion time."""
+    if extra:
+        raise OperationError(f"catalog.reverify does not accept extra args: {sorted(extra)}")
+    if not app_id:
+        raise OperationError("catalog.reverify requires an app_id")
+    return _catalog_cli(["reverify"], extra_flags=["--app-id", app_id])
+
+
+def _safe_catalog_profile_get(**args: Any) -> dict[str, Any]:
+    """This node's last-published kind-0 catalogue publisher profile, from a
+    local cache - a missing cache means nothing has been published yet
+    through this admin page, not an error."""
+    if args:
+        raise OperationError(f"catalog.profile.get does not accept extra args: {sorted(args)}")
+    from yunohost.nostr_identity import _operator_config
+
+    return {"profile": _read_json_object(_catalog_profile_state_path()), "self_publisher": _operator_config().publisher_pubkey}
+
+
+def _safe_catalog_profile_set(
+    name: str = "", about: str = "", picture: str = "", nip05: str = "", website: str = "", relays: str = "", **extra: Any
+) -> dict[str, Any]:
+    """Publish a kind-0 profile for the catalogue publisher key, so it
+    resolves to a real, followable account instead of an opaque hex string."""
+    if extra:
+        raise OperationError(f"catalog.profile.set does not accept extra args: {sorted(extra)}")
+
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    profile = {
+        key: value
+        for key, value in {"name": name, "about": about, "picture": picture, "nip05": nip05, "website": website}.items()
+        if value
+    }
+    cfg = _operator_config()
+    content = json.dumps(profile, separators=(",", ":"))
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 0, content, [])
+
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    # Only cache the edited fields once at least one relay accepted the
+    # event - a total publish failure should leave the cache showing what is
+    # still genuinely live, not a profile nobody has seen.
+    published = isinstance(result, dict) and any(not item.get("error") for item in result.get("relays", []))
+    if published:
+        _write_json_atomic(_catalog_profile_state_path(), profile)
+    return {"event_id": event["id"], "published": result, "cached": published}
+
+
+def _safe_catalog_announce(app_id: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
+    """Publish a kind-1 text note announcing a release, so it shows up in an
+    ordinary Nostr feed instead of only as an unrendered replaceable event -
+    only for a declaration this node itself published, and only once per
+    revision (deduped against the same ledger a future automated --announce
+    publish flow would share)."""
+    if extra:
+        raise OperationError(f"catalog.announce does not accept extra args: {sorted(extra)}")
+    if not app_id:
+        raise OperationError("catalog.announce requires an app_id")
+
+    from yunohost.nostr_identity import _operator_config, _sign_event
+
+    cfg = _operator_config()
+    declaration = _catalog_cli(["get", app_id])
+    if declaration.get("Publisher") != cfg.publisher_pubkey:
+        raise OperationError("catalog.announce can only announce this node's own declarations")
+    commit = declaration.get("Commit") or ""
+    if any(
+        record.get("app_id") == app_id and record.get("commit") == commit
+        for record in _read_json_list(_catalog_announce_ledger_path())
+    ):
+        raise OperationError(f"app {app_id!r} at commit {commit[:7]} was already announced")
+
+    version = declaration.get("Version") or ""
+    repository = declaration.get("Repository") or ""
+    name = declaration.get("Name") or app_id
+    short_commit = commit[:7] if commit else ""
+    # No nostr: naddr link is embedded here - this codebase does not carry a
+    # nip19 encoder (see catalog.verify's own naddr note), and the "a" tag
+    # below already gives clients a resolvable address for the declaration.
+    content = f"\U0001f4e6 {name} {version} published\n{repository}@{short_commit}".rstrip()
+    tags = [["a", f"32267:{cfg.publisher_pubkey}:{app_id}"], ["r", repository]]
+    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 1, content, tags)
+
+    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    ledger = _read_json_list(_catalog_announce_ledger_path())
+    ledger.append({"app_id": app_id, "commit": commit, "version": version, "event_id": event["id"], "created_at": event["created_at"]})
+    _write_json_atomic(_catalog_announce_ledger_path(), ledger)
+    return {"app_id": app_id, "event_id": event["id"], "published": result}
+
+
+def _safe_catalog_announcements(**args: Any) -> dict[str, Any]:
+    """Every announcement note this node has published, most recent first."""
+    if args:
+        raise OperationError(f"catalog.announcements does not accept extra args: {sorted(args)}")
+    history = sorted(_read_json_list(_catalog_announce_ledger_path()), key=lambda record: record.get("created_at", 0), reverse=True)
+    return {"announcements": history}
 
 
 # --------------------------------------------------------------------------- #
@@ -1789,6 +2210,56 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="catalog.publish", handler=_safe_catalog_publish, scope=SCOPE_CATALOG_PUBLISH,
         input_model=CatalogPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
         description="re-declare a trusted app under the node's catalogue publisher key and publish it (admin approval)",
+    ),
+    "catalog.declare": ToolSpec(
+        name="catalog.declare", handler=_safe_catalog_declare, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogDeclareArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="declare a new app in the catalogue from an authored native package manifest (admin approval)",
+    ),
+    "catalog.candidates": ToolSpec(
+        name="catalog.candidates", handler=_safe_catalog_candidates, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogCandidatesArgs,
+        description="installed apps declared by another publisher this node has not yet endorsed",
+    ),
+    "catalog.attest": ToolSpec(
+        name="catalog.attest", handler=_safe_catalog_attest, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogAttestArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="publish a curator endorsement (recommend/tested) for another publisher's declaration (admin approval)",
+    ),
+    "catalog.history": ToolSpec(
+        name="catalog.history", handler=_safe_catalog_history, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogHistoryArgs,
+        description="every endorsement this node has published, most recent first",
+    ),
+    "catalog.trust": ToolSpec(
+        name="catalog.trust", handler=_safe_catalog_trust, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogTrustArgs,
+        description="every accepted declaration's CI-attestation trust status under a given policy",
+    ),
+    "catalog.reverify": ToolSpec(
+        name="catalog.reverify", handler=_safe_catalog_reverify, scope=SCOPE_CATALOG_VERIFY,
+        require_approval=False, input_model=CatalogReverifyArgs,
+        description="independently re-check one accepted declaration against its repository and commit",
+    ),
+    "catalog.profile.get": ToolSpec(
+        name="catalog.profile.get", handler=_safe_catalog_profile_get, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogProfileGetArgs,
+        description="this node's last-published catalogue publisher profile",
+    ),
+    "catalog.profile.set": ToolSpec(
+        name="catalog.profile.set", handler=_safe_catalog_profile_set, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogProfileSetArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
+        description="publish a kind-0 profile for the catalogue publisher key (admin approval)",
+    ),
+    "catalog.announce": ToolSpec(
+        name="catalog.announce", handler=_safe_catalog_announce, scope=SCOPE_CATALOG_PUBLISH,
+        input_model=CatalogAnnounceArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
+        description="publish a release announcement note for one of this node's own declarations (admin approval)",
+    ),
+    "catalog.announcements": ToolSpec(
+        name="catalog.announcements", handler=_safe_catalog_announcements, scope=SCOPE_CATALOG_READ,
+        require_approval=False, input_model=CatalogAnnouncementsArgs,
+        description="every release announcement this node has published, most recent first",
     ),
     "updates.check": ToolSpec(
         name="updates.check", handler=_safe_updates_check, scope=SCOPE_SYSTEM_UPDATE,
