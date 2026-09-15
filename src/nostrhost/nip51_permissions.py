@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .events import _d_tag
+
 logger = logging.getLogger("nostr-permissiond")
 
 PERMISSION_LIST_KIND = 30000  # NIP-51 "follow sets" (people list)
@@ -61,11 +63,6 @@ def _tag_values(event: dict[str, Any], name: str) -> list[str]:
         for tag in event.get("tags") or []
         if isinstance(tag, list) and len(tag) >= 2 and tag[0] == name
     ]
-
-
-def _d_tag(event: dict[str, Any]) -> str | None:
-    values = _tag_values(event, "d")
-    return values[0] if values else None
 
 
 def _is_public(event: dict[str, Any]) -> bool:

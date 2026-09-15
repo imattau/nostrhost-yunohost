@@ -8,6 +8,13 @@ Type=simple
 ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-operationsd
 Restart=on-failure
 RestartSec=5s
+# Sandboxing hardening block: kept identical (module for module) across all
+# nostr-*d.service units (ddnswatchd/securityd/permissiond/identityd/
+# operationsd) with ONE deliberate exception below -- change one, change them
+# all. ProtectHome=read-only (not =true, like the other four) because this
+# daemon needs to write /home/yunohost.backup (see ReadWritePaths below);
+# read-only keeps /home visible-but-protected so that grant can apply, where
+# ProtectHome=true would make /home inaccessible outright.
 User=root
 UMask=0077
 NoNewPrivileges=true

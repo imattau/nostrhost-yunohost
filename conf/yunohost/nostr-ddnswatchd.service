@@ -8,6 +8,12 @@ Type=simple
 ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-ddnswatchd
 Restart=on-failure
 RestartSec=5s
+# Sandboxing hardening block: kept identical (module for module) across all
+# nostr-*d.service units (ddnswatchd/securityd/permissiond/identityd/
+# operationsd) -- change one, change them all. ProtectHome=true because this
+# daemon never reads or writes anything under /home; nostr-operationsd is the
+# one deliberate exception (ProtectHome=read-only, because it needs to write
+# /home/yunohost.backup) -- see that unit's comment before assuming drift.
 User=root
 UMask=0077
 NoNewPrivileges=true
