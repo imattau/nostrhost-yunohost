@@ -1071,9 +1071,13 @@ def _agent_contribution_settings_get() -> dict[str, Any]:
         contribution = config.get("contribution") or {}
         dataset_repo = str(contribution.get("dataset_repo", ""))
         # Go's ContributionFileConfig.Enabled *is* "the resident daemon
-        # auto-submits every completed cycle with no human review" -- see
-        # agent/contribution_auto.go. Named "auto_submit" here so the two
-        # very different meanings of "enabled" never collide in this API.
+        # submits every completed cycle itself, with no click required" --
+        # see agent/contribution_auto.go. Named "auto_submit" here so the
+        # two very different meanings of "enabled" never collide in this
+        # API. Neither this nor the manual per-cycle share below involves a
+        # human reading the candidate first -- both rely on the same
+        # client-side redaction plus the community repo's own CI
+        # validation before anything merges.
         auto_submit = bool(contribution.get("enabled", False))
     except NostrHostError:
         pass
@@ -1089,13 +1093,16 @@ def _agent_contribution_settings_get() -> dict[str, Any]:
 def _agent_contribution_settings_set(dataset_repo: str, token: str | None, auto_submit: bool) -> dict[str, Any]:
     """Update the agent's Hugging Face contribution settings.
 
-    ``dataset_repo``/``token`` control whether a human can manually submit a
-    prepared candidate (the "enabled" field in the get() response, derived
-    from these two rather than stored separately). ``auto_submit`` is a
-    stronger, explicit opt-in: it flips the resident daemon's own
-    ``contribution.enabled`` config so it submits every completed cycle
-    itself, with no human review -- see agent/contribution_auto.go. It can
-    only be turned on once a repo and a token both exist.
+    ``dataset_repo``/``token`` control whether an operator can share a
+    cycle themselves, one click at a time (the "enabled" field in the
+    get() response, derived from these two rather than stored separately).
+    ``auto_submit`` is a stronger, explicit opt-in: it flips the resident
+    daemon's own ``contribution.enabled`` config so it submits every
+    completed cycle itself, with no click needed -- see
+    agent/contribution_auto.go. It can only be turned on once a repo and a
+    token both exist. Both modes share the same redaction and the same
+    downstream CI validation; neither involves a human on this host
+    reading the candidate before it goes out.
     """
     if os.geteuid() != 0:
         raise NostrHostError("contribution settings must be set as root")
@@ -1154,6 +1161,26 @@ def _agent_contribution_submit(candidate_file_id: str) -> Any:
     if cycle_ref_path.is_file() and not cycle_ref_path.is_symlink():
         _agent_mark_cycle_submitted(cycle_ref_path.read_text(encoding="utf-8").strip())
     return result
+
+
+def _agent_contribution_share(cycle_id: str) -> Any:
+    """Redacts and submits one completed cycle in a single step.
+
+    There used to be a separate "prepare, then eyeball the JSON, then
+    submit" flow, on the theory that a human reading the candidate before
+    it left the host was the safety check. That job now belongs to the
+    community contribution repo's own CI validation (schema/redaction
+    re-check, append-only enforcement) ahead of an automatic merge -- a
+    human on this host reading the file first was never a real gate and
+    only ever applied to the manual path anyway, not to automatic
+    submission. Manual and automatic submission differ only in who
+    triggers each cycle's export+submit, not in whether either is
+    reviewed.
+    """
+    if os.geteuid() != 0:
+        raise NostrHostError("contribution share must be run as root")
+    exported = _agent_export_run(cycle_id)
+    return _agent_contribution_submit(exported["candidate_file_id"])
 
 
 def _write_policy_toml(operator_npub: str) -> Path:

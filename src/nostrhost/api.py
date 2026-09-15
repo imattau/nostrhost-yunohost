@@ -17,16 +17,17 @@ Responses are JSON.  Errors map to HTTP status codes with
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from typing import Any, Callable
+from urllib.parse import urlunsplit
 
 from bottle import Bottle, HTTPResponse, request
 
 from .cli import (
     _agent_contribution_settings_get,
     _agent_contribution_settings_set,
+    _agent_contribution_share,
     _agent_contribution_submit,
     _agent_export_get,
     _agent_export_list,
@@ -76,9 +77,31 @@ from yunohost.nostr_operations import (
     validate_signed_approval,
     validate_signed_rejection,
 )
-from nostrhost_auth.auth.nostr_verify import parse_and_verify_event
+from nostrhost_policy.auth.nip98 import Nip98Error, verify_nip98_request
+from nostrhost_policy.auth.replay import ReplayCache
 
 API_VERSION = 1
+
+logger = logging.getLogger("nostrhost-api")
+
+# Replay protection for NIP-98 API requests. Single-process in-memory TTL
+# cache (same limitation and rationale as nostrhost-policy's own): the API
+# service is a single daemon on the box.
+_NIP98_REPLAY_CACHE = ReplayCache(ttl_seconds=300)
+
+
+def _external_request_url() -> str:
+    """The request URL as the caller signed it in its NIP-98 ``u`` tag.
+
+    The API is fronted by Caddy, which preserves the original ``Host`` header
+    and adds ``X-Forwarded-Proto``; reconstruct the external URL so the exact
+    ``u`` tag the admin SPA / CLI signed (``https://host/package/...``) is
+    what gets compared. Direct loopback callers get the loopback URL.
+    """
+    parts = request.urlparts
+    scheme = request.get_header("X-Forwarded-Proto") or parts.scheme or "http"
+    host = request.get_header("X-Forwarded-Host") or parts.netloc
+    return urlunsplit((scheme, host, parts.path, parts.query, ""))
 
 
 class ApiError(Exception):
@@ -264,15 +287,23 @@ def default_authorizer(
     def resolve_callers() -> list[str]:
         header = request.headers.get("Authorization", "")
         if header.startswith("Nostr "):
+            # Full NIP-98 verification: kind 27235, freshness against clock
+            # skew, exact u/method binding, sha256(payload) body binding, and
+            # replay protection (see nostrhost_policy.auth.nip98). Signature-
+            # only checks are deliberately NOT used here: they would let any
+            # validly signed event by an admin key (a kind-1 note, a relay-auth
+            # challenge) be replayed as an API credential.
             try:
-                event_json = base64.b64decode(header[6:], validate=True).decode("utf-8")
-            except Exception as exc:  # noqa: BLE001 - malformed base64
-                raise ApiError(401, "invalid_auth", f"malformed NIP-98 header: {exc}") from exc
-            try:
-                event = parse_and_verify_event(event_json)
-                pubkey = event.author().to_hex()
-            except Exception as exc:  # noqa: BLE001 - signature/timestamp failure
-                raise ApiError(401, "invalid_signature", f"NIP-98 event rejected: {exc}") from exc
+                verified = verify_nip98_request(
+                    authorization_header=header,
+                    method=request.method,
+                    url=_external_request_url(),
+                    body=request.body.read(),
+                    replay_cache=_NIP98_REPLAY_CACHE,
+                )
+            except Nip98Error as exc:
+                raise ApiError(401, "invalid_nip98", str(exc)) from exc
+            pubkey = verified.pubkey
             try:
                 identity = resolve_pubkey(pubkey)
             except Exception:  # noqa: BLE001 - unlinked/unknown or unavailable store
@@ -351,8 +382,13 @@ class _AuthErrorsPlugin:
                 return _json_error(exc.status, exc.code, exc.message)
             except (NostrHostError, OperationError, IdentityError) as exc:
                 return _json_error(400, "operation_failed", str(exc))
-            except Exception as exc:  # noqa: BLE001 - last error boundary
-                return _json_error(500, "internal_error", str(exc))
+            except Exception:  # noqa: BLE001 - last error boundary
+                # Do not echo the raw exception back to the caller: paths,
+                # config snippets and provider error strings can leak internals
+                # (M18). The details go to the server log; the client gets a
+                # generic message with the exception class for triage.
+                logger.exception("unhandled error on %s %s", request.method, request.urlparts.path)
+                return _json_error(500, "internal_error", "internal server error")
 
         return wrapper
 
@@ -1026,13 +1062,22 @@ def build_app(
 
     @app.post("/package/service/restart")
     def service_restart() -> Any:
+        """Restart one named service. A write with real consequences (a bad
+        restart can take an app or the control plane down): routed through the
+        signed operation chain (policy + approval), not _run_tool."""
         body = _json_body()
-        return _run_tool("service.restart", {"name": body.get("name", "")})
+        return _run_lifecycle("service.restart", {"name": body.get("name", "")}, state=_State())
 
     @app.post("/package/service/control")
     def service_control() -> Any:
+        """Start/stop/restart one named service. Same write-risk tier as
+        service.restart: routed through the signed operation chain."""
         body = _json_body()
-        return _run_tool("service.control", {"name": body.get("name", ""), "action": body.get("action", "")})
+        return _run_lifecycle(
+            "service.control",
+            {"name": body.get("name", ""), "action": body.get("action", "")},
+            state=_State(),
+        )
 
     # -- agent ----------------------------------------------------------------
 
@@ -1106,8 +1151,8 @@ def build_app(
     @app.post("/package/agent/contribution/settings")
     def agent_contribution_settings_set() -> Any:
         """Touches Hugging Face credentials and, via auto_submit, can flip on
-        the resident daemon submitting every completed cycle with no human
-        review. Same admin-only NIP-98/session trust level as
+        the resident daemon submitting every completed cycle with no click
+        needed. Same admin-only NIP-98/session trust level as
         agent_init/agent_enable above -- this is a local admin-API setting,
         not a host operation, so it does not go through the
         nostr-operationsd signed tool chain."""
@@ -1120,10 +1165,22 @@ def build_app(
 
     @app.post("/package/agent/contribution/submit")
     def agent_contribution_submit() -> Any:
-        """Causes real network egress of exactly one reviewed candidate file
-        the admin explicitly chose. Same admin-only trust level as above."""
+        """Causes real network egress of exactly one already-prepared candidate
+        file the admin explicitly chose. Same admin-only trust level as
+        above."""
         body = _json_body()
         return _agent_contribution_submit(body.get("candidate_file_id", ""))
+
+    @app.post("/package/agent/contribution/share")
+    def agent_contribution_share() -> Any:
+        """Redacts and submits one completed cycle in a single call -- the
+        admin-facing "Share" action. Combines export/run + contribution/submit
+        so the UI no longer needs a separate prepare-then-review step before
+        sharing; the redaction plus the community repo's own CI validation
+        are the safeguards, on this path exactly as on automatic submission.
+        Same admin-only trust level as above."""
+        body = _json_body()
+        return _agent_contribution_share(body.get("cycle_id", ""))
 
     # -- catalog --------------------------------------------------------------
 
@@ -1418,8 +1475,14 @@ def build_app(
 
     @app.post("/package/app/remove")
     def app_remove() -> Any:
+        """Remove one installed app. Data-loss-capable (purge): routed through
+        the signed operation chain (policy + approval), not _run_tool."""
         body = _json_body()
-        return _run_tool("app.remove", {"app": body.get("app", ""), "purge": bool(body.get("purge", False))})
+        return _run_lifecycle(
+            "app.remove",
+            {"app": body.get("app", ""), "purge": bool(body.get("purge", False))},
+            state=_State(),
+        )
 
     # -- user (YunoHost accounts) ---------------------------------------------
 
@@ -1640,7 +1703,10 @@ def build_app(
     @app.post("/package/reconcile")
     def package_reconcile() -> Any:
         body = _json_body()
-        return _run_tool("package.reconcile", {"plan": body.get("plan")})
+        # Applying a caller-supplied reconcile plan is a write that changes
+        # machine state: routed through the signed operation chain (which
+        # re-validates the plan digest and runs policy/approval), not _run_tool.
+        return _run_lifecycle("package.reconcile", {"plan": body.get("plan")}, state=_State())
 
     # -- identity (npub user model) ------------------------------------------
 
