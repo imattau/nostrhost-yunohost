@@ -24,8 +24,11 @@ def build_app() -> Bottle:
         link_challenge_route,
         link_route,
         nip05_route,
+        register_signer_route,
         rename_route,
         revoke_route,
+        revoke_signer_route,
+        signers_route,
         unlink_route,
     )
     from yunohost.nostr_login import auth_request_route, challenge_route, login_route
@@ -42,6 +45,9 @@ def build_app() -> Bottle:
     app.post("/nostr/identities/revoke", callback=revoke_route)
     app.post("/nostr/identities/rename", callback=rename_route)
     app.post("/nostr/unlink", callback=unlink_route)
+    app.get("/nostr/signers", callback=signers_route)
+    app.post("/nostr/signers", callback=register_signer_route)
+    app.post("/nostr/signers/revoke", callback=revoke_signer_route)
     app.get("/.well-known/nostr.json", callback=nip05_route)
     app.get("/.well-known/openid-configuration", callback=discovery)
     app.get("/oidc/authorize", callback=authorize)
