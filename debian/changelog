@@ -1,3 +1,30 @@
+yunohost (12.1.41.55) stable; urgency=low
+
+  * Modernize the residual YunoHost Python base (docs/MODERNIZATION.md):
+    - HTTP layer: the native API and portal-api now run on FastAPI/uvicorn
+      (bottle removed entirely); shared per-request state moved to
+      nostrhost.web.
+    - Dependencies: pydantic v2, pyjwt v2, `tomllib` + `tomli-w` (the `toml`
+      package dropped), `requests` -> `httpx2` at every call site, the dead
+      gevent branch removed, ruff replaces flake8/black/isort.
+    - Certs: issuance/renewal delegates to Caddy (certd export); the vendored
+      acme_tiny client and the nginx/dovecot cert hooks are gone, and a
+      still-valid short-lived certificate no longer reports as expired.
+    - Diagnosis: the Meltdown check reads the kernel status from sysfs (the
+      vendored spectre-meltdown-checker is gone).
+    - Logging: the ZeroMQ SSE log broker (utils/sse.py) and its 1s connect
+      sleep are retired; the `zmq` dependency is dropped.
+  * Connectivity: a system-wide public relay/Blossom default layer
+    (nostr.connectivity.set) behind a reviewed plan fingerprint. Nsites inherit
+    its relays/Blossom and lookup relays, and the catalogue synchroniser gains
+    the public targets alongside the local control relay.
+  * Server address: a reviewed primary-domain change flow
+    (domain.primary.set) that requires a registered, DNS-in-sync,
+    certificate-ready candidate, flips exactly one primary flag and reconciles
+    the portal routes with best-effort rollback.
+
+ -- NostrHost <noreply@nostrhost.org>  Wed, 16 Sep 2026 23:00:00 +0000
+
 yunohost (12.1.41.54) stable; urgency=low
 
   * Security review H4/H5/M10 remediation:
