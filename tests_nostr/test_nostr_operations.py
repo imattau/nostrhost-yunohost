@@ -138,6 +138,7 @@ def test_registry_has_the_safe_tools():
         "nsite.snapshot",
         "nsite.unregister",
         "nsite.validate_manifest",
+        "package.fetch_manifest",
         "package.plan",
         "package.reconcile",
         "rollback.apply",
@@ -240,6 +241,7 @@ def test_registry_has_the_safe_tools():
         assert spec.handler is not None
         if name not in (
             "package.plan",
+            "package.fetch_manifest",
             "domain.list",
             "domain.inspect",
             "nsite.gateway.status",
