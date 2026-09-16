@@ -354,6 +354,48 @@ def test_portal_bare_prefixes_redirect_to_trailing_slash(monkeypatch):
         assert handle["headers"]["Location"] == [f"{path}/"]
 
 
+def test_sso_route_serves_app_logos_before_spa_fallback(monkeypatch):
+    """App logos live outside the portal build dir, so the sso route must serve
+    /nostrhost/sso/applogos/* from their real directory *before* the SPA
+    try_files fallback. Without it, logo requests get index.html and every
+    portal tile image is broken (the nginx applogos alias was dropped in the
+    nginx->Caddy cutover)."""
+    from nostrhost import caddy_admin
+
+    monkeypatch.setattr(caddy_admin.os.path, "isdir", lambda _root: True)
+    routes = {r["@id"]: r for r in caddy_admin.build_portal_routes("w4.test")}
+    inner = routes["nostrhost-sso:w4.test"]["handle"][0]["routes"]
+
+    logos, spa = inner[0], inner[1]
+    assert logos["match"] == [{"path": ["/nostrhost/sso/applogos/*"]}]
+    assert logos["terminal"] is True
+    assert logos["handle"][0] == {
+        "handler": "rewrite",
+        "strip_path_prefix": "/nostrhost/sso/applogos",
+    }
+    assert logos["handle"][1] == {"handler": "vars", "root": "/usr/share/yunohost/applogos"}
+    assert logos["handle"][-1] == {"handler": "file_server"}
+    # the SPA fallback still covers the rest of /nostrhost/sso/*
+    assert spa["match"] == [{"path": ["/nostrhost/sso/*"]}]
+    # the admin SPA has no app-logos pre-route
+    assert len(routes["nostrhost-admin:w4.test"]["handle"][0]["routes"]) == 1
+
+
+def test_caddy_domain_template_serves_app_logos_before_sso():
+    """conf/caddy/caddy_domain.conf must keep the applogos handle_path ahead of
+    the sso SPA block; Caddy evaluates handle_path blocks in written order, so
+    the reverse would send logo requests to index.html."""
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[1] / "conf" / "caddy" / "caddy_domain.conf"
+    ).read_text()
+    logos = template.index("/nostrhost/sso/applogos/*")
+    sso = template.index("handle_path /nostrhost/sso/*")
+    assert logos < sso
+    assert "root * /usr/share/yunohost/applogos" in template
+
+
 def test_web_route_root_excludes_reserved_paths():
     """A [web] resource claiming path "/" gets a host-only catch-all matcher
     (no `path` key). insert_route() always inserts new routes at index 0, so

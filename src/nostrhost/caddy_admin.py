@@ -34,6 +34,14 @@ DEFAULT_SERVER = "srv0"
 AUTHD_ADDR = "127.0.0.1:6788"
 AUTHD_PATH = "/nostr/auth-request"
 
+# App logos live outside the portal SPA build dir. The catalog daemon writes
+# them here (app_catalog.APPS_CATALOG_LOGOS) and permission.py stores custom
+# per-permission logos alongside; app.py/permissions.py advertise them at
+# /nostrhost/sso/applogos/<hash>.png (upstream nginx aliased this path to the
+# directory, and the nginx->Caddy cutover dropped that alias).
+APPS_CATALOG_LOGOS = "/usr/share/yunohost/applogos"
+APP_LOGOS_PREFIX = "/nostrhost/sso/applogos"
+
 # Prefixes/paths build_portal_routes() reserves for NostrHost's own admin,
 # SSO, and API surface (plus the NIP-05 well-known route). No [web] resource
 # may claim these, and a root-path ("/") resource's catch-all matcher must
@@ -154,7 +162,39 @@ def _spa_redirect_route(domain: str, tag: str, path: str) -> dict[str, Any]:
     }
 
 
-def _spa_route_handle(root: str, prefix: str) -> list[dict[str, Any]]:
+def _applogos_route_handle() -> dict[str, Any]:
+    """Ordered inner route serving app logos from their real directory.
+
+    Upstream nginx aliased ``/yunohost/sso/applogos/`` to
+    ``/usr/share/yunohost/applogos/``; the nginx->Caddy cutover kept the
+    advertised ``logo`` URLs (``/nostrhost/sso/applogos/<hash>.png``) but
+    dropped the alias, so logo requests fall through to the SPA
+    ``try_files`` and the browser receives index.html instead of a PNG
+    (every tile image is broken). This route is prepended *inside* the SSO
+    subroute (and marked terminal) so it is matched before the ``/*`` SPA
+    fallback regardless of the outer route array order.
+    """
+    return {
+        "handle": [
+            {"handler": "rewrite", "strip_path_prefix": APP_LOGOS_PREFIX},
+            {"handler": "vars", "root": APPS_CATALOG_LOGOS},
+            {
+                "handler": "headers",
+                "response": {"set": {"Cache-Control": ["max-age=2629746, public"]}},
+            },
+            {"handler": "file_server"},
+        ],
+        "match": [{"path": [f"{APP_LOGOS_PREFIX}/*"]}],
+        "terminal": True,
+    }
+
+
+def _spa_route_handle(
+    root: str,
+    prefix: str,
+    *,
+    pre_routes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Caddy JSON for a SPA route that serves real files and falls back to
     index.html for client-side routes.
 
@@ -164,41 +204,41 @@ def _spa_route_handle(root: str, prefix: str) -> list[dict[str, Any]]:
     or fall back to ``/index.html``, then serve from ``root``. An unconditional
     ``rewrite /index.html`` would return the HTML shell for asset requests too
     (the browser then fails to load the SPA's JS/CSS and renders a blank page).
+
+    ``pre_routes`` are inner routes evaluated before the SPA fallback (e.g.
+    the app-logos file server), so a nested path never hits ``index.html``.
     """
-    return [
+    inner_routes: list[dict[str, Any]] = list(pre_routes or [])
+    inner_routes.append(
         {
-            "handler": "subroute",
-            "routes": [
+            "handle": [
                 {
-                    "handle": [
+                    "handler": "subroute",
+                    "routes": [
+                        {"handle": [{"handler": "rewrite", "strip_path_prefix": prefix}]},
+                        {"handle": [{"handler": "vars", "root": root}]},
                         {
-                            "handler": "subroute",
-                            "routes": [
-                                {"handle": [{"handler": "rewrite", "strip_path_prefix": prefix}]},
-                                {"handle": [{"handler": "vars", "root": root}]},
+                            "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
+                            "match": [
                                 {
-                                    "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
-                                    "match": [
-                                        {
-                                            "file": {
-                                                "try_files": [
-                                                    "{http.request.uri.path}",
-                                                    "{http.request.uri.path}/",
-                                                    "/index.html",
-                                                ]
-                                            }
-                                        }
-                                    ],
-                                },
-                                {"handle": [{"handler": "file_server"}]},
+                                    "file": {
+                                        "try_files": [
+                                            "{http.request.uri.path}",
+                                            "{http.request.uri.path}/",
+                                            "/index.html",
+                                        ]
+                                    }
+                                }
                             ],
-                        }
+                        },
+                        {"handle": [{"handler": "file_server"}]},
                     ],
-                    "match": [{"path": [f"{prefix}/*"]}],
                 }
             ],
+            "match": [{"path": [f"{prefix}/*"]}],
         }
-    ]
+    )
+    return [{"handler": "subroute", "routes": inner_routes}]
 
 
 def build_portal_routes(domain: str, *, expose_native_api: bool = False) -> list[dict[str, Any]]:
@@ -256,7 +296,11 @@ def build_portal_routes(domain: str, *, expose_native_api: bool = False) -> list
                 {
                     "@id": f"nostrhost-{tag}:{domain}",
                     "match": [{"host": [domain], "path": [f"{prefix}/*"]}],
-                    "handle": _spa_route_handle(root, prefix),
+                    "handle": _spa_route_handle(
+                        root,
+                        prefix,
+                        pre_routes=[_applogos_route_handle()] if tag == "sso" else None,
+                    ),
                     "terminal": True,
                 }
             )
