@@ -8,7 +8,10 @@ accepts native domains without LDAP.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import types
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -431,11 +434,35 @@ def test_web_route_rejects_reserved_paths(path):
         build_web_route({"domain": "w4.test", "upstream": "127.0.0.1:9000", "path": path})
 
 
+def _fake_request(*, host="w4.test", query=None, method="GET"):
+    """A minimal stand-in for a Starlette request for the nostrhost.web context."""
+    return types.SimpleNamespace(
+        method=method,
+        headers={"host": host},
+        url=urlsplit(f"http://{host}/"),
+        query_params=query or {},
+        cookies={},
+        state=types.SimpleNamespace(),
+    )
+
+
+@contextlib.contextmanager
+def _web_context(**kwargs):
+    """Bind the nostrhost.web per-request context to a fake request."""
+    from nostrhost import web
+
+    token = web.begin(_fake_request(**kwargs))
+    try:
+        yield
+    finally:
+        web.end(token)
+
+
 def test_nip05_endpoint_wired():
     from nostrhost.portal_api import build_app
 
     app = build_app()
-    assert any(route.rule == "/.well-known/nostr.json" for route in app.routes)
+    assert any(route.path == "/.well-known/nostr.json" for route in app.routes)
 
 
 def test_portal_public_and_me_routes_wired():
@@ -445,29 +472,20 @@ def test_portal_public_and_me_routes_wired():
     from nostrhost.portal_api import build_app
 
     app = build_app()
-    rules = {route.rule for route in app.routes}
+    rules = {route.path for route in app.routes}
     assert "/public" in rules
     assert "/me" in rules
     assert "/logout" in rules
 
 
 def test_portal_public_returns_settings(monkeypatch):
-    import bottle
-
     from yunohost.nostrhost import portal_settings as ps
 
-    class _FakeHeader:
-        def get(self, key, default=None):
-            return "w4.test" if key == "host" else default
-
-    class _FakeRequest:
-        get_header = _FakeHeader().get
-
-    monkeypatch.setattr(bottle, "request", _FakeRequest())
     # no portal settings dir content, no session -> defaults with empty apps
     monkeypatch.setattr(ps, "PORTAL_SETTINGS_DIR", "/nonexistent")
     monkeypatch.setattr("yunohost.nostr_account._session_username", lambda: None)
-    out = ps.portal_public_route()
+    with _web_context(host="w4.test"):
+        out = ps.portal_public_route()
     assert out["domain"] == "w4.test"
     assert out["apps"] == {}
 
@@ -475,43 +493,24 @@ def test_portal_public_returns_settings(monkeypatch):
 def test_portal_me_reports_admin_flag(monkeypatch):
     """The /me route exposes whether the session user is an admin, so the
     portal can gate the Administration footer link to admins only."""
-    import bottle
-
     from yunohost.nostrhost import portal_settings as ps
 
-    class _FakeHeader:
-        def get(self, key, default=None):
-            return "w4.test" if key == "host" else default
-
-    class _FakeRequest:
-        get_header = _FakeHeader().get
-
-    monkeypatch.setattr(bottle, "request", _FakeRequest())
     monkeypatch.setattr("yunohost.nostr_account._session_username", lambda: "alice")
     monkeypatch.setattr(
         "yunohost.nostrhost.accounts.user_get",
         lambda username: {"fullname": "Alice", "mail": ["alice@w4.test"], "admin": True},
     )
     monkeypatch.setattr(ps, "PORTAL_SETTINGS_DIR", "/nonexistent")
-    out = ps.portal_me_route()
+    with _web_context(host="w4.test"):
+        out = ps.portal_me_route()
     assert out["username"] == "alice"
     assert out["admin"] is True
 
 
 def test_nip05_body_builder(monkeypatch, tmp_path):
-    import bottle
-
     from yunohost.nostr_account import nip05_route
 
     monkeypatch.setenv("NOSTRHOST_IDENTITY_DB", str(tmp_path / "identity.db"))
-
-    class _FakeQuery:
-        def get(self, key, default=None):
-            return "alice" if key == "name" else default
-
-    class _FakeRequest:
-        query = _FakeQuery()
-
-    monkeypatch.setattr(bottle, "request", _FakeRequest())
-    body = nip05_route()
+    with _web_context(query={"name": "alice"}):
+        body = nip05_route()
     assert isinstance(body, dict) and "names" in body

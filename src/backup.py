@@ -2359,12 +2359,12 @@ def backup_download(name):
                 "backup_archive_broken_link", path=archive_file
             )
 
-    # We return a raw bottle HTTPresponse (instead of serializable data like
-    # list/dict, ...), which is gonna be picked and used directly by moulinette
-    from bottle import static_file
+    # Return a file download response (raw data rather than serializable
+    # list/dict, picked up directly by the API layer).
+    from starlette.responses import FileResponse
 
     archive_folder, archive_file_name = archive_file.rsplit("/", 1)
-    return static_file(archive_file_name, archive_folder, download=archive_file_name)
+    return FileResponse(os.path.join(archive_folder, archive_file_name), filename=archive_file_name)
 
 
 def backup_info(name, with_details=False, human_readable=False):

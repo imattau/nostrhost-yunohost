@@ -134,7 +134,7 @@ class SSELogStreamingHandler(logging.Handler):
         from ..log import OPERATIONS_PATH
 
         if Moulinette.interface.type == "api":
-            from bottle import request
+            from nostrhost.web import request
 
             self.ref_id = request.get_header("ref-id")
         else:

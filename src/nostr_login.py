@@ -86,7 +86,7 @@ def create_portal_session(username: str, *, domain: str | None = None) -> None:
     that truly needs the account password (e.g. changing it) keeps requiring
     the current password to be typed explicitly.
     """
-    from bottle import request
+    from nostrhost.web import request
 
     from .authenticators.ldap_ynhuser import (
         Authenticator,
@@ -227,7 +227,7 @@ def handle_login(event: dict, *, domain: str, identity_db=None) -> dict:
 # default authenticator: these are public by design)
 
 def challenge_route():
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     host = request.get_header("host")
     if not host:
@@ -236,7 +236,7 @@ def challenge_route():
 
 
 def login_route():
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     body = request.json or {}
     event = body.get("event")
@@ -405,7 +405,7 @@ def auth_request_route():
     is only an authorization signal, with the identity exposed through the
     compatibility headers expected by YunoHost applications.
     """
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     from .authenticators.ldap_ynhuser import Authenticator, _host_domain
 
@@ -440,10 +440,10 @@ def auth_request_route():
         if action == "redirect":
             raise HTTPResponse(status=302, headers={"Location": detail})
         if action == "allow" and username is not None:
-            return HTTPResponse(status=204, headers=_identity_headers(infos, username))
-        return HTTPResponse(status=204)
+            return HTTPResponse(status=204, headers=_identity_headers(infos, username)).to_response()
+        return HTTPResponse(status=204).to_response()
 
     if username is None:
         raise HTTPResponse(status=401)
 
-    return HTTPResponse(status=204, headers=_identity_headers(infos, username))
+    return HTTPResponse(status=204, headers=_identity_headers(infos, username)).to_response()

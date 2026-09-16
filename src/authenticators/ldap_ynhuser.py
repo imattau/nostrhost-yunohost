@@ -232,7 +232,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
     name = "ldap_ynhuser"
 
     def set_session_cookie(self, infos: dict[str, Any]) -> None:
-        from bottle import request, response
+        from nostrhost.web import request, response
 
         assert isinstance(infos, dict)
         assert "user" in infos
@@ -293,7 +293,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
             return self._decode_session_cookie(SESSION_COOKIE, decrypt_pwd=decrypt_pwd)
 
     def _decode_session_cookie(self, cookie_name: str, *, decrypt_pwd: bool = False) -> Mapping[str, Any]:
-        from bottle import request, response
+        from nostrhost.web import request, response
 
         try:
             token = request.get_cookie(cookie_name, default="").encode()
@@ -360,7 +360,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         return infos  # type: ignore
 
     def delete_session_cookie(self) -> None:
-        from bottle import response
+        from nostrhost.web import response
 
         try:
             infos = self.get_admin_cookie()

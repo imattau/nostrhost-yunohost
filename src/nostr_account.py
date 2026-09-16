@@ -99,7 +99,7 @@ def identityd_request(request: dict, *, sock_path: str | Path | None = None) -> 
 def _require_session() -> str:
     username = _session_username()
     if not username:
-        from bottle import HTTPResponse
+        from nostrhost.web import HTTPResponse
 
         raise HTTPResponse("not signed in", 401)
     return username
@@ -158,7 +158,7 @@ def nip05_route():
     that has actually linked an identity (opt-in), matching NIP-05
     behaviour across providers.
     """
-    from bottle import request
+    from nostrhost.web import request
 
     from nostrhost_auth.nip05 import build_nostr_json
 
@@ -191,7 +191,7 @@ def identities_route():
 
 def link_challenge_route():
     """Issue a challenge the user signs (kind 22242) to prove key control."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     _require_session()
     _require_linking_enabled()
@@ -236,7 +236,7 @@ def _verify_link_event(event: dict, *, domain: str) -> str:
 
 def link_route():
     """Link (or replace) the session user's identity with a verified pubkey."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     username = _require_session()
     _require_linking_enabled()
@@ -282,7 +282,7 @@ def link_route():
 
 def _owned_identity(identity_id: int) -> str:
     """Return the pubkey of a session user's identity, or raise 404."""
-    from bottle import HTTPResponse
+    from nostrhost.web import HTTPResponse
 
     from .nostr_identity import _store
 
@@ -295,7 +295,7 @@ def _owned_identity(identity_id: int) -> str:
 
 def revoke_route():
     """Revoke one of the session user's identities."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     username = _require_session()
     body = request.json or {}
@@ -312,7 +312,7 @@ def revoke_route():
 
 def rename_route():
     """Rename one of the session user's identities."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     username = _require_session()
     body = request.json or {}
@@ -334,7 +334,7 @@ def rename_route():
 
 def unlink_route():
     """Unlink every identity linked to the session user."""
-    from bottle import HTTPResponse
+    from nostrhost.web import HTTPResponse
 
     username = _require_session()
     result = identityd_request({"action": "unlink", "username": username})
@@ -363,7 +363,7 @@ def signers_route():
 
 def register_signer_route():
     """Record (or refresh) a bunker session the client just connected to."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     from nostrhost_auth.identity.npub import npub_to_hex
 
@@ -404,7 +404,7 @@ def register_signer_route():
 
 def revoke_signer_route():
     """Forget one of the session user's remembered bunker sessions."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     username = _require_session()
     body = request.json or {}

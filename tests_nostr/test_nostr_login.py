@@ -42,6 +42,27 @@ def _link(db, username, pk, signer_type="nip07"):
     return store
 
 
+@pytest.fixture(autouse=True)
+def _web_request_context():
+    """Bind nostrhost.web's per-request context: the portal handlers (and the
+    session authenticator) read the request through it."""
+    from nostrhost import web
+
+    fake = types.SimpleNamespace(
+        method="GET",
+        headers={},
+        url=None,
+        query_params={},
+        cookies={},
+        state=types.SimpleNamespace(),
+    )
+    token = web.begin(fake)
+    try:
+        yield
+    finally:
+        web.end(token)
+
+
 class Recorder:
     def __init__(self):
         self.sessions = []

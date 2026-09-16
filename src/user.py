@@ -50,7 +50,7 @@ from .utils.process import check_output
 from .utils.system import binary_to_human
 
 if TYPE_CHECKING:
-    from bottle import HTTPResponse as HTTPResponseType
+    from nostrhost.web import HTTPResponse as HTTPResponseType
 
     from .log import OperationLogger
     from .permission import PermInfos
@@ -821,7 +821,7 @@ def user_export() -> Union[str, "HTTPResponseType"]:
     if Moulinette.interface.type == "api":
         # We return a raw bottle HTTPresponse (instead of serializable data like
         # list/dict, ...), which is gonna be picked and used directly by moulinette
-        from bottle import HTTPResponse
+        from nostrhost.web import HTTPResponse
 
         response = HTTPResponse(
             body=body,

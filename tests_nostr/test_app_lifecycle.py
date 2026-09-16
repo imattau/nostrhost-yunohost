@@ -367,7 +367,7 @@ def test_portal_api_serves_authd_and_nostr_routes():
     from nostrhost.portal_api import build_app
 
     app = build_app()
-    paths = {route.rule for route in app.routes}
+    paths = {route.path for route in app.routes}
     assert "/nostr/auth-request" in paths
     assert "/nostr/challenge" in paths
     assert "/nostr/login" in paths

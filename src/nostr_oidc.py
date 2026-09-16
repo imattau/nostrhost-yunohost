@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import jwt
-from bottle import HTTPResponse, redirect, request
+from nostrhost.web import HTTPResponse, redirect, request
 
 ISSUER = os.environ.get("NOSTRHOST_OIDC_ISSUER")
 CONFIG_PATH = "/etc/nostrhost/oidc.toml"

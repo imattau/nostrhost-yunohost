@@ -18,7 +18,6 @@ Responses are JSON.  Errors map to HTTP status codes with
 
 from __future__ import annotations
 
-import contextvars
 import json
 import logging
 import secrets
@@ -29,6 +28,8 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
+
+from nostrhost import web
 
 from .cli import (
     _agent_contribution_settings_get,
@@ -76,17 +77,10 @@ API_VERSION = 1
 
 logger = logging.getLogger("nostrhost-api")
 
-# The current Starlette request, set by ``_ApiRoute`` for the duration of a
-# request. Route bodies and the auth/session helpers were written against a
-# module-level ``request`` object; this preserves that access pattern without
-# threading the request through every handler signature. Sync endpoints run in
-# a worker thread, which inherits the context.
-_current_request: contextvars.ContextVar[Request] = contextvars.ContextVar("nostrhost_api_request")
-
-
-def _req() -> Request:
-    return _current_request.get()
-
+# The current request comes from the shared per-request context (see
+# nostrhost.web), which the route wrapper binds for every request and the
+# session authenticator also reads.
+_req = web.current_request
 
 # Replay protection for NIP-98 API requests. Single-process in-memory TTL
 # cache (same limitation and rationale as nostrhost-policy's own): the API
@@ -476,31 +470,34 @@ class _ApiRoute(APIRoute):
         rule = self.path
 
         async def handler(request: Request) -> Response:
-            token = _current_request.set(request)
+            token = web.begin(request)
             try:
                 # Cache the raw body: NIP-98 binds sha256(payload) to it and
                 # _json_body() parses the same bytes.
-                request.scope.setdefault("nostrhost.body", await request.body())
+                request.state.body_bytes = await request.body()
                 if rule not in _PUBLIC_RULES:
                     try:
                         request.state.admin_pubkey = request.app.state.authorizer(rule)
                     except ApiError as exc:
-                        return _json_error(exc.status, exc.code, exc.message)
+                        return web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
                 try:
-                    return await original(request)
+                    response = await original(request)
                 except ApiError as exc:
-                    return _json_error(exc.status, exc.code, exc.message)
+                    return web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
                 except (NostrHostError, OperationError, IdentityError) as exc:
-                    return _json_error(400, "operation_failed", str(exc))
+                    return web.apply_cookies(_json_error(400, "operation_failed", str(exc)))
                 except Exception:  # noqa: BLE001 - last error boundary
                     # Do not echo the raw exception back to the caller: paths,
                     # config snippets and provider error strings can leak
                     # internals (M18). The details go to the server log; the
                     # client gets a generic message.
                     logger.exception("unhandled error on %s %s", request.method, request.url.path)
-                    return _json_error(500, "internal_error", "internal server error")
+                    return web.apply_cookies(_json_error(500, "internal_error", "internal server error"))
+                # The session authenticator may have queued a cookie refresh
+                # (extending the admin/portal cookie) while resolving auth.
+                return web.apply_cookies(response)
             finally:
-                _current_request.reset(token)
+                web.end(token)
 
         return handler
 
@@ -1164,9 +1161,8 @@ def build_app(
 
     @app.get("/package/agent/export/list")
     def agent_export_list() -> Any:
-        # Bottle 0.12's response casting only auto-serialises a dict, not a
-        # bare list, at the route's top level (same reason catalog_list
-        # below wraps its result) -- wrap the array under a key.
+        # The object-wrapped shape is the stable client contract (the admin
+        # SPA / MCP read `cycles`).
         return {"cycles": _agent_export_list()}
 
     @app.post("/package/agent/export/run")
@@ -1737,7 +1733,7 @@ def build_app(
             identities = [_identity_dict(i) for i in list_identities_for_username(username)]
         else:
             identities = [_identity_dict(i) for i in list_identities()]
-        # Bottle's json plugin cannot serialise a top-level list; wrap it.
+        # Stable client contract: identities ride under an `identities` key.
         return {"identities": identities}
 
     @app.get("/package/identity/resolve/{value}")
@@ -1912,7 +1908,7 @@ def _authorized_pubkey() -> str:
 
 
 def _json_body() -> dict[str, Any]:
-    raw = _req().scope.get("nostrhost.body", b"")
+    raw = getattr(_req().state, "body_bytes", b"")
     try:
         body = json.loads(raw) if raw else None
     except (ValueError, TypeError):  # noqa: BLE001 - malformed JSON

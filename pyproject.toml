@@ -25,11 +25,9 @@ dependencies = [
     # `AssertionError: assert self.protocol.state is CLOSED` in the internal
     # recv_events thread and wedges operationsd.
     "websockets>=14.2",
-    # Native HTTP APIs: the admin API is FastAPI/uvicorn (ASGI); bottle is
-    # still used by the portal-auth API until it is migrated too.
+    # Native HTTP APIs are FastAPI on uvicorn (ASGI, async-capable).
     "fastapi>=0.115",
     "uvicorn>=0.30",
-    "bottle",
     "cryptography",
     # "dbus-python",
     "python-debian",
@@ -105,7 +103,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # Those are the public, external modules that don't provide typing
 module = ["jwt", "sortedcollections", "IPython", "ldap.*", "dbus", "sdbus.*",
-    "psutil", "bottle", "miniupnpc", "lexicon.*", "publicsuffix2"]
+    "psutil", "miniupnpc", "lexicon.*", "publicsuffix2"]
 ignore_missing_imports = true
 
 

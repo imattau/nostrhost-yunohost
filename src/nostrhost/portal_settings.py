@@ -96,7 +96,7 @@ def portal_public_route():
     Always public (the login page itself needs it); when the visitor is not
     signed in, drop the per-user intro and never leak the users list.
     """
-    from bottle import request
+    from nostrhost.web import request
 
     from yunohost.nostr_account import _session_username
 
@@ -111,7 +111,7 @@ def portal_public_route():
 
 def portal_me_route():
     """GET /nostrhost/portalapi/me — the signed-in user (or 401)."""
-    from bottle import HTTPResponse, request
+    from nostrhost.web import HTTPResponse, request
 
     from yunohost.nostr_account import _session_username
     from yunohost.nostrhost.accounts import user_get

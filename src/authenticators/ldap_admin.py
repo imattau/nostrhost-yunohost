@@ -66,7 +66,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         pass
 
     def set_session_cookie(self, infos: dict[str, str]) -> None:
-        from bottle import response
+        from nostrhost.web import response
 
         assert isinstance(infos, dict)
         assert "user" in infos
@@ -93,7 +93,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
     def get_session_cookie(
         self, raise_if_no_session_exists: bool = True
     ) -> Mapping[str, Any]:
-        from bottle import request, response
+        from nostrhost.web import request, response
 
         try:
             token = request.get_cookie("nostrhost.admin", default="").encode()
@@ -125,7 +125,7 @@ class Authenticator(BaseAuthenticator):  # type: ignore
         return infos  # type: ignore
 
     def delete_session_cookie(self) -> None:
-        from bottle import response
+        from nostrhost.web import response
 
         try:
             infos = self.get_session_cookie()

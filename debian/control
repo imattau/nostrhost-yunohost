@@ -61,13 +61,13 @@ Package: python3-nostrhost
 Architecture: all
 Section: python
 Depends: python3-all (>= 3.11), nostrhost-core
- , python3-typer, python3-bottle, python3-requests
+ , python3-typer, python3-requests
  , python3-nostrhost-auth
 Description: native nostrhost framework — moulinette replacement
  nostrhost is the native framework layer that replaces the retired
  moulinette in the YunoHost fork: interface primitives (core, i18n, ui,
  logging, locking, auth) plus the native Typer command-line tool
- (/usr/bin/nostrhost) and the Bottle+NIP-98 HTTP API (/usr/bin/nostr-api).
+ (/usr/bin/nostrhost) and the FastAPI/NIP-98 HTTP API (/usr/bin/nostr-api).
  .
  It depends on nostrhost-core (its CLI/API import yunohost.nostr_operations
  and friends), while nostrhost-core depends back on it for the framework
