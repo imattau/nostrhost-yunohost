@@ -474,6 +474,17 @@ def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[st
         raise OperationError(f"invalid native package: {exc}") from exc
 
 
+def _safe_package_fetch_manifest(repository: str = "", revision: str = "", package_path: str = "", **args: Any) -> dict[str, Any]:
+    if args or not repository:
+        raise OperationError("package.fetch_manifest requires a repository URL")
+    from nostrhost.package_authoring import fetch_manifest_from_repository
+
+    try:
+        return fetch_manifest_from_repository(repository, revision=revision, package_path=package_path)
+    except ValueError as exc:
+        raise OperationError(str(exc)) from exc
+
+
 def _safe_package_reconcile(
     plan: dict[str, Any] | list[dict[str, Any]] | None = None,
     _executor: Any = None,
@@ -890,6 +901,10 @@ TOOLS: dict[str, ToolSpec] = {
     "package.plan": ToolSpec(
         name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
         require_approval=False, description="validate and plan a native package",
+    ),
+    "package.fetch_manifest": ToolSpec(
+        name="package.fetch_manifest", handler=_safe_package_fetch_manifest, scope=SCOPE_APPS_READ,
+        require_approval=False, description="shallow-clone a package.toml manifest from its repository",
     ),
     "package.reconcile": ToolSpec(
         name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,

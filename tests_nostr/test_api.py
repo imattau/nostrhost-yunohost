@@ -1787,6 +1787,36 @@ def test_mcp_ca_bundle_returns_pem_when_available(app, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# package authoring: fetch a manifest straight from its repository
+
+def test_package_fetch_manifest(app, monkeypatch):
+    captured = {}
+
+    def fake(repository, revision="", package_path=""):
+        captured.update({"repository": repository, "revision": revision, "package_path": package_path})
+        return {"package": {"app": {"id": "example-app", "version": "0.1.0"}}, "valid": True, "diagnostics": [], "commit": "a" * 40}
+
+    import nostrhost.package_authoring as package_authoring_module
+
+    monkeypatch.setattr(package_authoring_module, "fetch_manifest_from_repository", fake)
+    status, _, body = wsgi_request(
+        app, "POST", "/package/authoring/fetch_manifest",
+        {"repository": "https://example.invalid/app.git", "revision": "main"},
+    )
+    assert status == "200"
+    assert captured["repository"] == "https://example.invalid/app.git"
+    assert captured["revision"] == "main"
+    data = json.loads(body)
+    assert data["valid"] is True
+    assert data["package"]["app"]["id"] == "example-app"
+
+
+def test_package_fetch_manifest_requires_repository(app):
+    status, _, body = wsgi_request(app, "POST", "/package/authoring/fetch_manifest", {})
+    assert status == "400"
+
+
+# --------------------------------------------------------------------------- #
 # operations (kind-2200..2204 approval chain)
 
 def test_package_operations_list(app, monkeypatch):

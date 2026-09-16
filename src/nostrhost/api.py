@@ -1686,6 +1686,18 @@ def build_app(
         body = _json_body()
         return _run_tool("package.plan", {"package": body.get("package"), "catalogue": body.get("catalogue")})
 
+    @app.post("/package/authoring/fetch_manifest")
+    def package_fetch_manifest() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "package.fetch_manifest",
+            {
+                "repository": body.get("repository", ""),
+                "revision": body.get("revision", ""),
+                "package_path": body.get("package_path", ""),
+            },
+        )
+
     @app.post("/package/reconcile")
     def package_reconcile() -> Any:
         body = _json_body()
