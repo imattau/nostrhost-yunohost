@@ -18,6 +18,25 @@ def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_clone_paths(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_clone_and_read_manifest now goes through yunohost.utils.app_utils's
+    real _make_tmp_workdir_for_app/_git_clone_light (the same helpers the
+    legacy app-install flow uses), which default to root-owned system paths
+    (/var/cache/yunohost/...) - fine on a real host, but this test suite
+    doesn't run as root. Point both at a writable temp directory instead,
+    and pre-create the git-clone cache dir: _git_clone_light chown()s it to
+    root the first time it sees the dir missing, which only root can do."""
+    import yunohost.utils.app_utils as app_utils_module
+
+    isolated = tmp_path_factory.mktemp("yunohost-cache")
+    workdirs = isolated / "app_tmp_work_dirs"
+    gitclones = isolated / "gitclones"
+    gitclones.mkdir(parents=True)
+    monkeypatch.setattr(app_utils_module, "APPS_TMP_WORKDIRS", str(workdirs))
+    monkeypatch.setattr(app_utils_module, "GIT_CLONE_CACHE", str(gitclones))
+
+
 @pytest.fixture()
 def local_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
