@@ -419,22 +419,24 @@ def download_text(url: str, timeout: int = 30, expected_status_code: int = 200) 
         expected_status_code -- Status code expected from the request. Can be
         None to ignore the status code.
     """
-    import requests  # lazy loading this module for performance reasons
+    import httpx2  # lazy loading this module for performance reasons
 
     # Assumptions
     assert isinstance(url, str)
 
     # Download file
     try:
-        r = requests.get(url, timeout=timeout)
+        r = httpx2.get(url, timeout=timeout, follow_redirects=True)
     # SSL exceptions
-    except requests.exceptions.SSLError:
-        raise YunohostError("download_ssl_error", url=url)
-    # Invalid URL
-    except requests.exceptions.ConnectionError:
+    except httpx2.ConnectError as e:
+        import ssl
+
+        if isinstance(e.__cause__, ssl.SSLError):
+            raise YunohostError("download_ssl_error", url=url)
+        # Invalid URL / unreachable host
         raise YunohostError("invalid_url", url=url)
     # Timeout exceptions
-    except requests.exceptions.Timeout:
+    except httpx2.TimeoutException:
         raise YunohostError("download_timeout", url=url)
     # Unknown stuff
     except Exception as e:

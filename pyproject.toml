@@ -55,9 +55,6 @@ dependencies = [
     # "python-ldap",
     "python-magic",
     "pyyaml",
-    # Retained until the vendored acme_tiny ACME client is replaced/removed
-    # (it imports requests); the rest of the tree is migrating to httpx2.
-    "requests",
     "sdbus",
     "sortedcollections",
     # TOML writing; reads use the stdlib `tomllib` (Python >=3.11).
@@ -71,7 +68,6 @@ dependencies = [
 tests = [
     "mypy",
     "ruff",
-    "types-gevent",
     "types-passlib",
     "types-psutil",
     "types-pyOpenSSL",
@@ -79,6 +75,9 @@ tests = [
     "types-requests",
     "pytest",
     "mock",
+    # The legacy upstream tests/ still import requests (and requests_mock);
+    # the runtime tree uses httpx2.
+    "requests",
 ]
 
 [tool.mypy]

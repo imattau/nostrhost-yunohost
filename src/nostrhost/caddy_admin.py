@@ -25,7 +25,7 @@ import os
 import urllib.parse
 from typing import Any
 
-import requests
+import httpx2
 
 logger = logging.getLogger("nostr-caddy")
 
@@ -492,15 +492,16 @@ class CaddyAdminClient:
         self.timeout = timeout
         self.routes_path = f"/config/apps/http/servers/{server}/routes"
 
-    def _request(self, method: str, path: str, body: Any = None) -> requests.Response:
+    def _request(self, method: str, path: str, body: Any = None) -> httpx2.Response:
         try:
-            response = requests.request(
+            response = httpx2.request(
                 method,
                 self.base_url + path,
                 json=body if body is not None else None,
                 timeout=self.timeout,
+                follow_redirects=True,
             )
-        except requests.RequestException as exc:
+        except httpx2.RequestError as exc:
             raise CaddyError(f"caddy admin {method} {path} failed: {exc}") from exc
         if response.status_code >= 500:
             raise CaddyError(

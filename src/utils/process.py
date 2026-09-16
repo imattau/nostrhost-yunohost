@@ -114,26 +114,13 @@ def call_async_output(args, callback, **kwargs) -> int | None:
 
 
 # cf https://stackoverflow.com/questions/9192539
-# The API uses monkey.patch_all() and we have to switch to a proper greenlet
-# thread for the LogPipe stuff to work properly (maybe we should also enable
-# gevent on the CLI, idk...)
-try:
-    from gevent import monkey
-except ImportError:  # nostrhost: gevent is legacy (moulinette API); native Bottle API doesn't use it
-    monkey = None
-
-if monkey is not None and monkey.is_module_patched("threading"):
-    from gevent import Greenlet
-    from gevent.fileobject import FileObjectThread
-
-    Thread = Greenlet
-else:
-    from threading import Thread  # type: ignore[assignment]
-
-    FileObjectThread = os.fdopen  # type: ignore[assignment,misc]
+# The legacy moulinette API ran under gevent's monkey-patched threading; the
+# native (FastAPI/uvicorn) stack does not, so LogPipe uses a plain OS thread
+# and file object.
+from threading import Thread
 
 
-class LogPipe(Thread):  # type: ignore[valid-type,misc] # Don't know why mypy doesnt like this
+class LogPipe(Thread):
     # Adapted from https://codereview.stackexchange.com/a/17959
     def __init__(self, log_callback, queue):
         """Setup the object with a logger and a loglevel
@@ -144,7 +131,7 @@ class LogPipe(Thread):  # type: ignore[valid-type,misc] # Don't know why mypy do
         self.log_callback = log_callback
 
         self.fdRead, self.fdWrite = os.pipe()
-        self.pipeReader = FileObjectThread(self.fdRead, "rb")
+        self.pipeReader = os.fdopen(self.fdRead, "rb")
 
         self.queue = queue
 

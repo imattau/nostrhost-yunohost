@@ -21,7 +21,7 @@
 import os
 import random
 
-import requests
+import httpx2
 
 from ..diagnosis import Diagnoser
 from ..domain import domain_list
@@ -123,8 +123,8 @@ class MyDiagnoser(Diagnoser):
                 "ipv4",
             ]:
                 try:
-                    requests.head("http://" + global_ipv4, timeout=5)
-                except requests.exceptions.Timeout:
+                    httpx2.head("http://" + global_ipv4, timeout=5)
+                except httpx2.TimeoutException:
                     yield dict(
                         meta={"test": "hairpinning"},
                         status="WARNING",

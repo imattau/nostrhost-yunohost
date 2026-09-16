@@ -22,7 +22,7 @@ import json
 import logging
 import re
 
-import requests
+import httpx2
 
 from ..domain import _get_maindomain, domain_list
 from ..utils.error import YunohostError
@@ -46,7 +46,7 @@ def yunopaste(data: str) -> str:
     datab = data.encode()
 
     try:
-        response = requests.post(f"{paste_server}/documents", data=datab, timeout=30)
+        response = httpx2.post(f"{paste_server}/documents", data=datab, timeout=30, follow_redirects=True)
     except Exception as err:
         raise YunohostError(
             "Something wrong happened while trying to paste data on "

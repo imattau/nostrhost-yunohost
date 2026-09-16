@@ -257,13 +257,14 @@ def _update_apps_catalog() -> None:
 
         from multiprocessing.pool import ThreadPool
 
-        import requests
+        import httpx2
 
         def fetch_logo(logo_hash: str) -> bool:
             try:
-                r = requests.get(
+                r = httpx2.get(
                     f"{apps_catalog['url']}/v{APPS_CATALOG_API_VERSION}/logos/{logo_hash}.png",
                     timeout=10,
+                    follow_redirects=True,
                 )
                 assert r.status_code == 200, (
                     f"Got status code {r.status_code}, expected 200"

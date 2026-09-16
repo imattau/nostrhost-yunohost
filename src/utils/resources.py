@@ -2021,9 +2021,9 @@ class ComposerAppResource(AppResource):
                 "This app has no php_version defined ? Packagers: please make sure to install php dependencies using apt before composer"
             )
 
-        import requests
+        import httpx2
 
-        composer_r = requests.get(self.composer_url, timeout=30)
+        composer_r = httpx2.get(self.composer_url, timeout=30, follow_redirects=True)
         assert composer_r.status_code == 200, (
             "Uhoh, failed to download {self.composer_url} ? Return code: {composer_r.status_code}"
         )

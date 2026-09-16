@@ -597,7 +597,7 @@ class Diagnoser:
         # Lazy loading for performance
         import socket
 
-        import requests
+        import httpx2
 
         # Monkey patch socket.getaddrinfo to force request() to happen in ipv4
         # or 6 ...
@@ -621,7 +621,7 @@ class Diagnoser:
 
         url = f"https://{DIAGNOSIS_SERVER}/{uri}"
         try:
-            r = requests.post(url, json=data, timeout=timeout)
+            r = httpx2.post(url, json=data, timeout=timeout, follow_redirects=True)
         finally:
             socket.getaddrinfo = old_getaddrinfo
 

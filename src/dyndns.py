@@ -65,12 +65,12 @@ def _dyndns_available(domain: str) -> bool:
     Returns:
         True if the domain is available, False otherwise.
     """
-    import requests  # lazy loading this module for performance reasons
+    import httpx2  # lazy loading this module for performance reasons
 
     logger.debug(f"Checking if domain {domain} is available on {DYNDNS_PROVIDER} ...")
 
     try:
-        r = requests.get(f"https://{DYNDNS_PROVIDER}/test/{domain}", timeout=30)
+        r = httpx2.get(f"https://{DYNDNS_PROVIDER}/test/{domain}", timeout=30, follow_redirects=True)
     except NostrHostError as e:
         logger.error(str(e))
         raise YunohostError(
@@ -172,7 +172,7 @@ def dyndns_subscribe(operation_logger, domain=None, recovery_password=None):
     chmod("/etc/yunohost/dyndns", 0o600, recursive=True)
     chown("/etc/yunohost/dyndns", "root", recursive=True)
 
-    import requests  # lazy loading this module for performance reasons
+    import httpx2  # lazy loading this module for performance reasons
 
     # Send subscription
     try:
@@ -183,10 +183,11 @@ def dyndns_subscribe(operation_logger, domain=None, recovery_password=None):
             data["recovery_password"] = hashlib.sha256(
                 (domain + ":" + recovery_password.strip()).encode("utf-8")
             ).hexdigest()
-        r = requests.post(
+        r = httpx2.post(
             f"https://{DYNDNS_PROVIDER}/key/{b64encoded_key}?key_algo=hmac-sha512",
             data=data,
             timeout=30,
+            follow_redirects=True,
         )
     except Exception as e:
         rm(key_file, force=True)
@@ -225,7 +226,7 @@ def dyndns_unsubscribe(operation_logger, domain, recovery_password=None):
         recovery_password -- Password that is used to delete the domain ( defined when subscribing )
     """
 
-    import requests  # lazy loading this module for performance reasons
+    import httpx2  # lazy loading this module for performance reasons
 
     # Unsubscribe the domain using the key if available
     keys = glob.glob(f"/etc/yunohost/dyndns/K{domain}.+*.key")
@@ -260,10 +261,11 @@ def dyndns_unsubscribe(operation_logger, domain, recovery_password=None):
 
     # Send delete request
     try:
-        r = requests.delete(
+        r = httpx2.delete(
             f"https://{DYNDNS_PROVIDER}/domains/{domain}",
             data=credential,
             timeout=30,
+            follow_redirects=True,
         )
     except Exception as e:
         raise YunohostError("dyndns_unsubscribe_failed", error=str(e))
@@ -306,17 +308,18 @@ def dyndns_set_recovery_password(domain, recovery_password):
         key = f.readline().strip().split(" ", 6)[-1]
     base64key = base64.b64encode(key.encode()).decode()
 
-    import requests  # lazy loading this module for performance reasons
+    import httpx2  # lazy loading this module for performance reasons
 
     # Send delete request
     try:
-        r = requests.put(
+        r = httpx2.put(
             f"https://{DYNDNS_PROVIDER}/domains/{domain}/recovery_password",
             data={
                 "key": base64key,
                 "recovery_password": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
             },
             timeout=30,
+            follow_redirects=True,
         )
     except Exception as e:
         raise YunohostError("dyndns_set_recovery_password_failed", error=str(e))

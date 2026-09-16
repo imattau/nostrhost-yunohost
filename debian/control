@@ -61,7 +61,7 @@ Package: python3-nostrhost
 Architecture: all
 Section: python
 Depends: python3-all (>= 3.11), nostrhost-core
- , python3-typer, python3-requests
+ , python3-typer
  , python3-nostrhost-auth
 Description: native nostrhost framework — moulinette replacement
  nostrhost is the native framework layer that replaces the retired
