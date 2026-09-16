@@ -1,3 +1,16 @@
+yunohost (12.1.41.57) stable; urgency=low
+
+  * Fix a 500 on /package/nsite/domain/list (the server-address screen): the
+    nsite-domain tools were added to the operation catalogue but never wired
+    into the API/CLI dispatch map (_TOOL_HANDLERS), so the simple GET forward
+    raised KeyError -> generic 500. Also wire the new domain.primary.set and
+    nostr.connectivity.set handlers plus backup.info, and add a regression test
+    asserting every simple GET forward resolves in the dispatch map.
+  * Remove a leftover debug print() in the session authenticator that flooded
+    the API journal with negative floats.
+
+ -- NostrHost <noreply@nostrhost.org>  Wed, 16 Sep 2026 23:45:00 +0000
+
 yunohost (12.1.41.56) stable; urgency=low
 
   * Fix the certificate expiry reader on Debian bookworm: the system Python

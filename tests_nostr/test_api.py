@@ -66,6 +66,18 @@ def _session_headers(monkeypatch, infos, secret="test-secret"):
 # --------------------------------------------------------------------------- #
 # healthz + public
 
+def test_simple_get_forwards_all_have_dispatch_handlers():
+    """Every simple GET forward must resolve in the dispatch map.
+
+    ``_run_tool`` indexes ``_TOOL_HANDLERS`` directly, so a forward whose tool
+    was added to the catalogue/registry but never wired into ``_TOOL_HANDLERS``
+    raised KeyError -> a generic 500 (e.g. /package/nsite/domain/list).
+    """
+    forwards = {tool for _path, tool, _map in api_module._SIMPLE_GET_FORWARDS}
+    missing = sorted(forwards - set(api_module._TOOL_HANDLERS))
+    assert missing == []
+
+
 def test_healthz_is_public():
     app = build_app()
     status, _, body = wsgi_request(app, "GET", "/package/healthz")

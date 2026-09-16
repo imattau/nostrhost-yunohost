@@ -376,7 +376,6 @@ class Authenticator(BaseAuthenticator):  # type: ignore
 
     def purge_expired_session_files(self) -> None:
         for session_file in SESSION_FOLDER.iterdir():
-            print(session_file.stat().st_mtime - time.time())
             if abs(session_file.stat().st_mtime - time.time()) > SESSION_VALIDITY:
                 try:
                     session_file.unlink()
