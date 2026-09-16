@@ -23,9 +23,11 @@ from yunohost.nostr_operations import (
     build_execution_started,
     build_operation_request,
     build_rejection,
+    operation_catalog,
 )
 from yunohost.nostr_operations_state import OpState
 from conftest import new_key
+from yunohost.nostr_identity import _sign_event
 from yunohost.nostr_operationsd import OperationEngine, _sorted_replay
 
 
@@ -229,7 +231,11 @@ def test_actor_scope_gates_request_not_requester():
     ev = build_operation_request(h.admin_sk, h.admin_pk, "service.restart", {"name": "caddy"}, actor_pubkey=actor_pk)
     assert h.engine.handle_event(ev)
     assert h.engine.state(ev["id"]) == OpState.REJECTED
-    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+    assert _content(h.events_by_kind(2204)[0]) == {
+        "ok": False,
+        "reason": "unauthorized",
+        "catalog_digest": operation_catalog()["digest"],
+    }
 
     h.grant(["server.read"], subject_pk=actor_pk)
     ev2 = build_operation_request(h.admin_sk, h.admin_pk, "system.status", {}, actor_pubkey=actor_pk)
@@ -247,7 +253,11 @@ def test_h5_identity_write_scope_gates_new_tools():
     ev, handled = h.request("identity.link", {"username": "alice", "pubkey_or_npub": "ab" * 32})
     assert handled
     assert h.engine.state(ev["id"]) == OpState.REJECTED
-    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+    assert _content(h.events_by_kind(2204)[0]) == {
+        "ok": False,
+        "reason": "unauthorized",
+        "catalog_digest": operation_catalog()["digest"],
+    }
     assert h.backend.calls == []
 
     # identity.write grant -> accepted and parked for approval
@@ -276,7 +286,11 @@ def test_e2e_denied_requester_is_auto_rejected():
     request_id = ev["id"]
     assert h.engine.state(request_id) == OpState.REJECTED
     assert h.backend.calls == []
-    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+    assert _content(h.events_by_kind(2204)[0]) == {
+        "ok": False,
+        "reason": "unauthorized",
+        "catalog_digest": operation_catalog()["digest"],
+    }
 
 
 def test_unknown_tool_is_auto_rejected():
@@ -291,9 +305,83 @@ def test_unknown_tool_is_auto_rejected():
 def test_admin_can_operate_without_grant():
     h = Harness()
     ev, handled = h.request("service.restart", {"name": "caddy"}, requester_sk=h.admin_sk, requester_pk=h.admin_pk)
+    # An admin's own request is itself the approval: it auto-executes instead
+    # of parking for a separate kind-2201 approval.
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+    assert h.events_by_kind(2202) == []
+
+
+def test_admin_request_auto_approves_without_a_separate_approval_event():
+    """The approval gate exists to let an admin authorise a non-admin caller;
+    when the actor is already an admin there is no further authority to ask,
+    so the admin's signed request executes straight through."""
+    h = Harness()
+    ev, handled = h.request("service.restart", {"name": "caddy"}, requester_sk=h.admin_sk, requester_pk=h.admin_pk)
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+    # A (now redundant) approval must not re-execute a terminal request.
+    assert not h.approve(ev["id"])
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+
+
+def test_broker_relayed_admin_actor_auto_approves():
+    """MCP shape: the node's trusted broker key signs the request while the
+    authenticated admin npub rides as the actor. The actor is the authority,
+    so the operation auto-executes."""
+    h = Harness()
+    broker_sk, broker_pk = new_key()
+    engine = OperationEngine(
+        publish=h.published.append,
+        server_sk=h.server_sk,
+        admins=[h.admin_pk],
+        backend=h.backend,
+        brokers=[broker_pk],
+    )
+    ev = build_operation_request(
+        broker_sk, broker_pk, "service.restart", {"name": "caddy"}, actor_pubkey=h.admin_pk
+    )
+    assert engine.handle_event(ev)
+    assert engine.records[ev["id"]].actor == h.admin_pk
+    assert engine.records[ev["id"]].state == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+
+
+def test_non_admin_actor_still_requires_a_separate_approval():
+    h = Harness()
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
+    assert handled
     assert h.engine.state(ev["id"]) == OpState.REQUESTED
+    assert h.backend.calls == []
     assert h.approve(ev["id"])
     assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+
+
+def test_owner_signature_policy_parks_a_non_owner_admin():
+    """Owner-co-signed policies still require the configured operator: a
+    different admin's own request must not auto-approve."""
+    h = Harness(policy=lambda _tool, _args, _actor: {"allow": True, "owner_signature_required": True})
+    other_admin_sk, other_admin_pk = new_key()
+    h.engine._admins = (h.admin_pk, other_admin_pk)
+    h.engine._policy_owner = h.admin_pk
+
+    ev, handled = h.request(
+        "service.restart", {"name": "caddy"}, requester_sk=other_admin_sk, requester_pk=other_admin_pk
+    )
+    assert handled
+    assert h.engine.state(ev["id"]) == OpState.REQUESTED
+    assert h.backend.calls == []
+
+    # The operator's own request is auto-approved (actor == policy_owner).
+    ev2, handled = h.request(
+        "service.restart", {"name": "caddy"}, requester_sk=h.admin_sk, requester_pk=h.admin_pk
+    )
+    assert handled
+    assert h.engine.state(ev2["id"]) == OpState.SUCCEEDED
     assert h.backend.calls == [("service.restart", {"name": "caddy"})]
 
 
@@ -310,6 +398,23 @@ def test_rejection_by_admin_denies():
     assert not h.approve(request_id)
     assert h.engine.state(request_id) == OpState.REJECTED
     assert h.backend.calls == []
+
+
+def test_stale_catalog_request_is_rejected_before_execution():
+    h = Harness()
+    h.grant(["server.read"])
+    event = _sign_event(
+        h.agent_sk,
+        h.agent_pk,
+        2200,
+        json.dumps({"tool": "system.version", "args": {}, "catalog_digest": "sha256:stale"}),
+        [],
+    )
+
+    assert h.engine.handle_event(event)
+    assert h.engine.state(event["id"]) == OpState.REJECTED
+    assert h.backend.calls == []
+    assert _content(h.events_by_kind(2204)[0])["reason"] == "catalog_digest_mismatch"
 
 
 def test_approval_by_non_admin_is_ignored():
@@ -338,11 +443,11 @@ def test_execute_requires_approval_for_default_tools():
 def test_error_path_reports_failed_result():
     h = Harness()
     h.grant(["server.read"])
-    # unknown tool reaches the registry anyway as a request; use boom via raw
-    # request to a known-name-but-failing tool through the backend
-    ev, handled = h.request("system.version", args={"__force__": "boom"})
+    # A handler returning a value outside its declared result boundary fails
+    # closed before publication.
+    h.backend.results["system.version"] = "not-an-object"
+    ev, handled = h.request("system.version")
     request_id = ev["id"]
-    h.approve(request_id)
     assert h.engine.state(request_id) == OpState.FAILED
     body = _content(h.events_by_kind(2204)[0])
     assert body["ok"] is False
@@ -395,11 +500,11 @@ def test_scope_gating_denies_other_scope():
 
 def test_tool_args_are_forwarded():
     h = Harness()
-    h.grant(["apps.read"])
-    ev, handled = h.request("app.list", args={"full": True})
+    h.grant(["services.read"])
+    ev, handled = h.request("service.status", args={"name": "nginx"})
     request_id = ev["id"]
     h.approve(request_id)
-    assert h.backend.calls == [("app.list", {"full": True})]
+    assert h.backend.calls == [("service.status", {"name": "nginx"})]
 
 
 def test_replay_sort_places_grants_before_requests():
@@ -649,17 +754,20 @@ def test_rollback_apply_denied_without_state_scope():
     assert handled
     assert h.engine.state(ev["id"]) == OpState.REJECTED
     assert h.backend.calls == []
-    assert _content(h.events_by_kind(2204)[0]) == {"ok": False, "reason": "unauthorized"}
+    assert _content(h.events_by_kind(2204)[0]) == {
+        "ok": False,
+        "reason": "unauthorized",
+        "catalog_digest": operation_catalog()["digest"],
+    }
 
 
-def test_rollback_apply_admin_can_request_and_approve():
+def test_rollback_apply_admin_request_is_auto_approved():
     h = Harness()
     ev, handled = h.request(
         "rollback.apply", args={"plan": _sample_plan()}, requester_sk=h.admin_sk, requester_pk=h.admin_pk
     )
     assert handled
-    assert h.engine.state(ev["id"]) == OpState.REQUESTED
-    assert h.approve(ev["id"])
+    # The admin's own request is the approval; no separate 2201 needed.
     assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
     assert ("service.control", {"name": "dnsmasq", "action": "restart"}) in h.backend.calls
 

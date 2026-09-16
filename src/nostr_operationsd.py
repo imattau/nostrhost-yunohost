@@ -9,7 +9,9 @@ Consumes the operation chain (kinds 2200–2204) and capability grants
  1. validates the tool (unknown → auto-reject),
  2. authorises the requester (admin, or granted scope from 31100 events;
     otherwise → auto-reject),
- 3. gates on admin approval (kind 2201) unless the tool does not require it,
+ 3. gates on admin approval (kind 2201) unless the tool does not require it
+    or the actor is itself an admin (an admin's own request is the approval;
+    owner-co-signed policies still require the configured operator),
  4. publishes execution-started (2203) as the server key,
  5. runs the tool through the injected backend (real = fork's safe read-only
     functions),
@@ -62,7 +64,6 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
-from .nostr_state import DATA_AFFECTING_TOOLS
 from .nostrhost.events import _d_tag, _e_tag, _tag_value
 
 logger = logging.getLogger("nostr-operationsd")
@@ -193,6 +194,7 @@ class OperationEngine:
             body = {}
         tool = str(body.get("tool") or "").strip()
         args = body.get("args") or {}
+        catalog_digest = str(body.get("catalog_digest") or "")
 
         requester = event.get("pubkey", "")
         if not tool or not _is_hex64(requester):
@@ -221,6 +223,11 @@ class OperationEngine:
         if spec is None:
             self._reject(record, f"unknown_tool:{tool}")
             return True
+        from .nostr_operations import operation_catalog
+
+        if catalog_digest != operation_catalog()["digest"]:
+            self._reject(record, "catalog_digest_mismatch")
+            return True
 
         # Authorise the *actor* (defaults to the requester when no actor tag is
         # present). The requester is only the relay-admitted signing key: the
@@ -245,10 +252,29 @@ class OperationEngine:
             self._reject(record, f"policy_denied:{exc}")
             return True
 
-        if not spec.require_approval:
+        if not spec.require_approval or self._actor_approves(record):
             self._execute(record)  # auto path: REQUESTED -> EXECUTING
         else:
             logger.info("request %s: %s by %s awaiting approval", request_id[:16], tool, requester[:16])
+        return True
+
+    def _actor_approves(self, record: OperationRecord) -> bool:
+        """Whether the requesting actor's own authority satisfies the approval
+        gate, so an admin's operation auto-executes instead of parking for a
+        separate kind-2201 approval.
+
+        The approval step exists to let an admin authorise a *non-admin*
+        caller (a delegated agent or a broker-relayed scoped user). When the
+        actor is already an admin there is no separate authority left to ask,
+        so the admin's own signed request is the approval. Owner-co-signed
+        policies (``owner_signature_required``) still require the configured
+        operator specifically - a different admin cannot stand in for them.
+        """
+        admins = {admin.lower() for admin in self._admins}
+        if record.actor not in admins:
+            return False
+        if record.policy and record.policy.get("owner_signature_required"):
+            return self._policy_owner is not None and record.actor == self._policy_owner.lower()
         return True
 
     def handle_approval(self, event: dict[str, Any]) -> bool:
@@ -423,6 +449,10 @@ class OperationEngine:
         if record.state not in (OpState.REQUESTED, OpState.APPROVED):
             logger.warning("cannot execute %s from %s", record.request_id[:16], record.state.value)
             return
+        spec = tool_spec(record.tool)
+        if spec is None:
+            self._reject(record, f"unknown_tool:{record.tool}")
+            return
         try:
             record.state = next_state(record.state, KIND_EXECUTION_STARTED)
         except InvalidTransition as exc:
@@ -452,6 +482,7 @@ class OperationEngine:
                 self._progress(record, "executing", 0.5, f"running {record.tool}")
                 result = self._backend.execute(record.tool, record.args)
                 operation_ok = True
+            result = spec.validate_result(result)
             self._progress(record, "executing", 1.0, f"{record.tool} finished")
             body: dict[str, Any] = {"ok": operation_ok, "result": result}
             if record.policy:
@@ -461,11 +492,20 @@ class OperationEngine:
             body = {"ok": False, "error": str(exc)}
         if self._state is not None:
             self._state.post(record.request_id, record.tool, body["ok"], body, actor=record.actor, args=record.args)
-            if body.get("ok") and record.tool in DATA_AFFECTING_TOOLS:
+            if body.get("ok") and spec.state_impact == "application_data":
                 snapshot = getattr(self._state, "last_restic_snapshot", "") or ""
                 result_body = body.get("result")
                 if snapshot and isinstance(result_body, dict):
                     result_body["restic_snapshot"] = snapshot
+        if body.get("ok"):
+            try:
+                body["result"] = spec.validate_result(body.get("result"))
+            except Exception as exc:  # noqa: BLE001 - contract violations fail closed
+                logger.error("result contract violation for %s: %s", record.tool, exc)
+                body = {"ok": False, "error": "operation result violated its declared contract"}
+        from .nostr_operations import operation_catalog
+
+        body["catalog_digest"] = operation_catalog()["digest"]
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, actor_pubkey=record.actor, **body))
         record.state = next_state(record.state, KIND_EXECUTION_RESULT, ok=body["ok"])
         record.result = body
@@ -474,7 +514,9 @@ class OperationEngine:
     def _reject(self, record: OperationRecord, reason: str) -> None:
         record.state = OpState.REJECTED
         record.reason = reason
-        body = {"reason": reason}
+        from .nostr_operations import operation_catalog
+
+        body = {"reason": reason, "catalog_digest": operation_catalog()["digest"]}
         self._publish(build_execution_result(self._server_sk, self._server_pubkey, record.request_id, ok=False, actor_pubkey=record.actor, **body))
         logger.info("request %s rejected: %s", record.request_id[:16], reason)
 

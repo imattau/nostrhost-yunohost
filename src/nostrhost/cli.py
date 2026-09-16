@@ -659,6 +659,7 @@ def _agent_init() -> dict[str, Any]:
     agent_secret = secrets.token_hex(32)
     agent_pubkey = _pubkey(agent_secret)
     config = {
+        "schema_version": 2,
         "relay": {
             "relay_url": relay,
             "agent_secret_key": agent_secret,
@@ -667,17 +668,12 @@ def _agent_init() -> dict[str, Any]:
         },
         "policy": {
             "level": "observe",
-            "capabilities": {"system.read": True},
+            "scopes": {"services.read": True},
         },
         # service.status is implemented by both the agent registry and the
         # current NostrHost control-plane ToolSpec registry.
         "observation_queries": [
             {"operation": "service.status"},
-            # Phase 3b: the nsite read surface is observed (never executed —
-            # observe mode only runs read queries, and nsite.* writes are
-            # absent from the agent registry entirely).
-            {"operation": "nsite.gateway.status"},
-            {"operation": "nsite.list"},
         ],
         "audit_path": str(Path(AGENT_STATE_DIR) / "audit.jsonl"),
         "interval": "6h",

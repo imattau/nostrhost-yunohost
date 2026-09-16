@@ -298,15 +298,18 @@ def test_registry_schemas_and_catalog():
     from yunohost.nostr_operations import operation_catalog
 
     catalog = operation_catalog()
-    by_name = {entry["name"]: entry for entry in catalog}
-    assert len(catalog) == len(known_tools())
+    assert catalog["schema_version"] == 2
+    assert catalog["digest"].startswith("sha256:")
+    by_name = {entry["name"]: entry for entry in catalog["operations"]}
+    assert len(catalog["operations"]) == len(known_tools())
     for name, spec in TOOLS.items():
         entry = by_name[name]
-        assert entry["scope"] == spec.scope
-        assert entry["require_approval"] == spec.require_approval
+        assert entry["scopes"] == list(spec.scopes)
+        assert entry["approval"]["minimum"] == ("admin" if spec.require_approval else "none")
         assert entry["risk"] in ("low", "medium", "high")
         assert entry["reversibility"] in ("reversible", "partial", "irreversible")
         assert entry["description"]
+        assert entry["result_schema"] == spec.result_schema()
     app_install = by_name["app.install"]
     assert app_install["risk"] == "high"
     assert app_install["input_schema"]["required"] == ["app"]
@@ -327,7 +330,7 @@ def test_every_write_tool_carries_an_input_model():
     for name, spec in TOOLS.items():
         if spec.require_approval:
             assert spec.input_model is not None, f"write tool {name} is missing an input_model"
-    catalog = {entry["name"]: entry for entry in operation_catalog()}
+    catalog = {entry["name"]: entry for entry in operation_catalog()["operations"]}
     for name in TOOLS:
         if TOOLS[name].require_approval:
             schema = catalog[name]["input_schema"]

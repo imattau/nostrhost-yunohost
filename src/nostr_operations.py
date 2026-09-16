@@ -34,11 +34,12 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from .nostr_identity import _is_hex64, _operator_config, _sign_event, publish_to_relay
 from .nostr_operations_state import OpState
@@ -221,7 +222,19 @@ class OperationError(ValueError):
     """The operation request failed (unknown tool, bad args, config, …)."""
 
 
-@dataclass(frozen=True)
+CATALOG_SCHEMA_VERSION = 2
+
+
+class OperationResult(RootModel[dict[str, Any]]):
+    """JSON result boundary used until an operation declares a narrower model.
+
+    Every operation has an output schema and is validated before publication.
+    Operation-specific models can narrow this contract without changing the
+    executor or any generated consumer.
+    """
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolSpec:
     """One executable tool: its scope, approval requirement and real handler.
 
@@ -245,12 +258,27 @@ class ToolSpec:
     risk: str = "low"  # low | medium | high
     reversibility: str = "reversible"  # reversible | partial | irreversible
     required_scopes: tuple[str, ...] = ()  # additional scopes the caller must hold
+    contract_version: int = 1
+    effect: str = ""
+    state_impact: str = "none"
+    verification_rule: str | None = None
+    sensitive_input_paths: tuple[str, ...] = ()
+    sensitive_result_paths: tuple[str, ...] = ()
+    untrusted_result_paths: tuple[str, ...] = ()
+
+    @property
+    def scopes(self) -> tuple[str, ...]:
+        return (self.scope, *self.required_scopes)
 
     def input_schema(self) -> dict[str, Any] | None:
         """The JSON Schema for this tool's arguments, if an input model exists."""
         if self.input_model is None:
             return None
         return self.input_model.model_json_schema()
+
+    def result_schema(self) -> dict[str, Any]:
+        model = self.result_model or OperationResult
+        return model.model_json_schema()
 
     def validate_args(self, args: dict[str, Any]) -> dict[str, Any]:
         """Coerce/validate ``args`` through the input model when present.
@@ -268,6 +296,16 @@ class ToolSpec:
         except Exception as exc:  # pydantic ValidationError -> OperationError
             raise OperationError(f"invalid arguments for {self.name}: {exc}") from exc
 
+    def validate_result(self, result: Any) -> Any:
+        model = self.result_model or OperationResult
+        try:
+            validated = model.model_validate(result)
+            if isinstance(validated, RootModel):
+                return validated.root
+            return validated.model_dump(exclude_none=True)
+        except Exception as exc:
+            raise OperationError(f"invalid result for {self.name}: {exc}") from exc
+
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -275,6 +313,10 @@ class _Strict(BaseModel):
 
 class ServiceRestartArgs(_Strict):
     name: str = Field(description="one known service name to restart")
+
+
+class ServiceStatusArgs(_Strict):
+    name: str = Field(default="", description="optional known service name")
 
 
 class ServiceControlArgs(_Strict):
@@ -879,7 +921,7 @@ TOOLS: dict[str, ToolSpec] = {
         name="service.status",
         handler=_safe_service_status,
         scope=SCOPE_SERVICES_READ,
-        require_approval=False,
+        require_approval=False, input_model=ServiceStatusArgs,
         description="status of running services",
     ),
     "service.restart": ToolSpec(
@@ -1277,6 +1319,42 @@ TOOLS: dict[str, ToolSpec] = {
 }
 
 
+_APPLICATION_DATA_OPERATIONS = frozenset(
+    {"app.install", "app.upgrade", "app.remove", "package.reconcile", "backup.create", "backup.restore"}
+)
+_EXTERNAL_PREFIXES = ("catalog.", "dns.", "nsite.")
+
+
+def _complete_spec(spec: ToolSpec) -> ToolSpec:
+    effect = spec.effect
+    if not effect:
+        if not spec.require_approval:
+            effect = "read"
+        elif spec.name.startswith("system.shutdown") or spec.name.startswith("system.reboot"):
+            effect = "power"
+        elif spec.reversibility == IRREVERSIBLE:
+            effect = "destructive"
+        elif spec.name.startswith(_EXTERNAL_PREFIXES):
+            effect = "external_change"
+        else:
+            effect = "local_change"
+    state_impact = spec.state_impact
+    if spec.name in _APPLICATION_DATA_OPERATIONS:
+        state_impact = "application_data"
+    elif state_impact == "none" and effect in {"local_change", "destructive", "power"}:
+        state_impact = "configuration"
+    return replace(
+        spec,
+        input_model=spec.input_model or _EmptyArgs,
+        result_model=spec.result_model or OperationResult,
+        effect=effect,
+        state_impact=state_impact,
+    )
+
+
+TOOLS = {name: _complete_spec(spec) for name, spec in TOOLS.items()}
+
+
 def tool_spec(name: str) -> ToolSpec | None:
     """Look up a tool by name, or None for an unknown tool."""
     return TOOLS.get(name)
@@ -1286,26 +1364,62 @@ def known_tools() -> list[str]:
     return sorted(TOOLS)
 
 
-def operation_catalog() -> list[dict[str, Any]]:
-    """JSON-serialisable catalogue of the whole operation registry.
-
-    One entry per tool: name, scope, approval requirement, risk tier,
-    reversibility, description and the input JSON Schema. Generated MCP
-    tools (nostrhost-mcp), Admin forms and API docs all derive from this —
-    the registry is the single source of truth (MCP transition §6).
-    """
+def _operation_entries() -> list[dict[str, Any]]:
     return [
         {
             "name": spec.name,
-            "scope": spec.scope,
-            "require_approval": spec.require_approval,
+            "contract_version": spec.contract_version,
+            "scopes": list(spec.scopes),
+            "approval": {"minimum": "admin" if spec.require_approval else "none", "policy_may_elevate": True},
             "risk": spec.risk,
             "reversibility": spec.reversibility,
+            "effect": spec.effect,
+            "state_impact": spec.state_impact,
             "description": spec.description,
             "input_schema": spec.input_schema(),
+            "result_schema": spec.result_schema(),
+            "verification_rule": spec.verification_rule,
+            "sensitivity": {
+                "input": list(spec.sensitive_input_paths),
+                "result": list(spec.sensitive_result_paths),
+                "untrusted_result": list(spec.untrusted_result_paths),
+            },
         }
-        for spec in TOOLS.values()
+        for spec in sorted(TOOLS.values(), key=lambda item: item.name)
     ]
+
+
+def validate_operation_registry() -> None:
+    valid_effects = {"read", "local_change", "external_change", "destructive", "power"}
+    valid_impacts = {"none", "configuration", "application_data", "identity"}
+    for name, spec in TOOLS.items():
+        if name != spec.name or spec.contract_version < 1:
+            raise OperationError(f"invalid operation identity for {name!r}")
+        if not spec.scopes or any(scope not in KNOWN_SCOPES for scope in spec.scopes):
+            raise OperationError(f"invalid scopes for {name!r}")
+        if spec.effect not in valid_effects or spec.state_impact not in valid_impacts:
+            raise OperationError(f"invalid effect metadata for {name!r}")
+        if spec.effect != "read" and not spec.require_approval:
+            raise OperationError(f"mutating operation {name!r} must require approval")
+        if not spec.input_schema() or not spec.result_schema():
+            raise OperationError(f"operation {name!r} lacks input or result schema")
+
+
+@lru_cache(maxsize=1)
+def operation_catalog() -> dict[str, Any]:
+    """Return the canonical, versioned operation contract document."""
+    validate_operation_registry()
+    entries = _operation_entries()
+    canonical = json.dumps(
+        {"schema_version": CATALOG_SCHEMA_VERSION, "operations": entries},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "digest": "sha256:" + hashlib.sha256(canonical).hexdigest(),
+        "operations": entries,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1348,7 +1462,10 @@ def build_operation_request(
     tags = [["p", target]] if target else []
     if actor_pubkey:
         tags.append(["actor", actor_pubkey.lower()])
-    content = json.dumps({"tool": tool, "args": args}, default=_json_default)
+    content = json.dumps(
+        {"tool": tool, "args": args, "catalog_digest": operation_catalog()["digest"]},
+        default=_json_default,
+    )
     return _sign_event(requester_sk, requester_pubkey, KIND_OPERATION_REQUEST, content, tags)
 
 
@@ -1461,7 +1578,10 @@ def build_execution_result(
     """Build (without publishing) a kind-2204 execution-result event."""
     if actor_pubkey is not None and not _is_hex64(actor_pubkey):
         raise OperationError("actor pubkey must be 64-hex")
-    content = json.dumps({"ok": ok, **extra}, default=_json_default)
+    content = json.dumps(
+        {**extra, "ok": ok, "catalog_digest": operation_catalog()["digest"]},
+        default=_json_default,
+    )
     tags = _e_tag(request_id)
     if actor_pubkey:
         tags.append(["actor", actor_pubkey.lower()])
@@ -1985,9 +2105,15 @@ def run_signed_chain(
         return {"ok": False, "request_id": request["id"], "state": record.state.value, "reason": record.reason}
     if not approve:
         return {"ok": False, "request_id": request["id"], "state": record.state.value, "pending_approval": True}
-    approval = build_approval(sk, pk, request["id"], note="local operator approval")
-    if not engine.handle_event(approval):
-        raise OperationError(f"{tool} approval was not accepted")
+    # An admin/operator request auto-approves in the engine (the requester is
+    # the authority the approval step exists to ask), so it already reached a
+    # terminal state and must not be handed a second approval - that would be
+    # an illegal transition. Only a still-parked request needs the explicit
+    # operator approval.
+    if record.state == OpState.REQUESTED:
+        approval = build_approval(sk, pk, request["id"], note="local operator approval")
+        if not engine.handle_event(approval):
+            raise OperationError(f"{tool} approval was not accepted")
     record = engine.records[request["id"]]
     if record.state not in (OpState.SUCCEEDED, OpState.FAILED, OpState.REJECTED):
         return {"ok": False, "request_id": request["id"], "state": record.state.value}

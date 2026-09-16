@@ -9,7 +9,7 @@ from nostr_sdk import Keys
 
 from yunohost.nostr_identity import _sign_event
 from yunohost.nostr_mcp_adapter import MCPAdapterError, NostrMCPAdapter
-from yunohost.nostr_operations import build_execution_result
+from yunohost.nostr_operations import build_execution_result, operation_catalog
 
 
 def new_key():
@@ -33,7 +33,11 @@ def test_mcp_adapter_lists_native_tools_and_submits_signed_request():
 
     assert response["isError"] is False
     assert response["_nostr"]["request_id"] == sent[0][1]["id"]
-    assert json.loads(sent[0][1]["content"]) == {"tool": "system.version", "args": {}}
+    assert json.loads(sent[0][1]["content"]) == {
+        "tool": "system.version",
+        "args": {},
+        "catalog_digest": operation_catalog()["digest"],
+    }
 
 
 def test_mcp_adapter_preserves_authenticated_actor_identity():
@@ -68,7 +72,10 @@ def test_mcp_adapter_correlates_result_events():
 
     assert adapter.ingest_event(result)
     assert adapter.result(request_id) == {
-        "ok": True, "result": {"ready": True}, "_nostr_actor": pk
+        "ok": True,
+        "catalog_digest": operation_catalog()["digest"],
+        "result": {"ready": True},
+        "_nostr_actor": pk,
     }
 
 

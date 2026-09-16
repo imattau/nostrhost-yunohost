@@ -182,5 +182,5 @@ def test_diagnosis_run_rejects_extra(monkeypatch):
 def test_operation_catalog_covers_native_tools():
     from yunohost.nostr_operations import operation_catalog
 
-    names = {entry["name"] for entry in operation_catalog()}
+    names = {entry["name"] for entry in operation_catalog()["operations"]}
     assert {"app.install", "system.status", "firewall.open"} <= names

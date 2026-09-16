@@ -158,6 +158,17 @@ def test_run_signed_chain_catalog_publish_executes():
     assert h.recorder.history == ["pre", "post"]
 
 
+def test_run_signed_chain_operator_request_auto_approves():
+    """The local operator is an admin, so its request auto-approves in the
+    engine and ``run_signed_chain`` must not feed a redundant approval (that
+    would be an illegal REQUESTED-only transition)."""
+    h = Harness(policy=allowing_policy)
+    body = h.chain("package.reconcile", {"plan": _envelope(example_package())})
+    assert body["ok"] is True
+    assert body["state"] == OpState.SUCCEEDED.value
+    assert h.recorder.history == ["pre", "post"]
+
+
 def test_run_signed_chain_identity_link_executes():
     h = Harness(policy=allowing_policy)
     body = h.chain("identity.link", {"username": "alice", "pubkey_or_npub": "ab" * 32, "signer_type": "nip07"})
