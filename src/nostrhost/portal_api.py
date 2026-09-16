@@ -14,6 +14,7 @@ permission projection itself).
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable
 
 import uvicorn
@@ -22,7 +23,7 @@ from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from starlette.responses import PlainTextResponse
 
-from nostrhost import web
+from nostrhost import problems, web
 
 logger = logging.getLogger("nostr-portal-api")
 
@@ -84,19 +85,35 @@ class _WebRoute(APIRoute):
 
         async def handler(request: Request) -> Response:
             token = web.begin(request)
+            started = time.perf_counter()
+            error_exc: BaseException | None = None
             try:
                 request.state.body_bytes = await request.body()
                 try:
                     response = await original(request)
                 except web.HTTPResponse as exc:
                     response = exc.to_response()
-                except Exception:  # noqa: BLE001 - last error boundary
-                    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+                    error_exc = exc
+                except Exception as exc:  # noqa: BLE001 - last error boundary
+                    logger.exception(
+                        "unhandled error on %s %s (rid=%s)",
+                        request.method,
+                        request.url.path,
+                        problems.request_id(request),
+                    )
                     response = PlainTextResponse("internal server error", status_code=500)
+                    error_exc = exc
                 status = web.get_status()
                 if status is not None and isinstance(response, Response):
                     response.status_code = status
-                return web.apply_cookies(response)
+                return problems.finalize(
+                    web.apply_cookies(response),
+                    request,
+                    started=started,
+                    exc=error_exc,
+                    kind="render" if isinstance(error_exc, Exception) and getattr(response, "status_code", 0) >= 500 else "portal",
+                    source="portal",
+                )
             finally:
                 web.end(token)
 

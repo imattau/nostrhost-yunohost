@@ -110,6 +110,11 @@ do_configure() {
     # unit start or the mount namespace fails; create them here idempotently.
     mkdir -p /var/lib/yunohost /var/cache/yunohost /var/log/yunohost /home/yunohost.backup
 
+    # Structured server problem log (/var/log/nostrhost/problems.log, written
+    # by the api/portal-api error boundaries and read back by logs.problems).
+    # 0700: records carry request paths, actors and tracebacks.
+    install -d -m 0700 /var/log/nostrhost
+
     # CrowdSec provisioning (P4 of the fail2ban->CrowdSec migration).
     # Runs on both fresh install and upgrade; every step is idempotent.
     # crowdsec + crowdsec-firewall-bouncer are hard Depends, so the daemon

@@ -1,3 +1,18 @@
+yunohost (12.1.41.58) stable; urgency=low
+
+  * Add a structured server problem log: the API and portal-api error
+    boundaries now write one JSON record per 4xx/5xx response and per
+    unhandled exception to /var/log/nostrhost/problems.log (bounded rotation,
+    redacted), with request context (route, method, status, error code, actor,
+    request id, duration) and the traceback for server errors. The request id
+    is echoed on the X-Nostrhost-Request-Id response header so a problem can
+    be correlated back to a specific browser/admin request.
+  * Add the logs.problems introspection tool (scope logs.read) so the MCP and
+    nostr-opctl can read and diagnose those records, filtered by status / code
+    / kind / source / request-id / time.
+
+ -- NostrHost <noreply@nostrhost.org>  Wed, 16 Sep 2026 23:55:00 +0000
+
 yunohost (12.1.41.57) stable; urgency=low
 
   * Fix a 500 on /package/nsite/domain/list (the server-address screen): the

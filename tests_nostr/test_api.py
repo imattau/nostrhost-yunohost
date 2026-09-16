@@ -78,6 +78,50 @@ def test_simple_get_forwards_all_have_dispatch_handlers():
     assert missing == []
 
 
+def test_api_records_problems_for_unhandled_errors(tmp_path, monkeypatch):
+    """A server-side exception becomes a 500 to the client and a structured
+    problem record (with traceback) the introspection tools can read."""
+    from nostrhost import problems
+
+    problems.configure(str(tmp_path / "problems.log"))
+
+    def boom(**_kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", boom)
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, headers, body = wsgi_request(app, "GET", "/package/system/version")
+    assert status == "500"
+    assert headers["X-Nostrhost-Request-Id"]
+    assert json.loads(body)["code"] == "internal_error"
+    entry = json.loads((tmp_path / "problems.log").read_text().splitlines()[-1])
+    assert entry["status"] == 500
+    assert entry["code"] == "internal_error"
+    assert entry["kind"] == "unhandled"
+    assert entry["source"] == "api"
+    assert entry["path"] == "/package/system/version"
+    assert "kaboom" in entry["traceback"]
+
+
+def test_api_records_problems_for_auth_denials(tmp_path, monkeypatch):
+    from nostrhost import problems
+
+    problems.configure(str(tmp_path / "problems.log"))
+
+    def deny(_rule: str = "") -> str:
+        raise ApiError(403, "forbidden", "nope")
+
+    app = build_app(authorizer=deny)
+    status, headers, _ = wsgi_request(app, "GET", "/package/system/version")
+    assert status == "403"
+    assert headers["X-Nostrhost-Request-Id"]
+    entry = json.loads((tmp_path / "problems.log").read_text().splitlines()[-1])
+    assert entry["status"] == 403
+    assert entry["code"] == "forbidden"
+    assert entry["kind"] == "auth"
+    assert entry["source"] == "api"
+
+
 def test_healthz_is_public():
     app = build_app()
     status, _, body = wsgi_request(app, "GET", "/package/healthz")

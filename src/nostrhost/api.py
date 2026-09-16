@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import time
 from typing import Any, Callable
 from urllib.parse import urlunsplit
 
@@ -29,7 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 
-from nostrhost import web
+from nostrhost import problems, web
 
 from .cli import (
     _agent_contribution_settings_get,
@@ -471,6 +472,7 @@ class _ApiRoute(APIRoute):
 
         async def handler(request: Request) -> Response:
             token = web.begin(request)
+            started = time.perf_counter()
             try:
                 # Cache the raw body: NIP-98 binds sha256(payload) to it and
                 # _json_body() parses the same bytes.
@@ -479,23 +481,32 @@ class _ApiRoute(APIRoute):
                     try:
                         request.state.admin_pubkey = request.app.state.authorizer(rule)
                     except ApiError as exc:
-                        return web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
+                        response = web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
+                        return problems.finalize(response, request, started=started, exc=exc, kind="auth")
                 try:
                     response = await original(request)
                 except ApiError as exc:
-                    return web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
+                    response = web.apply_cookies(_json_error(exc.status, exc.code, exc.message))
+                    return problems.finalize(response, request, started=started, exc=exc, kind="api_error")
                 except (NostrHostError, OperationError, IdentityError) as exc:
-                    return web.apply_cookies(_json_error(400, "operation_failed", str(exc)))
-                except Exception:  # noqa: BLE001 - last error boundary
+                    response = web.apply_cookies(_json_error(400, "operation_failed", str(exc)))
+                    return problems.finalize(response, request, started=started, exc=exc, kind="operation")
+                except Exception as exc:  # noqa: BLE001 - last error boundary
                     # Do not echo the raw exception back to the caller: paths,
                     # config snippets and provider error strings can leak
                     # internals (M18). The details go to the server log; the
                     # client gets a generic message.
-                    logger.exception("unhandled error on %s %s", request.method, request.url.path)
-                    return web.apply_cookies(_json_error(500, "internal_error", "internal server error"))
+                    logger.exception(
+                        "unhandled error on %s %s (rid=%s)",
+                        request.method,
+                        request.url.path,
+                        problems.request_id(request),
+                    )
+                    response = web.apply_cookies(_json_error(500, "internal_error", "internal server error"))
+                    return problems.finalize(response, request, started=started, exc=exc, kind="unhandled")
                 # The session authenticator may have queued a cookie refresh
                 # (extending the admin/portal cookie) while resolving auth.
-                return web.apply_cookies(response)
+                return problems.finalize(web.apply_cookies(response), request, started=started)
             finally:
                 web.end(token)
 

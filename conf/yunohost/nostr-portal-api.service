@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /var/log/nostrhost
 
 [Install]
 WantedBy=multi-user.target

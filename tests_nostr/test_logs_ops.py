@@ -182,3 +182,51 @@ def test_logs_read_rejects_legacy_nginx_unit():
     # Nginx is not part of the NostrHost stack (Caddy is the web server).
     with pytest.raises(OperationError, match="not allowlisted"):
         native_ops._safe_logs_read(units=["nginx"])
+
+
+# --------------------------------------------------------------------------- #
+# logs.problems (structured server problem records)
+
+def _problem_lines():
+    return (
+        '{"ts":"2026-09-16T10:00:00+00:00","status":500,"code":"internal_error","kind":"unhandled",'
+        '"source":"api","path":"/package/x","host":"example.com","request_id":"aaa","traceback":"boom"}\n'
+        '{"ts":"2026-09-16T10:01:00+00:00","status":404,"code":"not_found","kind":"api_error",'
+        '"source":"portal","path":"/package/y","host":"example.com","request_id":"bbb"}\n'
+    )
+
+
+def test_logs_problems_reads_and_filters(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_PROBLEMS_LOG", str(tmp_path / "problems.log"))
+    (tmp_path / "problems.log").write_text(_problem_lines())
+
+    result = native_ops._safe_logs_problems()
+    assert result["log_file"].endswith("problems.log")
+    assert len(result["entries"]) == 2
+    assert native_ops._safe_logs_problems(status=500)["entries"][0]["code"] == "internal_error"
+    assert native_ops._safe_logs_problems(code="not_found")["entries"][0]["path"] == "/package/y"
+    assert native_ops._safe_logs_problems(kind="unhandled")["entries"][0]["status"] == 500
+    assert native_ops._safe_logs_problems(source="portal")["entries"][0]["code"] == "not_found"
+    assert native_ops._safe_logs_problems(request_id="aaa")["entries"][0]["status"] == 500
+    assert native_ops._safe_logs_problems(path="/package/y")["entries"][0]["status"] == 404
+
+
+def test_logs_problems_filters_since(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_PROBLEMS_LOG", str(tmp_path / "problems.log"))
+    (tmp_path / "problems.log").write_text(_problem_lines())
+    assert native_ops._safe_logs_problems(since="2026-01-01T00:00:00+00:00")["entries"]
+    assert native_ops._safe_logs_problems(since="2027-01-01T00:00:00+00:00")["entries"] == []
+
+
+def test_logs_problems_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_PROBLEMS_LOG", str(tmp_path / "missing.log"))
+    result = native_ops._safe_logs_problems()
+    assert result["entries"] == []
+    assert result["warning"]
+
+
+def test_logs_problems_validates_args():
+    with pytest.raises(OperationError):
+        native_ops._safe_logs_problems(status=700)
+    with pytest.raises(OperationError):
+        native_ops._safe_logs_problems(bogus=True)

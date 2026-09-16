@@ -14,6 +14,7 @@ constructs ``TOOLS``.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import tempfile
@@ -361,6 +362,19 @@ class LogsWebArgs(_Strict):
     host: str | None = None
     path: str | None = None
     status: int | None = None
+    since: str | None = None
+    until: str | None = None
+    lines: int = 200
+
+
+class LogsProblemsArgs(_Strict):
+    host: str | None = None
+    path: str | None = None
+    status: int | None = None
+    code: str | None = None
+    kind: str | None = None
+    source: str | None = None
+    request_id: str | None = None
     since: str | None = None
     until: str | None = None
     lines: int = 200
@@ -1337,6 +1351,7 @@ def _safe_settings_reset_all(**extra: Any) -> dict[str, Any]:
 
 JOURNALCTL_BIN = os.environ.get("NOSTRHOST_JOURNALCTL_BIN", "journalctl")
 CADDY_LOG_DIR = os.environ.get("NOSTRHOST_CADDY_LOG_DIR", "/var/log/caddy")
+PROBLEMS_LOG = os.environ.get("NOSTRHOST_PROBLEMS_LOG", "/var/log/nostrhost/problems.log")
 
 # The journal surface is deliberately allowlisted: host-level incident evidence
 # (kernel, OOM, SSH, fail2ban, systemd) plus the NostrHost-native services
@@ -1624,6 +1639,92 @@ def _safe_logs_web(
                 continue
             entries.append(entry)
     return {"log_dir": str(log_dir), "entries": entries[-capped:]}
+
+
+def _safe_logs_problems(
+    host: str | None = None,
+    path: str | None = None,
+    status: int | None = None,
+    code: str | None = None,
+    kind: str | None = None,
+    source: str | None = None,
+    request_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    lines: int = 200,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Read bounded, structured server problem records (logs.problems).
+
+    /var/log/nostrhost/problems.log (written by the api/portal-api error
+    boundaries) holds one JSON record per 4xx/5xx response and per unhandled
+    exception, with request context (method, route, status, error code, actor,
+    request id, duration) and the traceback for server errors.
+    """
+    if extra:
+        raise OperationError(f"logs.problems does not accept extra args: {sorted(extra)}")
+    if host is not None and (not host or len(host) > 253):
+        raise OperationError("host must be a bounded non-empty hostname")
+    if path is not None and (not path.startswith("/") or len(path) > 4096):
+        raise OperationError("path must be an absolute bounded URL path")
+    if status is not None and not 100 <= status <= 599:
+        raise OperationError("status must be an HTTP status code")
+    if code is not None and (not code or len(code) > 256):
+        raise OperationError("code must be a bounded non-empty error code")
+    if request_id is not None and len(request_id) > 128:
+        raise OperationError("request_id must be a bounded value")
+    lower_bound = _parse_introspection_time(since)
+    upper_bound = _parse_introspection_time(until)
+    if lower_bound and upper_bound and lower_bound > upper_bound:
+        raise OperationError("since must not be later than until")
+    lower_ts = lower_bound.timestamp() if lower_bound else None
+    upper_ts = upper_bound.timestamp() if upper_bound else None
+    capped = max(1, min(lines, 2000))
+    log_path = Path(os.environ.get("NOSTRHOST_PROBLEMS_LOG", PROBLEMS_LOG))
+    if not log_path.is_file():
+        return {"log_file": str(log_path), "entries": [], "warning": "problem log is unavailable"}
+    entries: list[dict[str, Any]] = []
+    for raw_line in _tail_file_lines(log_path, capped):
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get("ts")
+        if isinstance(ts, str):
+            try:
+                parsed = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+                ts_epoch = parsed.timestamp()
+            except ValueError:
+                ts_epoch = None
+            if ts_epoch is not None:
+                if lower_ts is not None and ts_epoch < lower_ts:
+                    continue
+                if upper_ts is not None and ts_epoch > upper_ts:
+                    continue
+            elif lower_ts is not None or upper_ts is not None:
+                continue
+        elif lower_ts is not None or upper_ts is not None:
+            continue
+        if status is not None and entry.get("status") != status:
+            continue
+        if code is not None and entry.get("code") != code:
+            continue
+        if kind is not None and entry.get("kind") != kind:
+            continue
+        if source is not None and entry.get("source") != source:
+            continue
+        if request_id is not None and entry.get("request_id") != request_id:
+            continue
+        if host is not None and host.lower() not in str(entry.get("host") or entry.get("remote") or "").lower():
+            continue
+        if path is not None and entry.get("path") != path:
+            continue
+        entries.append(entry)
+    return {"log_file": str(log_path), "entries": entries[-capped:]}
 
 
 def _safe_service_history(names: list[str] | None = None, lines: int = 50, **extra: Any) -> dict[str, Any]:
@@ -2356,6 +2457,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="logs.web", handler=_safe_logs_web, scope=SCOPE_LOGS_READ,
         require_approval=False, input_model=LogsWebArgs,
         description="read bounded, structured Caddy access/error log records (/var/log/caddy/access.log)",
+    ),
+    "logs.problems": ToolSpec(
+        name="logs.problems", handler=_safe_logs_problems, scope=SCOPE_LOGS_READ,
+        require_approval=False, input_model=LogsProblemsArgs,
+        description="read bounded, structured server problem records (/var/log/nostrhost/problems.log: every 4xx/5xx and unhandled exception with route, error code, actor, request id and traceback)",
     ),
     "backup.delete": ToolSpec(
         name="backup.delete", handler=_safe_backup_delete, scope=SCOPE_BACKUPS_DELETE,

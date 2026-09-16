@@ -6,3 +6,13 @@
         notifempty
         missingok
 }
+
+/var/log/nostrhost/*.log {
+        weekly
+        rotate 4
+        delaycompress
+        compress
+        notifempty
+        missingok
+        create 0600 root root
+}

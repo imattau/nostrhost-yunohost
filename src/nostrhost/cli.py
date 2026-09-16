@@ -211,6 +211,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "service.history": native_ops._safe_service_history,
     "logs.read": native_ops._safe_logs_read,
     "logs.web": native_ops._safe_logs_web,
+    "logs.problems": native_ops._safe_logs_problems,
     "backup.delete": native_ops._safe_backup_delete,
     "domain.cert.info": native_ops._safe_domain_cert_info,
     "domain.cert.install": native_ops._safe_domain_cert_install,
@@ -2712,6 +2713,27 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     ) -> None:
         """Read bounded, structured Nginx access/error log records."""
         _forward("logs.web", {"host": host, "path": path, "status": status, "since": since, "until": until, "lines": lines}, output_as)
+
+    @logs.command("problems")
+    def logs_problems(
+        host: str = typer.Option(None, "--host", help="filter by client host"),
+        path: str = typer.Option(None, "--path", help="filter by URL path"),
+        status: int = typer.Option(None, "--status", help="filter by HTTP status"),
+        code: str = typer.Option(None, "--code", help="filter by error code"),
+        kind: str = typer.Option(None, "--kind", help="filter by kind (auth/api_error/operation/unhandled/render/portal/http)"),
+        source: str = typer.Option(None, "--source", help="filter by source (api/portal)"),
+        request_id: str = typer.Option(None, "--request-id", help="filter by correlation request id"),
+        since: str = typer.Option(None, "--since", help="ISO-8601 or relative (e.g. -24h)"),
+        until: str = typer.Option(None, "--until", help="ISO-8601 or relative"),
+        lines: int = typer.Option(200, "--lines", help="max entries"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Read bounded, structured server problem records (4xx/5xx + unhandled)."""
+        _forward(
+            "logs.problems",
+            {"host": host, "path": path, "status": status, "code": code, "kind": kind, "source": source, "request_id": request_id, "since": since, "until": until, "lines": lines},
+            output_as,
+        )
 
     # -- user ---------------------------------------------------------------
 
