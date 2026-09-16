@@ -2098,6 +2098,14 @@ def run(
     # client-side "operation rejected" bug. Same setup as every other
     # nostr-*d entrypoint (nostr_operationsd.run(), nostr_identityd.run(), …).
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # Same headless-moulinette setup as every nostr-*d daemon (operationsd,
+    # identityd, permissiond): native tools that shell into the yunohost
+    # toolchain (diagnosis.run, updates.check, app.*, user.*, ...) read
+    # Moulinette.interface.type via yunohost.log's ActionLogger and otherwise
+    # fail with AttributeError: 'NoneType' object has no attribute 'type'.
+    from yunohost.nostr_identity import _init_headless_yunohost
+
+    _init_headless_yunohost()
     if app is None and operator_pubkey is None and not admin_pubkeys:
         admin_pubkeys, operator_pubkey = _identity_pubkeys_from_config()
     app = app or build_app(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)

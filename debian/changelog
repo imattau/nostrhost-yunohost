@@ -1,3 +1,20 @@
+yunohost (12.1.41.61) stable; urgency=low
+
+  * Fix a 500 on /package/diagnosis/run (and any native tool that shells into
+    the yunohost toolchain over HTTP): the nostr-api entrypoint never ran the
+    headless-moulinette init the daemons do, so diagnosis_run's ActionLogger
+    raised AttributeError: 'NoneType' object has no attribute 'type'. The API
+    service now initialises the headless interface at startup (mirroring
+    operationsd/identityd/permissiond), and _safe_diagnosis_run also guards
+    itself so MCP/CLI callers work regardless of the hosting process.
+  * Fix the journal-introspection allowlist: it named a non-existent
+    'nostr-certd' and omitted nostr-securityd, nostr-ddnswatchd,
+    nostrhost-certd, nostrhost-mcp, nostrhost-agent(+llm), nostrhost-nsite
+    and nostrhost-web-reconcile, so logs.read could not query those daemons.
+    The allowlist now matches the real systemd units; regression tests added.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 00:25:00 +0000
+
 yunohost (12.1.41.60) stable; urgency=low
 
   * Fix `nostrhost identity list`/resolve crashing with

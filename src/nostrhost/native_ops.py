@@ -699,6 +699,14 @@ def _safe_diagnosis_run(categories: list[str] | None = None, force: bool = False
     if extra:
         raise OperationError(f"diagnosis.run does not accept extra args: {sorted(extra)}")
     categories = categories or []
+    # diagnosis_run is decorated with yunohost.log's ActionLogger, which reads
+    # Moulinette.interface.type. The nostr-*d daemons initialise the headless
+    # interface at startup; the HTTP API / MCP processes do not, so without
+    # this every diagnosis.run raised AttributeError: 'NoneType' object has no
+    # attribute 'type' -> 500. Idempotent (no-op once the interface is set).
+    from yunohost.nostr_identity import _init_headless_yunohost
+
+    _init_headless_yunohost()
     from yunohost.diagnosis import diagnosis_run, diagnosis_show
 
     diagnosis_run(categories=categories, force=bool(force))
@@ -1365,9 +1373,17 @@ _INTROSPECTION_JOURNAL_UNITS = frozenset(
         "nostr-operationsd",
         "nostr-identityd",
         "nostr-permissiond",
-        "nostr-certd",
+        "nostr-securityd",
+        "nostr-ddnswatchd",
         "nostrhost-control",
         "nostrhost-catalog",
+        "nostrhost-certd",
+        "nostrhost-notify",
+        "nostrhost-nsite",
+        "nostrhost-mcp",
+        "nostrhost-agent",
+        "nostrhost-agent-llm",
+        "nostrhost-web-reconcile",
         "ssh",
         "sshd",
         "fail2ban",

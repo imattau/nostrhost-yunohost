@@ -168,6 +168,7 @@ def test_user_create_requires_fields(monkeypatch):
 
 
 def test_diagnosis_run_rejects_extra(monkeypatch):
+    _install_fake(monkeypatch, "yunohost.nostr_identity", _init_headless_yunohost=lambda: None)
     _install_fake(
         monkeypatch,
         "yunohost.diagnosis",
@@ -177,6 +178,38 @@ def test_diagnosis_run_rejects_extra(monkeypatch):
     with pytest.raises(OperationError):
         native_ops._safe_diagnosis_run(categories=[], bogus=True)
     assert native_ops._safe_diagnosis_run(categories=["network"]) == {"items": []}
+
+
+def test_diagnosis_run_inits_headless_yunohost_first(monkeypatch):
+    """diagnosis.run shells into the yunohost toolchain through an
+    ActionLogger that reads Moulinette.interface.type; the HTTP API / MCP
+    processes do not initialise it at startup, so the handler must (idempotent)
+    or every call 500s with 'NoneType' object has no attribute 'type'."""
+    calls: dict[str, tuple[list[str], bool] | None] = {"run": None}
+    init_count = [0]
+
+    def _init():
+        init_count[0] += 1
+
+    def _run(categories, force):
+        calls["run"] = (categories, force)
+
+    _install_fake(monkeypatch, "yunohost.nostr_identity", _init_headless_yunohost=_init)
+    _install_fake(
+        monkeypatch,
+        "yunohost.diagnosis",
+        diagnosis_run=_run,
+        diagnosis_show=lambda categories, full: {"categories": categories, "full": full},
+    )
+
+    result = native_ops._safe_diagnosis_run(categories=["web", "dns"], force=True, full=True)
+    assert init_count[0] == 1
+    assert calls["run"] == (["web", "dns"], True)
+    assert result == {"categories": ["web", "dns"], "full": True}
+    # handler calls it on every invocation; init itself no-ops once the
+    # interface is set, so repeated calls stay safe.
+    native_ops._safe_diagnosis_run(categories=[], force=False)
+    assert init_count[0] == 2
 
 
 def test_operation_catalog_covers_native_tools():

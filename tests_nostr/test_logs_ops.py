@@ -184,6 +184,33 @@ def test_logs_read_rejects_legacy_nginx_unit():
         native_ops._safe_logs_read(units=["nginx"])
 
 
+def test_logs_read_allowlist_covers_real_nostr_units():
+    """The introspection allowlist must name the actual nostr units (it once
+    listed a non-existent 'nostr-certd' and omitted nostr-securityd /
+    nostr-ddnswatchd / nostrhost-certd / nostrhost-mcp / nostrhost-agent ...),
+    so the MCP diagnosis surface can query every daemon's journal."""
+    for unit in (
+        "nostr-api",
+        "nostr-portal-api",
+        "nostr-operationsd",
+        "nostr-identityd",
+        "nostr-permissiond",
+        "nostr-securityd",
+        "nostr-ddnswatchd",
+        "nostrhost-control",
+        "nostrhost-catalog",
+        "nostrhost-certd",
+        "nostrhost-notify",
+        "nostrhost-nsite",
+        "nostrhost-mcp",
+        "nostrhost-agent",
+        "nostrhost-agent-llm",
+        "nostrhost-web-reconcile",
+    ):
+        assert unit in native_ops._INTROSPECTION_JOURNAL_UNITS, unit
+    assert "nostr-certd" not in native_ops._INTROSPECTION_JOURNAL_UNITS
+
+
 # --------------------------------------------------------------------------- #
 # logs.problems (structured server problem records)
 
