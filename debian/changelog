@@ -1,3 +1,14 @@
+yunohost (12.1.41.60) stable; urgency=low
+
+  * Fix `nostrhost identity list`/resolve crashing with
+    "'Identity' object has no attribute 'ynh_username'": the CLI's own
+    _identity_dict copy still read the legacy field name off the fork's
+    Identity dataclass (which uses 'username'); the api.py copy was already
+    fixed. The identityd/account store-backed paths correctly keep the auth
+    library's ynh_username field. Regression test added.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 00:15:00 +0000
+
 yunohost (12.1.41.59) stable; urgency=low
 
   * Add POST /nostrhost/portalapi/report: a bounded, public client-side error

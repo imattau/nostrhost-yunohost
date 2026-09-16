@@ -3450,7 +3450,7 @@ def _render_operation_event(event: dict[str, Any], output_as: str | None) -> Non
 def _identity_dict(identity: Any) -> dict[str, Any]:
     return {
         "pubkey": identity.pubkey,
-        "username": identity.ynh_username,
+        "username": identity.username,
         "signer_type": identity.signer_type,
         "label": identity.label,
         "enabled": identity.enabled,

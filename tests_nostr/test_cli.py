@@ -186,6 +186,19 @@ def test_identity_list_username(app, monkeypatch):
     assert captured["username"] == "alice"
 
 
+def test_cli_identity_dict_uses_username():
+    """The CLI's own _identity_dict copy must read the Identity dataclass's
+    'username' field (api.py's copy was fixed earlier; the cli.py copy still
+    read 'ynh_username' and crashed `nostrhost identity list` with
+    'Identity' object has no attribute 'ynh_username')."""
+    from types import SimpleNamespace
+
+    ident = SimpleNamespace(pubkey="ab" * 32, username="bob", signer_type="passkey", label="Phone", enabled=True, created_at=0, last_used=0)
+    out = cli_module._identity_dict(ident)
+    assert out["username"] == "bob"
+    assert out["signer_type"] == "passkey"
+
+
 def test_identity_revoke(app, monkeypatch):
     captured = {}
 
