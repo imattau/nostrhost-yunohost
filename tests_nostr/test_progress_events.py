@@ -6,9 +6,10 @@ during execution, SSE framing, and the API's /events SSE endpoint.
 
 from __future__ import annotations
 
-import io
+import asyncio
 import json
 
+import httpx2
 from typer.testing import CliRunner
 
 from nostrhost import api as api_module
@@ -163,31 +164,14 @@ def test_stream_kinds_include_rejection():
 
 
 def wsgi_request(app, method, path):
-    environ = {
-        "REQUEST_METHOD": method,
-        "PATH_INFO": path,
-        "QUERY_STRING": "",
-        "SERVER_NAME": "test",
-        "SERVER_PORT": "80",
-        "wsgi.version": (1, 0),
-        "wsgi.url_scheme": "http",
-        "wsgi.input": io.BytesIO(b""),
-        "wsgi.errors": io.StringIO(),
-        "wsgi.multithread": False,
-        "wsgi.multiprocess": False,
-        "wsgi.run_once": False,
-        "CONTENT_LENGTH": "0",
-        "CONTENT_TYPE": "",
-    }
-    status_holder = []
-    response_headers = {}
+    async def call():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.request(method, path)
 
-    def start_response(status, headers, exc_info=None):
-        status_holder.append(status)
-        response_headers.update(headers)
-
-    chunks = app(environ, start_response)
-    return status_holder[0].split(" ", 1)[0], response_headers, b"".join(chunks)
+    response = asyncio.run(call())
+    response_headers = {key.title(): value for key, value in response.headers.items()}
+    return str(response.status_code), response_headers, response.content
 
 
 def test_api_events_sse_endpoint():

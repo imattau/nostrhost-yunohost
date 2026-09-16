@@ -1,6 +1,6 @@
-"""Stage 5: native HTTP API tests (Bottle + NIP-98).
+"""Stage 5: native HTTP API tests (FastAPI + NIP-98).
 
-Endpoints are exercised over the WSGI interface with monkeypatched handlers
+Endpoints are exercised over the ASGI interface with monkeypatched handlers
 (no real services/relay/keys).  The NIP-98 authorizer is tested both with a
 real SDK-signed event (via the fork's ``_sign_event``) and with an
 injected fake for the operation routes.
@@ -8,12 +8,13 @@ injected fake for the operation routes.
 
 from __future__ import annotations
 
+import asyncio
 import base64
-import io
 import json
 import secrets
 import types
 
+import httpx2
 import pytest
 
 from nostrhost import api as api_module
@@ -22,42 +23,27 @@ from nostrhost.core import NostrHostError
 
 
 # --------------------------------------------------------------------------- #
-# WSGI test harness
+# ASGI test harness (keeps the historical (status, headers, body) tuple so the
+# assertions below stay unchanged)
 
 def wsgi_request(app, method, path, body=None, headers=None, raw_body=None):
     if raw_body is not None:
-        body_bytes = raw_body
+        content = raw_body
     else:
-        body_bytes = json.dumps(body).encode() if body is not None else b""
-    path_info, _, query_string = path.partition("?")
-    environ = {
-        "REQUEST_METHOD": method,
-        "PATH_INFO": path_info,
-        "QUERY_STRING": query_string,
-        "SERVER_NAME": "test",
-        "SERVER_PORT": "80",
-        "wsgi.version": (1, 0),
-        "wsgi.url_scheme": "http",
-        "wsgi.input": io.BytesIO(body_bytes),
-        "wsgi.errors": io.StringIO(),
-        "wsgi.multithread": False,
-        "wsgi.multiprocess": False,
-        "wsgi.run_once": False,
-        "CONTENT_LENGTH": str(len(body_bytes)),
-        "CONTENT_TYPE": "application/json" if body is not None or raw_body is not None else "",
-    }
-    for key, value in (headers or {}).items():
-        environ[f"HTTP_{key.upper().replace('-', '_')}"] = value
-    status_holder: list[str] = []
-    response_headers: dict[str, str] = {}
+        content = json.dumps(body).encode() if body is not None else b""
+    request_headers = dict(headers or {})
+    if body is not None or raw_body is not None:
+        request_headers.setdefault("Content-Type", "application/json")
 
-    def start_response(status, resp_headers, exc_info=None):
-        status_holder.append(status)
-        response_headers.update(resp_headers)
+    async def call():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.request(method, path, content=content, headers=request_headers)
 
-    chunks = app(environ, start_response)
-    status = status_holder[0].split(" ", 1)[0]
-    return status, response_headers, b"".join(chunks)
+    response = asyncio.run(call())
+    # Title-case header names so existing assertions like headers["Content-Type"] hold.
+    response_headers = {key.title(): value for key, value in response.headers.items()}
+    return str(response.status_code), response_headers, response.content
 
 
 # --------------------------------------------------------------------------- #
@@ -87,21 +73,21 @@ def test_healthz_is_public():
     assert json.loads(body)["ok"] is True
 
 
-def test_healthz_public_when_bottle_route_is_dict():
-    """bottle 0.12's Route is a dict subclass: the auth plugin must read the
-    rule from the dict, not via `.rule`, or /healthz 500s on real Debian."""
+def test_healthz_is_public_but_other_routes_authorize():
+    """_ApiRoute skips the authorizer for the public routes and maps a denial
+    on any other route to the JSON error envelope."""
 
     def deny_authorizer(_rule: str = "") -> str:
         raise ApiError(401, "authentication_required", "nope")
 
-    plugin = api_module._AuthErrorsPlugin(authorizer=deny_authorizer)
-    plugin.app = None
-    wrapped = plugin.apply(lambda: "ok", {"rule": "/package/healthz", "method": "GET"})
-    assert wrapped() == "ok"
-    # non-healthz dict route runs the authorizer and maps its ApiError to a
-    # JSON 401 response (the wrapper converts errors, it does not re-raise)
-    wrapped_auth = plugin.apply(lambda: "ok", {"rule": "/package/system/version", "method": "GET"})
-    assert "authentication_required" in str(wrapped_auth())
+    app = build_app(authorizer=deny_authorizer)
+    status, _, body = wsgi_request(app, "GET", "/package/healthz")
+    assert status == "200"
+    assert json.loads(body)["ok"] is True
+
+    status, _, body = wsgi_request(app, "GET", "/package/system/version")
+    assert status == "401"
+    assert json.loads(body)["code"] == "authentication_required"
 
 
 # --------------------------------------------------------------------------- #
@@ -116,8 +102,8 @@ def _signed_header(
 ) -> str:
     """A correct NIP-98 (kind-27235) Authorization header bound to exactly
     one request: u=method=payload tags matching the request URL/method/body
-    as the API reconstructs it (the WSGI harness below serves as
-    http://test:80)."""
+    as the API reconstructs it (the ASGI harness below serves as
+    http://test)."""
     import hashlib
 
     from yunohost.nostr_identity import _sign_event

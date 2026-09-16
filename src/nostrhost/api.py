@@ -1,6 +1,7 @@
 """Native HTTP API (Moulinette API replacement, Stage 5).
 
-A Bottle app exposing the same native operations as the ``nostrhost`` CLI
+A FastAPI (ASGI, uvicorn) app exposing the same native operations as the
+``nostrhost`` CLI
 over HTTP, authenticated with NIP-98 (no passwords): every request carries
 ``Authorization: Nostr <base64 event>``; the event signature is verified, the
 signer pubkey resolved to a linked identity, and the caller authorized (for
@@ -17,13 +18,17 @@ Responses are JSON.  Errors map to HTTP status codes with
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import secrets
 from typing import Any, Callable
 from urllib.parse import urlunsplit
 
-from bottle import Bottle, HTTPResponse, request
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 
 from .cli import (
     _agent_contribution_settings_get,
@@ -71,9 +76,21 @@ API_VERSION = 1
 
 logger = logging.getLogger("nostrhost-api")
 
+# The current Starlette request, set by ``_ApiRoute`` for the duration of a
+# request. Route bodies and the auth/session helpers were written against a
+# module-level ``request`` object; this preserves that access pattern without
+# threading the request through every handler signature. Sync endpoints run in
+# a worker thread, which inherits the context.
+_current_request: contextvars.ContextVar[Request] = contextvars.ContextVar("nostrhost_api_request")
+
+
+def _req() -> Request:
+    return _current_request.get()
+
+
 # Replay protection for NIP-98 API requests. Single-process in-memory TTL
 # cache (same limitation and rationale as nostrhost-policy's own): the API
-# service is a single daemon on the box.
+# service runs a single uvicorn worker on the box.
 _NIP98_REPLAY_CACHE = ReplayCache(ttl_seconds=300)
 
 
@@ -85,9 +102,9 @@ def _external_request_url() -> str:
     ``u`` tag the admin SPA / CLI signed (``https://host/package/...``) is
     what gets compared. Direct loopback callers get the loopback URL.
     """
-    parts = request.urlparts
-    scheme = request.get_header("X-Forwarded-Proto") or parts.scheme or "http"
-    host = request.get_header("X-Forwarded-Host") or parts.netloc
+    parts = _req().url
+    scheme = _req().headers.get("X-Forwarded-Proto") or parts.scheme or "http"
+    host = _req().headers.get("X-Forwarded-Host") or parts.netloc
     return urlunsplit((scheme, host, parts.path, parts.query, ""))
 
 
@@ -101,16 +118,12 @@ class ApiError(Exception):
         self.message = message
 
 
-def _json_error(status: int, code: str, message: str) -> HTTPResponse:
-    return HTTPResponse(
-        json.dumps({"error": message, "code": code}),
-        status=status,
-        headers={"Content-Type": "application/json"},
-    )
+def _json_error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": message, "code": code}, status_code=status)
 
 
 def _json_safe(value: Any) -> Any:
-    """Recursively convert values Bottle's default JSON encoder can't handle
+    """Recursively convert values the default JSON encoder can't handle
     (datetimes, sets) to JSON-safe primitives — e.g. service.status returns
     ``last_state_change`` as a datetime, which otherwise 500s every response."""
     import datetime
@@ -128,7 +141,7 @@ def _json_safe(value: Any) -> Any:
 
 def _run_tool(name: str, args: dict[str, Any]) -> Any:
     try:
-        return _TOOL_HANDLERS[name](**args)
+        return _json_safe(_TOOL_HANDLERS[name](**args))
     except (NostrHostError, OperationError, IdentityError) as exc:
         raise ApiError(400, "operation_failed", str(exc)) from exc
 
@@ -149,7 +162,7 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/system/updates", "updates.check", {}),
     ("/package/domain/list", "domain.list", {}),
     # Intent, desired/actual DNS, diff, and routes for a native domain.
-    ("/package/domain/<domain>/inspect", "domain.inspect", {"domain": "domain"}),
+    ("/package/domain/{domain}/inspect", "domain.inspect", {"domain": "domain"}),
     # Nsite gateway status: enabled, mode, domain, service health.
     ("/package/nsite/gateway/status", "nsite.gateway.status", {}),
     # Registered sites and the gateway mode.
@@ -157,8 +170,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     # Attached custom domains (read only).
     ("/package/nsite/domain/list", "nsite.domain.list", {}),
     # Desired-vs-actual DNS plan for a domain (no changes).
-    ("/package/dns/plan/<domain>", "dns.plan", {"domain": "domain"}),
-    ("/package/dns/verify/<domain>", "dns.verify", {"domain": "domain"}),
+    ("/package/dns/plan/{domain}", "dns.plan", {"domain": "domain"}),
+    ("/package/dns/verify/{domain}", "dns.verify", {"domain": "domain"}),
     # DDNS watcher status: last-seen public IPs and dynamic-IP domains.
     ("/package/dns/watch", "dns.watch", {}),
     ("/package/dns/subscriptions", "dns.subscriptions", {}),
@@ -166,7 +179,7 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     # Configured DNS credential references (names only, never values).
     ("/package/credential/list", "credential.list", {}),
     ("/package/diagnosis/ignored", "diagnosis.ignored", {}),
-    ("/package/catalog/get/<app_id>", "catalog.get", {"app_id": "app_id"}),
+    ("/package/catalog/get/{app_id}", "catalog.get", {"app_id": "app_id"}),
     ("/package/catalog/candidates", "catalog.candidates", {}),
     ("/package/catalog/history", "catalog.history", {}),
     ("/package/catalog/profile", "catalog.profile.get", {}),
@@ -174,17 +187,22 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/app/list", "app.list", {}),
     ("/package/user/list", "user.list", {}),
     ("/package/user/group/list", "user.group.list", {}),
-    ("/package/user/permission/info/<permission>", "user.permission.info", {"permission": "permission"}),
-    ("/package/settings/get/<key>", "settings.get", {"key": "key"}),
+    ("/package/user/permission/info/{permission}", "user.permission.info", {"permission": "permission"}),
+    ("/package/settings/get/{key}", "settings.get", {"key": "key"}),
 )
 
 
-def _register_simple_get_forwards(app: Bottle, table: tuple[tuple[str, str, dict[str, str]], ...]) -> None:
+def _register_simple_get_forwards(app: FastAPI, table: tuple[tuple[str, str, dict[str, str]], ...]) -> None:
     for path, tool, arg_map in table:
-        def handler(*, _tool: str = tool, _arg_map: dict[str, str] = arg_map, **route_args: Any) -> Any:
-            return _run_tool(_tool, {tool_arg: route_args[route_arg] for tool_arg, route_arg in _arg_map.items()})
 
-        app.get(path)(handler)
+        def make_handler(tool_name: str, mapping: dict[str, str]) -> Callable[[Request], Any]:
+            def handler(request: Request) -> Any:
+                params = request.path_params
+                return _run_tool(tool_name, {tool_arg: params[route_arg] for tool_arg, route_arg in mapping.items()})
+
+            return handler
+
+        app.get(path)(make_handler(tool, arg_map))
 
 
 def _build_admin_set(
@@ -235,7 +253,7 @@ def _require_csrf_header(infos: dict[str, Any] | None) -> None:
     preflight (which the API does not allow for other origins), so a subdomain
     XSS can no longer ride the domain-wide SSO cookie to drive the admin API.
     """
-    header = request.headers.get("X-Nostrhost-CSRF", "")
+    header = _req().headers.get("X-Nostrhost-CSRF", "")
     if not header or not secrets.compare_digest(header, _session_csrf_token(infos)):
         raise ApiError(403, "csrf_required", "cookie-session requests require a valid X-Nostrhost-CSRF header")
 
@@ -362,7 +380,7 @@ def default_authorizer(
     admins = _build_admin_set(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
 
     def resolve_callers() -> list[str]:
-        header = request.headers.get("Authorization", "")
+        header = _req().headers.get("Authorization", "")
         if header.startswith("Nostr "):
             # Full NIP-98 verification: kind 27235, freshness against clock
             # skew, exact u/method binding, sha256(payload) body binding, and
@@ -373,9 +391,9 @@ def default_authorizer(
             try:
                 verified = verify_nip98_request(
                     authorization_header=header,
-                    method=request.method,
+                    method=_req().method,
                     url=_external_request_url(),
-                    body=request.body.read(),
+                    body=_req().scope.get("nostrhost.body", b""),
                     replay_cache=_NIP98_REPLAY_CACHE,
                 )
             except Nip98Error as exc:
@@ -440,55 +458,51 @@ def default_authorizer(
     return authorize
 
 
-class _AuthErrorsPlugin:
-    """Bottle plugin: authorize before each route (except /healthz) and map
-    ApiError to JSON responses."""
+_PUBLIC_RULES = ("/package/healthz", "/package/session")
 
-    name = "nostrhost-auth"
 
-    def __init__(self, authorizer: Callable[[str], str]) -> None:
-        self.authorizer = authorizer
-        self.app: Bottle | None = None
+class _ApiRoute(APIRoute):
+    """Per-route auth and error mapping (replaces bottle's
+    ``_AuthErrorsPlugin``).
 
-    def setup(self, app: Bottle) -> None:
-        self.app = app
+    Authorizes the request before running the endpoint (except the two public
+    routes), stores the resolved admin pubkey on ``request.state``, and maps
+    ``ApiError`` / operation errors / unexpected exceptions to the JSON error
+    envelope the clients expect.
+    """
 
-    def apply(self, callback: Callable[..., Any], route: Any) -> Callable[..., Any]:
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # Accept both layouts so /healthz and /session stay public.
-            if isinstance(route, dict):
-                rule = route.get("rule", "")
-            else:
-                rule = getattr(route, "rule", "")
-            if str(rule) not in ("/package/healthz", "/package/session"):
+    def get_route_handler(self) -> Callable[[Request], Any]:
+        original = super().get_route_handler()
+        rule = self.path
+
+        async def handler(request: Request) -> Response:
+            token = _current_request.set(request)
+            try:
+                # Cache the raw body: NIP-98 binds sha256(payload) to it and
+                # _json_body() parses the same bytes.
+                request.scope.setdefault("nostrhost.body", await request.body())
+                if rule not in _PUBLIC_RULES:
+                    try:
+                        request.state.admin_pubkey = request.app.state.authorizer(rule)
+                    except ApiError as exc:
+                        return _json_error(exc.status, exc.code, exc.message)
                 try:
-                    admin_pubkey = self.authorizer(str(rule))
-                    request.environ["nostrhost.admin_pubkey"] = admin_pubkey
+                    return await original(request)
                 except ApiError as exc:
                     return _json_error(exc.status, exc.code, exc.message)
-            try:
-                result = callback(*args, **kwargs)
-                if isinstance(result, HTTPResponse):
-                    return result
-                # Sanitise datetimes/sets so Bottle's default encoder can
-                # serialise tool results (e.g. service.status's datetimes).
-                return _json_safe(result)
-            except ApiError as exc:
-                return _json_error(exc.status, exc.code, exc.message)
-            except (NostrHostError, OperationError, IdentityError) as exc:
-                return _json_error(400, "operation_failed", str(exc))
-            except Exception:  # noqa: BLE001 - last error boundary
-                # Do not echo the raw exception back to the caller: paths,
-                # config snippets and provider error strings can leak internals
-                # (M18). The details go to the server log; the client gets a
-                # generic message with the exception class for triage.
-                logger.exception("unhandled error on %s %s", request.method, request.urlparts.path)
-                return _json_error(500, "internal_error", "internal server error")
+                except (NostrHostError, OperationError, IdentityError) as exc:
+                    return _json_error(400, "operation_failed", str(exc))
+                except Exception:  # noqa: BLE001 - last error boundary
+                    # Do not echo the raw exception back to the caller: paths,
+                    # config snippets and provider error strings can leak
+                    # internals (M18). The details go to the server log; the
+                    # client gets a generic message.
+                    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+                    return _json_error(500, "internal_error", "internal server error")
+            finally:
+                _current_request.reset(token)
 
-        return wrapper
-
-    def close(self) -> None:
-        pass
+        return handler
 
 
 def _optional_list(value: str | None) -> list[str] | None:
@@ -514,15 +528,17 @@ def build_app(
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
     event_stream: Callable[[str], Any] | None = None,
-) -> Bottle:
-    """Build the native API Bottle app.
+) -> FastAPI:
+    """Build the native API FastAPI app.
 
     ``event_stream(request_id)`` yields operation chain events for the SSE
     ``/events/<id>`` endpoint (default: live relay subscription).
     """
-    app = Bottle()
-    auth = authorizer or default_authorizer(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
-    app.install(_AuthErrorsPlugin(auth))
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.router.route_class = _ApiRoute
+    app.state.authorizer = authorizer or default_authorizer(
+        admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey
+    )
     stream = event_stream or _default_event_stream
     _register_simple_get_forwards(app, _SIMPLE_GET_FORWARDS)
 
@@ -571,7 +587,7 @@ def build_app(
             "csrf_token": _session_csrf_token(infos),
         }
 
-    @app.get("/package/events/<request_id>")
+    @app.get("/package/events/{request_id}")
     def events(request_id: str) -> Any:
         """Server-Sent Events: live progress/result for one operation."""
         from nostrhost import events as events_module
@@ -581,21 +597,21 @@ def build_app(
             for event in stream(request_id):
                 yield events_module.sse_format(event)
 
-        response = HTTPResponse(
+        return StreamingResponse(
             frame(),
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            media_type=None,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
-        return response
 
     # -- operations (audit history + pending approvals) ----------------------
     #
     # The real handlers for GET/POST /package/operations... (list, get,
     # approve, reject) are registered further down, alongside the
-    # approval/rejection-template routes they share context with — see the
-    # "operations (kind-2200..2204 approval chain)" section below. Bottle
-    # resolves duplicate route registrations by registration order, so a
-    # second definition here would silently shadow (for approve/reject) or
-    # be shadowed by (for the exact-static list route) that one; do not
+    # approval/rejection-template routes they share context with. Do not
     # re-add plain audit.list/audit.get forwards for these paths.
 
     # -- system -------------------------------------------------------------
@@ -617,8 +633,8 @@ def build_app(
         return _run_tool(
             "system.migrations",
             {
-                "pending": request.query.get("pending", "").lower() == "true",
-                "done": request.query.get("done", "").lower() == "true",
+                "pending": _req().query_params.get("pending", "").lower() == "true",
+                "done": _req().query_params.get("done", "").lower() == "true",
             },
         )
 
@@ -718,8 +734,8 @@ def build_app(
         return _run_tool(
             "nsite.inspect",
             {
-                "pubkey": request.query.get("pubkey", ""),
-                "d": request.query.get("d", ""),
+                "pubkey": _req().query_params.get("pubkey", ""),
+                "d": _req().query_params.get("d", ""),
             },
         )
 
@@ -730,12 +746,12 @@ def build_app(
         return _run_tool(
             "nsite.resolve",
             {
-                "label": request.query.get("label", ""),
-                "pubkey": request.query.get("pubkey", ""),
-                "d": request.query.get("d", ""),
-                "relays": _optional_list(request.query.get("relays")),
-                "limit": int(request.query.get("limit", "5")),
-                "timeout": float(request.query.get("timeout", "8")),
+                "label": _req().query_params.get("label", ""),
+                "pubkey": _req().query_params.get("pubkey", ""),
+                "d": _req().query_params.get("d", ""),
+                "relays": _optional_list(_req().query_params.get("relays")),
+                "limit": int(_req().query_params.get("limit", "5")),
+                "timeout": float(_req().query_params.get("timeout", "8")),
             },
         )
 
@@ -938,12 +954,12 @@ def build_app(
 
     @app.get("/package/backup/list")
     def backup_list() -> Any:
-        with_info = request.query.get("with_info", "").lower() == "true"
+        with_info = _req().query_params.get("with_info", "").lower() == "true"
         return _run_tool("backup.list", {"with_info": with_info})
 
-    @app.get("/package/backup/<name>")
+    @app.get("/package/backup/{name}")
     def backup_info(name: str) -> Any:
-        with_details = request.query.get("with_details", "").lower() == "true"
+        with_details = _req().query_params.get("with_details", "").lower() == "true"
         return _run_tool("backup.info", {"name": name, "with_details": with_details})
 
     @app.post("/package/backup/create")
@@ -1021,8 +1037,8 @@ def build_app(
 
     @app.get("/package/firewall/list")
     def firewall_list() -> Any:
-        protocol = request.query.get("protocol", "tcp")
-        forwarded = request.query.get("forwarded", "").lower() == "true"
+        protocol = _req().query_params.get("protocol", "tcp")
+        forwarded = _req().query_params.get("forwarded", "").lower() == "true"
         return _run_tool("firewall.list", {"protocol": protocol, "forwarded": forwarded})
 
     @app.post("/package/firewall/open")
@@ -1067,7 +1083,7 @@ def build_app(
 
     @app.get("/package/service/status")
     def service_status() -> Any:
-        names = _optional_list(request.query.get("names"))
+        names = _optional_list(_req().query_params.get("names"))
         return _run_tool("service.status", {"names": names} if names else {})
 
     @app.post("/package/service/restart")
@@ -1158,7 +1174,7 @@ def build_app(
         body = _json_body()
         return _run_lifecycle("agent.export.run", {"cycle_id": body.get("cycle_id", "")}, state=_State())
 
-    @app.get("/package/agent/export/<candidate_file_id>")
+    @app.get("/package/agent/export/{candidate_file_id}")
     def agent_export_get(candidate_file_id: str) -> Any:
         return _agent_export_get(candidate_file_id)
 
@@ -1284,7 +1300,7 @@ def build_app(
 
     @app.get("/package/catalog/trust")
     def catalog_trust() -> Any:
-        query = request.query
+        query = _req().query_params
         required_checks = [item for item in query.get("required_checks", "").split(",") if item]
         trusted_verifiers = [item for item in query.get("trusted_verifiers", "").split(",") if item]
         min_attestations = query.get("min_attestations", "")
@@ -1345,7 +1361,7 @@ def build_app(
             result["catalogue_error"] = catalogue_error
         return result
 
-    @app.get("/package/app/<app_id>/settings")
+    @app.get("/package/app/{app_id}/settings")
     def app_settings(app_id: str) -> Any:
         try:
             return native_app_settings(app_id)
@@ -1363,14 +1379,13 @@ def build_app(
             raise ApiError(409, "plan_changed", "The app or catalogue changed after this plan was reviewed. Review the refreshed plan before applying.")
         result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
         if not result.get("ok"):
-            return HTTPResponse(
-                json.dumps({"error": result.get("reason") or result.get("state") or f"{action} was rejected", "code": "operation_rejected", "operation": result}),
-                status=409,
-                headers={"Content-Type": "application/json"},
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or f"{action} was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
             )
         return {"operation": result, "action": action, "package": envelope.get("package")}
 
-    @app.post("/package/app/<app_id>/install/plan")
+    @app.post("/package/app/{app_id}/install/plan")
     def app_install_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "install plan does not accept a request body")
@@ -1379,11 +1394,11 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/package/app/<app_id>/install/apply")
+    @app.post("/package/app/{app_id}/install/apply")
     def app_install_apply(app_id: str) -> Any:
         return apply_catalogue_lifecycle(app_id, "install", _json_body())
 
-    @app.post("/package/app/<app_id>/upgrade/plan")
+    @app.post("/package/app/{app_id}/upgrade/plan")
     def app_upgrade_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "upgrade plan does not accept a request body")
@@ -1392,11 +1407,11 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/package/app/<app_id>/upgrade/apply")
+    @app.post("/package/app/{app_id}/upgrade/apply")
     def app_upgrade_apply(app_id: str) -> Any:
         return apply_catalogue_lifecycle(app_id, "upgrade", _json_body())
 
-    @app.post("/package/app/<app_id>/remove/plan")
+    @app.post("/package/app/{app_id}/remove/plan")
     def app_remove_plan(app_id: str) -> Any:
         if _json_body():
             raise ApiError(400, "invalid_request", "remove plan does not accept a request body")
@@ -1405,7 +1420,7 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/package/app/<app_id>/remove/apply")
+    @app.post("/package/app/{app_id}/remove/apply")
     def app_remove_apply(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"plan_sha256"}:
@@ -1418,14 +1433,13 @@ def build_app(
             raise ApiError(409, "plan_changed", "Installed app state changed after this plan was reviewed. Review the refreshed plan before applying.")
         result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
         if not result.get("ok"):
-            return HTTPResponse(
-                json.dumps({"error": result.get("reason") or result.get("state") or "removal was rejected", "code": "operation_rejected", "operation": result}),
-                status=409,
-                headers={"Content-Type": "application/json"},
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or "removal was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
             )
         return {"operation": result, "action": "remove", "package": envelope.get("package")}
 
-    @app.post("/package/app/<app_id>/settings/plan")
+    @app.post("/package/app/{app_id}/settings/plan")
     def app_settings_plan(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"values"}:
@@ -1435,7 +1449,7 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_settings", str(exc)) from exc
 
-    @app.post("/package/app/<app_id>/settings/apply")
+    @app.post("/package/app/{app_id}/settings/apply")
     def app_settings_apply(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"values", "plan_sha256"}:
@@ -1448,14 +1462,13 @@ def build_app(
             raise ApiError(409, "plan_changed", "The app or its settings changed after this plan was reviewed. Review the refreshed plan before applying.")
         result = _run_lifecycle("package.reconcile", {"plan": {key: value for key, value in envelope.items() if key != "settings_diff"}}, state=_State())
         if not result.get("ok"):
-            return HTTPResponse(
-                json.dumps({"error": result.get("reason") or result.get("state") or "settings change was rejected", "code": "operation_rejected", "operation": result}),
-                status=409,
-                headers={"Content-Type": "application/json"},
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or "settings change was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
             )
         return {"operation": result, "settings_diff": envelope["settings_diff"]}
 
-    @app.post("/package/app/<app_id>/change-url/plan")
+    @app.post("/package/app/{app_id}/change-url/plan")
     def app_change_url_plan(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"domain", "path"}:
@@ -1465,7 +1478,7 @@ def build_app(
         except PackageError as exc:
             raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
 
-    @app.post("/package/app/<app_id>/change-url/apply")
+    @app.post("/package/app/{app_id}/change-url/apply")
     def app_change_url_apply(app_id: str) -> Any:
         body = _json_body()
         if set(body) != {"domain", "path", "plan_sha256"}:
@@ -1478,10 +1491,9 @@ def build_app(
             raise ApiError(409, "plan_changed", "The app or another app's route changed after this plan was reviewed. Review the refreshed plan before applying.")
         result = _run_lifecycle("package.reconcile", {"plan": {key: value for key, value in envelope.items() if key != "url_diff"}}, state=_State())
         if not result.get("ok"):
-            return HTTPResponse(
-                json.dumps({"error": result.get("reason") or result.get("state") or "change-url was rejected", "code": "operation_rejected", "operation": result}),
-                status=409,
-                headers={"Content-Type": "application/json"},
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or "change-url was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
             )
         return {"operation": result, "action": "change-url", "url_diff": envelope["url_diff"]}
 
@@ -1598,7 +1610,7 @@ def build_app(
 
     @app.get("/package/user/permission/list")
     def user_permission_list() -> Any:
-        full = request.query.get("full", "").lower() == "true"
+        full = _req().query_params.get("full", "").lower() == "true"
         return _run_tool("user.permission.list", {"full": full})
 
     @app.post("/package/user/permission/add")
@@ -1660,7 +1672,7 @@ def build_app(
 
     @app.get("/package/settings/list")
     def settings_list() -> Any:
-        full = request.query.get("full", "").lower() == "true"
+        full = _req().query_params.get("full", "").lower() == "true"
         return _run_tool("settings.list", {"full": full})
 
     @app.post("/package/settings/set")
@@ -1720,7 +1732,7 @@ def build_app(
 
     @app.get("/package/identity/list")
     def identity_list() -> Any:
-        username = request.query.get("username")
+        username = _req().query_params.get("username")
         if username:
             identities = [_identity_dict(i) for i in list_identities_for_username(username)]
         else:
@@ -1728,7 +1740,7 @@ def build_app(
         # Bottle's json plugin cannot serialise a top-level list; wrap it.
         return {"identities": identities}
 
-    @app.get("/package/identity/resolve/<value>")
+    @app.get("/package/identity/resolve/{value}")
     def identity_resolve(value: str) -> Any:
         if value.startswith("npub1") or (len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)):
             identity = resolve_pubkey(_parse_pubkey(value))
@@ -1824,27 +1836,27 @@ def build_app(
 
     @app.get("/package/operations")
     def package_operations_list() -> Any:
-        limit = request.query.get("limit")
+        limit = _req().query_params.get("limit")
         return {"entries": list_operations(limit=int(limit) if limit else None, control_relay=_config_control_relay())}
 
-    @app.get("/package/operations/<request_id>")
+    @app.get("/package/operations/{request_id}")
     def package_operations_get(request_id: str) -> Any:
         entry = get_operation(request_id, control_relay=_config_control_relay())
         if entry is None:
             raise ApiError(404, "not_found", f"no operation {request_id!r} on the control relay")
         return entry
 
-    @app.get("/package/operations/<request_id>/approval-template")
+    @app.get("/package/operations/{request_id}/approval-template")
     def package_operations_approval_template(request_id: str) -> Any:
-        note = request.query.get("note") or None
+        note = _req().query_params.get("note") or None
         return build_approval_template(_authorized_pubkey(), request_id, note)
 
-    @app.get("/package/operations/<request_id>/rejection-template")
+    @app.get("/package/operations/{request_id}/rejection-template")
     def package_operations_rejection_template(request_id: str) -> Any:
-        reason = request.query.get("reason") or None
+        reason = _req().query_params.get("reason") or None
         return build_rejection_template(_authorized_pubkey(), request_id, reason)
 
-    @app.post("/package/operations/<request_id>/approve")
+    @app.post("/package/operations/{request_id}/approve")
     def package_operations_approve(request_id: str) -> Any:
         body = _json_body()
         signed_event = body.get("event")
@@ -1864,7 +1876,7 @@ def build_app(
             )
         return {"ok": True, "request_id": request_id, "event_id": event["id"]}
 
-    @app.post("/package/operations/<request_id>/reject")
+    @app.post("/package/operations/{request_id}/reject")
     def package_operations_reject(request_id: str) -> Any:
         body = _json_body()
         signed_event = body.get("event")
@@ -1888,21 +1900,22 @@ def build_app(
 
 
 def _authorized_pubkey() -> str:
-    """The admin pubkey the auth plugin resolved for this request.
+    """The admin pubkey the route resolved for this request.
 
-    Always set once a route body runs (the plugin's authorizer() raises and
-    short-circuits the response otherwise) - the one exception is /healthz,
-    which never calls this."""
-    pubkey = request.environ.get("nostrhost.admin_pubkey")
+    Always set once a route body runs (the authorizer raises and short-circuits
+    the response otherwise) - the one exception is /healthz, which never calls
+    this."""
+    pubkey = getattr(_req().state, "admin_pubkey", None)
     if not pubkey:
         raise ApiError(401, "authentication_required", "no authenticated identity for this request")
     return pubkey
 
 
 def _json_body() -> dict[str, Any]:
+    raw = _req().scope.get("nostrhost.body", b"")
     try:
-        body = request.json
-    except Exception:  # noqa: BLE001 - bottle raises on malformed JSON
+        body = json.loads(raw) if raw else None
+    except (ValueError, TypeError):  # noqa: BLE001 - malformed JSON
         body = None
     if not isinstance(body, dict):
         raise ApiError(400, "invalid_body", "request body must be a JSON object")
@@ -1974,7 +1987,7 @@ def run(
     *,
     admin_pubkeys: tuple[str, ...] = (),
     operator_pubkey: str | None = None,
-    app: Bottle | None = None,
+    app: FastAPI | None = None,
 ) -> None:
     """Serve the native API (used by bin/nostr-api).
 
@@ -1993,7 +2006,7 @@ def run(
     if app is None and operator_pubkey is None and not admin_pubkeys:
         admin_pubkeys, operator_pubkey = _identity_pubkeys_from_config()
     app = app or build_app(admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey)
-    app.run(host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through bin/nostr-api

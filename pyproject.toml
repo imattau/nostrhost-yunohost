@@ -25,6 +25,10 @@ dependencies = [
     # `AssertionError: assert self.protocol.state is CLOSED` in the internal
     # recv_events thread and wedges operationsd.
     "websockets>=14.2",
+    # Native HTTP APIs: the admin API is FastAPI/uvicorn (ASGI); bottle is
+    # still used by the portal-auth API until it is migrated too.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
     "bottle",
     "cryptography",
     # "dbus-python",
