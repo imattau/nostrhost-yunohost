@@ -579,9 +579,13 @@ class CaddyAdminClient:
         """Remove the NIP-05 route for ``domain`` (W4)."""
         self.delete_route(f"nostrhost-nip05:{domain}")
 
-    def ensure_portal_routes(self, domain: str) -> list[str]:
+    def ensure_portal_routes(self, domain: str, *, expose_native_api: bool = False) -> list[str]:
         """Create (or reconcile) the per-domain portal/SSO routes (W4)."""
-        return [self.ensure_route(route) for route in build_portal_routes(domain)]
+        desired = build_portal_routes(domain, expose_native_api=expose_native_api)
+        results = [self.ensure_route(route) for route in desired]
+        if not expose_native_api:
+            self.delete_route(f"nostrhost-native-api:{domain}")
+        return results
 
     def remove_portal_routes(self, domain: str) -> None:
         """Remove the per-domain portal/SSO routes (W4)."""

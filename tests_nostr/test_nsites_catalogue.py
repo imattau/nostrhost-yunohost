@@ -196,8 +196,8 @@ def test_publish_records_app_and_surfaces_in_list(tmp_path: Path, monkeypatch):
     svc.enable(GatewayConfig(domain=GATEWAY))
     svc.site_register(pubkey, kind=15128)
     monkeypatch.setattr(service, "_broadcast", ok_broadcast())
-    event = root_manifest(sk, pubkey, app=f"32267:{pubkey}:mysite")
     plan = svc.publish_plan(pubkey, kind=15128, d="", items=[{"path": "/index.html", "sha256": "a" * 64}])
+    event = root_manifest(sk, pubkey, app=f"32267:{pubkey}:mysite", servers=plan["plan"]["servers"])
     result = svc.publish(event, plan_sha256=plan["plan"]["plan_sha256"])
     assert result["ok"] is True
 
@@ -253,10 +253,10 @@ def test_copy_plan_from_registered_source(tmp_path: Path, monkeypatch):
     svc.enable(GatewayConfig(domain=GATEWAY))
     svc.site_register(src_pubkey, kind=15128)
     monkeypatch.setattr(service, "_broadcast", ok_broadcast())
-    src_event = root_manifest(sk, src_pubkey)
     src_plan = svc.publish_plan(
         src_pubkey, kind=15128, d="", items=[{"path": "/index.html", "sha256": "a" * 64}]
     )
+    src_event = root_manifest(sk, src_pubkey, servers=src_plan["plan"]["servers"])
     svc.publish(src_event, plan_sha256=src_plan["plan"]["plan_sha256"])
 
     target_sk, target_pubkey = new_keys()
@@ -295,6 +295,7 @@ def plan_digest_from(plan: dict) -> str:
         d=plan["d"],
         paths=[(p["path"], p["sha256"]) for p in plan["items"]],
         servers=plan["servers"],
+        relays=plan["relays"],
     )
 
 
@@ -304,10 +305,10 @@ def test_copy_plan_named_defaults_d(tmp_path: Path, monkeypatch):
     svc.enable(GatewayConfig(domain=GATEWAY))
     svc.site_register(src_pubkey, kind=35128, d="blog")
     monkeypatch.setattr(service, "_broadcast", ok_broadcast())
-    src_event = root_manifest(sk, src_pubkey, d="blog")
     src_plan = svc.publish_plan(
         src_pubkey, kind=35128, d="blog", items=[{"path": "/index.html", "sha256": "a" * 64}]
     )
+    src_event = root_manifest(sk, src_pubkey, d="blog", servers=src_plan["plan"]["servers"])
     svc.publish(src_event, plan_sha256=src_plan["plan"]["plan_sha256"])
 
     _, target_pubkey = new_keys()
@@ -403,7 +404,10 @@ def test_open_mode_publish_without_registration(tmp_path: Path, monkeypatch):
     plan = svc.publish_plan(
         pubkey, kind=15128, d="", items=[{"path": "/index.html", "sha256": "a" * 64}]
     )
-    result = svc.publish(root_manifest(sk, pubkey), plan_sha256=plan["plan"]["plan_sha256"])
+    result = svc.publish(
+        root_manifest(sk, pubkey, servers=plan["plan"]["servers"]),
+        plan_sha256=plan["plan"]["plan_sha256"],
+    )
     assert result["ok"] is True
     assert result["label"].startswith("npub1")
 
@@ -417,4 +421,7 @@ def test_hosted_mode_still_requires_registration(tmp_path: Path, monkeypatch):
         pubkey, kind=15128, d="", items=[{"path": "/index.html", "sha256": "a" * 64}]
     )
     with pytest.raises(service.NsiteError, match="not registered"):
-        svc.publish(root_manifest(*new_keys()), plan_sha256=plan["plan"]["plan_sha256"])
+        svc.publish(
+            root_manifest(*new_keys(), servers=plan["plan"]["servers"]),
+            plan_sha256=plan["plan"]["plan_sha256"],
+        )

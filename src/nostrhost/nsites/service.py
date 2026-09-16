@@ -134,7 +134,7 @@ def _pubkey_hex(pubkey: str) -> str:
 
 
 def plan_digest(
-    *, kind: int, d: str, paths: list[tuple[str, str]], servers: list[str]
+    *, kind: int, d: str, paths: list[tuple[str, str]], servers: list[str], relays: list[str] | None = None
 ) -> str:
     """The plan digest binding a manifest's signed content (D7, §6 step 5).
 
@@ -144,9 +144,10 @@ def plan_digest(
     event submitted to ``nsite.publish`` with a stale/mismatched digest is
     rejected before any broadcast or record (stale-plan rejection).
     """
-    payload = json.dumps(
-        [kind, d, sorted(paths), sorted(set(servers))], separators=(",", ":")
-    )
+    values: list[Any] = [kind, d, sorted(paths), sorted(set(servers))]
+    if relays is not None:
+        values.append(sorted(set(relays)))
+    payload = json.dumps(values, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -1301,8 +1302,11 @@ class NsiteService:
             if not is_sha256_hex(blob_hash):
                 raise NsiteError(f"invalid blob hash for {path!r}")
             paths.append((path, blob_hash))
-        servers = [s for s in (servers or []) if s]
-        relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        from ..connectivity import effective as effective_connectivity
+
+        network = effective_connectivity()
+        servers = [s for s in (servers or []) if s] or list(network["blossom_servers"])
+        relays = [r for r in (relays or []) if r] or list(network["relays"]["nsite"])
         for url in servers + relays:
             if not url.startswith(("https://", "wss://")):
                 raise NsiteError(f"refusing non-TLS server/relay URL: {url!r}")
@@ -1335,7 +1339,7 @@ class NsiteService:
                 "tags": tags,
                 "content": "",
             },
-            "plan_sha256": plan_digest(kind=kind, d=d, paths=paths, servers=servers),
+            "plan_sha256": plan_digest(kind=kind, d=d, paths=paths, servers=servers, relays=relays),
         }
         return {"plan": plan}
 
@@ -1371,7 +1375,10 @@ class NsiteService:
         paths = [(str(t[1]), str(t[2])) for t in path_tags if len(t) >= 3]
         d = verdict.d or ""
         servers = [str(s) for s in server_tags]
-        digest = plan_digest(kind=event["kind"], d=d, paths=paths, servers=servers)
+        from ..connectivity import effective as effective_connectivity
+
+        planned_relays = [r for r in (relays or []) if r] or list(effective_connectivity()["relays"]["nsite"])
+        digest = plan_digest(kind=event["kind"], d=d, paths=paths, servers=servers, relays=planned_relays)
         if plan_sha256 and digest != plan_sha256:
             raise NsiteError("plan digest mismatch: the signed manifest does not match the planned content")
         if plan_sha256 == "":
@@ -1388,7 +1395,9 @@ class NsiteService:
                 f"pubkey {verdict.pubkey[:16]}… is not registered in hosted mode; run nsite.register first"
             )
 
-        broadcast_relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        from ..connectivity import effective as effective_connectivity
+
+        broadcast_relays = [r for r in (relays or []) if r] or list(effective_connectivity()["relays"]["nsite"])
         broadcast = _broadcast(event, broadcast_relays)
         if not broadcast["succeeded"]:
             raise NsiteError(
@@ -1491,7 +1500,9 @@ class NsiteService:
             # same reject-a-stale-plan shape as publish.
             raise NsiteError("snapshot aggregate does not match the planned digest")
 
-        broadcast_relays = [r for r in (relays or []) if r] or list(DEFAULT_PUBLISH_RELAYS)
+        from ..connectivity import effective as effective_connectivity
+
+        broadcast_relays = [r for r in (relays or []) if r] or list(effective_connectivity()["relays"]["nsite"])
         broadcast = _broadcast(event, broadcast_relays)
         if not broadcast["succeeded"]:
             raise NsiteError("snapshot reached no relay")
@@ -1669,7 +1680,13 @@ class NsiteService:
         if not lookup_relays:
             state = self._state()
             config = state.get("config") or {}
-            lookup_relays = config.get("relays", {}).get("lookup") or ["wss://purplepag.es", "wss://user.kindpag.es"]
+            configured = config.get("relays", {}).get("lookup")
+            if configured and configured != ["wss://purplepag.es", "wss://user.kindpag.es"]:
+                lookup_relays = configured
+            else:
+                from ..connectivity import effective as effective_connectivity
+
+                lookup_relays = effective_connectivity()["relays"]["nsite_lookup"]
 
         filters: dict[str, Any] = {"kinds": [kind]}
         if author:

@@ -1666,6 +1666,94 @@ def build_app(
 
     # -- settings -------------------------------------------------------------
 
+    @app.get("/package/nostr/connectivity")
+    def nostr_connectivity_get() -> Any:
+        from .connectivity import public_view
+
+        return public_view(control_relay=_config_control_relay() or "ws://127.0.0.1:4848")
+
+    @app.post("/package/nostr/connectivity/check")
+    def nostr_connectivity_check() -> Any:
+        from .connectivity import ConnectivityError, check_destinations
+
+        body = _json_body()
+        if set(body) != {"relays", "blossom_servers"}:
+            raise ApiError(400, "invalid_request", "connection check requires relays and blossom_servers")
+        try:
+            return check_destinations(body["relays"], body["blossom_servers"])
+        except ConnectivityError as exc:
+            raise ApiError(400, "invalid_connectivity", str(exc)) from exc
+
+    @app.post("/package/nostr/connectivity/plan")
+    def nostr_connectivity_plan() -> Any:
+        from .connectivity import ConnectivityError, plan_config
+
+        body = _json_body()
+        if set(body) != {"configuration"}:
+            raise ApiError(400, "invalid_request", "connectivity plan requires a configuration object")
+        try:
+            return plan_config(body["configuration"])
+        except ConnectivityError as exc:
+            raise ApiError(400, "invalid_connectivity", str(exc)) from exc
+
+    @app.post("/package/nostr/connectivity/apply")
+    def nostr_connectivity_apply() -> Any:
+        from .connectivity import ConnectivityError, plan_config
+
+        body = _json_body()
+        if set(body) != {"configuration", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "connectivity apply requires configuration and plan_sha256")
+        try:
+            plan = plan_config(body["configuration"])
+        except ConnectivityError as exc:
+            raise ApiError(400, "invalid_connectivity", str(exc)) from exc
+        if body["plan_sha256"] != plan["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "Nostr network settings changed after review. Review the refreshed plan.")
+        result = _run_lifecycle(
+            "nostr.connectivity.set",
+            {"configuration": body["configuration"], "plan_sha256": body["plan_sha256"]},
+            state=_State(),
+        )
+        return {"operation": result, "effective": plan["effective"]}
+
+    @app.get("/package/domain/primary")
+    def domain_primary_get() -> Any:
+        from .domains.primary import primary_status
+
+        return primary_status()
+
+    @app.post("/package/domain/primary/plan")
+    def domain_primary_plan() -> Any:
+        from .domains.primary import plan_primary
+
+        body = _json_body()
+        if set(body) != {"domain"}:
+            raise ApiError(400, "invalid_request", "server address plan requires a domain")
+        try:
+            return plan_primary(str(body["domain"]))
+        except Exception as exc:
+            raise ApiError(400, "domain_not_ready", str(exc)) from exc
+
+    @app.post("/package/domain/primary/apply")
+    def domain_primary_apply() -> Any:
+        from .domains.primary import plan_primary
+
+        body = _json_body()
+        if set(body) != {"domain", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "server address apply requires domain and plan_sha256")
+        try:
+            plan = plan_primary(str(body["domain"]))
+        except Exception as exc:
+            raise ApiError(400, "domain_not_ready", str(exc)) from exc
+        if body["plan_sha256"] != plan["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "Domain state changed after review. Review the refreshed plan.")
+        result = _run_lifecycle(
+            "domain.primary.set",
+            {"domain": body["domain"], "plan_sha256": body["plan_sha256"]},
+            state=_State(),
+        )
+        return {"operation": result, "admin_url": plan["new_admin_url"], "portal_url": plan["new_portal_url"]}
+
     @app.get("/package/settings/list")
     def settings_list() -> Any:
         full = _req().query_params.get("full", "").lower() == "true"

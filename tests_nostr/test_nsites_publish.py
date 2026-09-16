@@ -207,6 +207,7 @@ def test_publish_happy_path(tmp_path: Path, monkeypatch):
         d="",
         paths=[(p["path"], p["sha256"]) for p in event_paths(event)],
         servers=event_servers(event),
+        relays=plan["relays"],
     )
 
     monkeypatch.setattr(service, "_broadcast", ok_broadcast())

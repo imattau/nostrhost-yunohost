@@ -66,6 +66,16 @@ from yunohost.nostr_operations import (
 )
 
 
+def _catalog_relay_arg(explicit: str = "") -> str:
+    """Resolve public catalogue relays while retaining the private local target."""
+    if explicit.strip():
+        return explicit.strip()
+    from nostrhost.connectivity import effective
+
+    targets = ["ws://127.0.0.1:4848", *effective()["relays"]["catalogue"]]
+    return ",".join(dict.fromkeys(targets))
+
+
 class SystemStatusArgs(_Strict):
     pass
 
@@ -206,7 +216,7 @@ class CatalogGetArgs(_Strict):
 class CatalogPublishArgs(_Strict):
     app_id: str = Field(..., description="the app id to re-declare and publish under the node's publisher key")
     relays: str = Field(
-        default="ws://127.0.0.1:4848",
+        default="",
         description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
     )
 
@@ -215,7 +225,7 @@ class CatalogDeclareArgs(_Strict):
     package: dict[str, Any] = Field(..., description="a native package manifest, the same object sent to package.plan")
     repository: str = Field(..., description="a URL where this exact manifest content is published, for provenance")
     relays: str = Field(
-        default="ws://127.0.0.1:4848",
+        default="",
         description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
     )
 
@@ -230,7 +240,7 @@ class CatalogAttestArgs(_Strict):
     claim: Literal["recommend", "tested"] = Field(..., description="the endorsement claim")
     comment: str = Field(default="", description="an optional free-text comment attached to the endorsement")
     relays: str = Field(
-        default="ws://127.0.0.1:4848",
+        default="",
         description="comma-separated relay ws:// or wss:// URLs to publish the endorsement to",
     )
 
@@ -263,7 +273,7 @@ class CatalogProfileSetArgs(_Strict):
     nip05: str = Field(default="", description="a NIP-05 identifier for the catalogue publisher")
     website: str = Field(default="", description="a website URL for the catalogue publisher")
     relays: str = Field(
-        default="ws://127.0.0.1:4848",
+        default="",
         description="comma-separated relay ws:// or wss:// URLs to publish the profile to",
     )
 
@@ -271,7 +281,7 @@ class CatalogProfileSetArgs(_Strict):
 class CatalogAnnounceArgs(_Strict):
     app_id: str = Field(..., description="the app id to announce, must be one of this node's own published declarations")
     relays: str = Field(
-        default="ws://127.0.0.1:4848",
+        default="",
         description="comma-separated relay ws:// or wss:// URLs to publish the announcement to",
     )
 
@@ -368,6 +378,16 @@ class DomainCertInstallArgs(_Strict):
     domain: str = Field(..., description="already-registered domain to issue/renew a certificate for")
     letsencrypt: bool = True
     staging: bool = False
+
+
+class DomainPrimarySetArgs(_Strict):
+    domain: str
+    plan_sha256: str
+
+
+class NostrConnectivitySetArgs(_Strict):
+    configuration: dict[str, Any]
+    plan_sha256: str
 
 
 class UserUpdateArgs(_Strict):
@@ -813,7 +833,7 @@ def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> d
     cfg = _operator_config()
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
 
-    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
     ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
     return {
         "app_id": app_id,
@@ -880,7 +900,7 @@ def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str
     content_json = json.dumps({"name": app_id}, separators=(",", ":"))
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
 
-    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
     ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
     return {
         "app_id": app_id,
@@ -1020,7 +1040,7 @@ def _safe_catalog_attest(
     tags = [["a", f"32267:{publisher}:{app_id}"], ["claim", claim]]
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 30079, comment, tags)
 
-    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
     ledger = _read_json_list(_catalog_attestation_ledger_path())
     ledger.append(
         {
@@ -1109,7 +1129,7 @@ def _safe_catalog_profile_set(
     content = json.dumps(profile, separators=(",", ":"))
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 0, content, [])
 
-    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
     # Only cache the edited fields once at least one relay accepted the
     # event - a total publish failure should leave the cache showing what is
     # still genuinely live, not a profile nobody has seen.
@@ -1154,7 +1174,7 @@ def _safe_catalog_announce(app_id: str = "", relays: str = "", **extra: Any) -> 
     tags = [["a", f"32267:{cfg.publisher_pubkey}:{app_id}"], ["r", repository]]
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 1, content, tags)
 
-    result = _catalog_cli(["--relay", relays or "ws://127.0.0.1:4848", "publish"], json.dumps(event).encode())
+    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
     ledger = _read_json_list(_catalog_announce_ledger_path())
     ledger.append({"app_id": app_id, "commit": commit, "version": version, "event_id": event["id"], "created_at": event["created_at"]})
     _write_json_atomic(_catalog_announce_ledger_path(), ledger)
@@ -1719,18 +1739,30 @@ def _safe_domain_cert_install(domain: str = "", letsencrypt: bool = True, stagin
     }
 
 
-def _safe_domain_primary_set(domain: str = "", **extra: Any) -> dict[str, Any]:
-    if extra or not domain:
-        raise OperationError("domain.primary.set requires a domain")
-    from nostrhost.domains.primary import apply_primary
+def _safe_domain_primary_set(domain: str = "", plan_sha256: str = "", **extra: Any) -> dict[str, Any]:
+    if extra or not domain or not plan_sha256:
+        raise OperationError("domain.primary.set requires a domain and reviewed plan fingerprint")
+    from nostrhost.domains.primary import apply_primary, plan_primary
+
+    current_plan = plan_primary(domain)
+    if current_plan["plan_sha256"] != plan_sha256:
+        raise OperationError("domain state changed after review; create and approve a fresh plan")
 
     return apply_primary(domain)
 
 
-def _safe_nostr_connectivity_set(configuration: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
-    if extra or not isinstance(configuration, dict):
-        raise OperationError("nostr.connectivity.set requires a configuration object")
-    from nostrhost.connectivity import apply_config
+def _safe_nostr_connectivity_set(
+    configuration: dict[str, Any] | None = None,
+    plan_sha256: str = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    if extra or not isinstance(configuration, dict) or not plan_sha256:
+        raise OperationError("nostr.connectivity.set requires configuration and a reviewed plan fingerprint")
+    from nostrhost.connectivity import apply_config, plan_config
+
+    current_plan = plan_config(configuration)
+    if current_plan["plan_sha256"] != plan_sha256:
+        raise OperationError("Nostr network settings changed after review; create and approve a fresh plan")
 
     return apply_config(configuration)
 
@@ -2339,6 +2371,16 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="domain.cert.install", handler=_safe_domain_cert_install, scope=SCOPE_DOMAINS_WRITE,
         input_model=DomainCertInstallArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
         description="issue/renew a certificate for an already-registered domain (admin confirmation)",
+    ),
+    "domain.primary.set": ToolSpec(
+        name="domain.primary.set", handler=_safe_domain_primary_set, scope=SCOPE_DOMAINS_WRITE,
+        input_model=DomainPrimarySetArgs, risk=RISK_HIGH, reversibility=REVERSIBLE_WITH_PLAN,
+        description="change the server address and primary administration domain",
+    ),
+    "nostr.connectivity.set": ToolSpec(
+        name="nostr.connectivity.set", handler=_safe_nostr_connectivity_set, scope=SCOPE_SETTINGS_WRITE,
+        input_model=NostrConnectivitySetArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="set public Nostr relay and Blossom defaults",
     ),
     "user.update": ToolSpec(
         name="user.update", handler=_safe_user_update, scope=SCOPE_USERS_WRITE,

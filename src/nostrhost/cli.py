@@ -1266,12 +1266,15 @@ def _render_notify_config(notifier_sk: str, relay: str) -> Path:
 
 def _render_catalogue_env(publisher_pubkey: str) -> Path:
     """Render the native catalogue synchroniser env (trusted publishers)."""
+    from .connectivity import effective as effective_connectivity
+
     path = Path(os.environ.get("NOSTRHOST_CATALOGUE_ENV", CATALOGUE_ENV))
     path.parent.mkdir(parents=True, exist_ok=True)
+    relay_targets = ["ws://127.0.0.1:4848", *effective_connectivity()["relays"]["catalogue"]]
     path.write_text(
         "# nostrhost-catalog synchroniser (rendered by postinstall).\n"
         f"NOSTRHOST_CATALOG_PUBLISHERS={publisher_pubkey}\n"
-        "NOSTRHOST_CATALOG_RELAYS=ws://127.0.0.1:4848\n"
+        f"NOSTRHOST_CATALOG_RELAYS={','.join(dict.fromkeys(relay_targets))}\n"
         "NOSTRHOST_CATALOG_STATE=/var/lib/nostrhost/catalogue.json\n"
     )
     os.chmod(path, 0o600)
