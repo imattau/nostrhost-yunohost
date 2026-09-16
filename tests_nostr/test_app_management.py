@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from nostrhost.app_management import catalogue_lifecycle_plan, carry_forward_compatible_settings, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
+from nostrhost.app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, carry_forward_compatible_settings, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
 from nostrhost.package_engine import PackageError, validate_plan_envelope
 
 
@@ -48,6 +48,49 @@ def test_catalogue_join_keeps_available_installed_and_unlisted_apps():
     assert by_id["installed"]["status"] == "installed"
     assert by_id["orphan"]["status"] == "installed-unlisted"
     assert by_id["orphan"]["installation"]["legacy"] is True
+
+
+def test_attach_app_logos_uses_catalogue_hash_and_base_id():
+    entries = [
+        {"id": "wordpress"},
+        {"id": "wordpress__2"},
+        {"id": "native-only"},
+    ]
+    attach_app_logos(entries, {"wordpress": "/nostrhost/sso/applogos/abc.png"})
+    assert entries[0]["logo"] == "/nostrhost/sso/applogos/abc.png"
+    assert entries[1]["logo"] == "/nostrhost/sso/applogos/abc.png"
+    assert "logo" not in entries[2]
+
+
+def test_attach_app_logos_is_a_noop_without_a_catalogue():
+    entries = [{"id": "wordpress"}]
+    attach_app_logos(entries, {})
+    assert "logo" not in entries[0]
+
+
+def test_app_catalog_logo_urls_builds_served_urls(monkeypatch):
+    from nostrhost import app_management
+
+    monkeypatch.setattr(app_management.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(
+        "yunohost.app_catalog._load_apps_catalog",
+        lambda: {
+            "apps": {
+                "wordpress": {"logo_hash": "abc123"},
+                "nologo": {"name": "No logo"},
+            }
+        },
+    )
+    logos = app_catalog_logo_urls()
+    assert logos["wordpress"] == "/nostrhost/sso/applogos/abc123.png"
+    assert "nologo" not in logos
+
+
+def test_app_catalog_logo_urls_skips_before_postinstall(monkeypatch):
+    from nostrhost import app_management
+
+    monkeypatch.setattr(app_management.os.path, "exists", lambda _path: False)
+    assert app_catalog_logo_urls() == {}
 
 
 def test_native_settings_update_returns_render_and_restart_plan(tmp_path):

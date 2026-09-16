@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,53 @@ def merge_catalogue_and_installed(catalogue: dict[str, Any], installed: dict[str
             status = "installed-unlisted"
         output.append({**entry, "status": status, "installed": installed_here})
     return sorted(output, key=lambda row: (str(row.get("name", "")).casefold(), row["id"]))
+
+
+def app_catalog_logo_urls() -> dict[str, str]:
+    """Map app id -> portal logo URL from the YunoHost app catalogue.
+
+    The catalogue stores a content hash per app; the logo itself is served at
+    ``/nostrhost/sso/applogos/<hash>.png`` (see caddy_admin.build_portal_routes).
+    Best-effort: the catalogue may be unavailable (before postinstall, or with
+    no native projection), in which case callers fall back to a monogram.
+    """
+    if not os.path.exists("/etc/yunohost/installed"):
+        return {}
+    try:
+        from yunohost.app_catalog import _load_apps_catalog
+
+        apps = (_load_apps_catalog() or {}).get("apps", {})
+    except Exception:  # noqa: BLE001 - logos are cosmetic
+        return {}
+    logos: dict[str, str] = {}
+    for app_id, info in apps.items():
+        if not isinstance(info, dict):
+            continue
+        logo_hash = info.get("logo_hash")
+        if logo_hash:
+            logos[str(app_id)] = f"/nostrhost/sso/applogos/{logo_hash}.png"
+    return logos
+
+
+def attach_app_logos(
+    entries: list[dict[str, Any]],
+    logos: dict[str, str],
+) -> None:
+    """Attach a ``logo`` URL to id-keyed app entries, in place.
+
+    ``logos`` maps app id -> served logo URL (see ``app_catalog_logo_urls``).
+    Falls back to the base id of a multi-instance app (``foo__2`` -> ``foo``)
+    so every instance shares its catalogue logo. No-op for an empty map.
+    """
+    if not logos:
+        return
+    for entry in entries:
+        app_id = entry.get("id")
+        if not isinstance(app_id, str):
+            continue
+        logo = logos.get(app_id) or logos.get(app_id.split("__")[0])
+        if logo:
+            entry["logo"] = logo
 
 
 def native_app_settings(app_id: str, *, state_dir: str | None = None) -> dict[str, Any]:

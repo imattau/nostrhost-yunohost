@@ -154,6 +154,39 @@ def test_app_management_combines_catalogue_and_installations(monkeypatch):
     assert rows["orphan"]["status"] == "installed-unlisted"
 
 
+def test_app_management_attaches_catalogue_logos(monkeypatch):
+    def fake_run_tool(name, args):
+        if name == "catalog.list":
+            return {"entries": [{"declaration": {"AppID": "wordpress", "Version": "2", "Name": "WordPress"}}]}
+        if name == "app.list":
+            return {"apps": {"wordpress__2": {"version": "2", "name": {"en": "WordPress"}}}}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(api_module, "app_catalog_logo_urls", lambda: {"wordpress": "/nostrhost/sso/applogos/abc.png"})
+    monkeypatch.setattr(api_module, "_run_tool", fake_run_tool)
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, _, body = wsgi_request(app, "GET", "/package/app/management")
+    assert status == "200"
+    rows = {row["id"]: row for row in json.loads(body)["apps"]}
+    # both the catalogue entry and the multi-instance install share the logo
+    assert rows["wordpress"]["logo"] == "/nostrhost/sso/applogos/abc.png"
+    assert rows["wordpress__2"]["logo"] == "/nostrhost/sso/applogos/abc.png"
+
+
+def test_catalog_list_attaches_catalogue_logos(monkeypatch):
+    monkeypatch.setattr(api_module, "app_catalog_logo_urls", lambda: {"wordpress": "/nostrhost/sso/applogos/abc.png"})
+    monkeypatch.setattr(api_module, "_run_tool", lambda name, args: [
+        {"declaration": {"AppID": "wordpress"}, "event_id": "e1"},
+        {"declaration": {"AppID": "nativeonly"}, "event_id": "e2"},
+    ])
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, _, body = wsgi_request(app, "GET", "/package/catalog/list")
+    assert status == "200"
+    entries = {entry["declaration"]["AppID"]: entry for entry in json.loads(body)["entries"]}
+    assert entries["wordpress"]["logo"] == "/nostrhost/sso/applogos/abc.png"
+    assert "logo" not in entries["nativeonly"]
+
+
 def test_native_settings_plan_and_apply_are_bound_to_reviewed_digest(monkeypatch, tmp_path):
     manifest = {
         "app": {"id": "example", "version": "1.0.0"},

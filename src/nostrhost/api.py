@@ -40,7 +40,7 @@ from .cli import (
     _run_lifecycle,
 )
 from .core import NostrHostError
-from .app_management import catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
+from .app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
 from .package_engine import PackageError
 from .mcp_endpoint import export_ca_bundle, read_endpoint_config
 from yunohost.nostr_identity import (
@@ -1233,6 +1233,16 @@ def build_app(
                 link = links.get(address)
                 if link:
                     entry["nsite"] = link
+        # Best-effort logos from the YunoHost app catalogue (native declarations
+        # carry no logo of their own); entries without one render a monogram.
+        logos = app_catalog_logo_urls()
+        if logos:
+            for entry in entries:
+                decl = entry.get("declaration") or {}
+                app_id = decl.get("AppID") or decl.get("app_id")
+                logo = logos.get(app_id) if isinstance(app_id, str) else None
+                if logo:
+                    entry["logo"] = logo
         return out
 
     @app.post("/package/catalog/publish")
@@ -1331,6 +1341,7 @@ def build_app(
             catalogue_error = exc.message
         installed = _run_tool("app.list", {})
         result = {"apps": merge_catalogue_and_installed(catalogue, installed)}
+        attach_app_logos(result["apps"], app_catalog_logo_urls())
         if catalogue_error:
             result["catalogue_error"] = catalogue_error
         return result
