@@ -64,7 +64,7 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
-from .nostrhost.events import _d_tag, _e_tag, _tag_value
+from .nostrhost.events import _d_tag, _e_tag, _tag_value, query_chain_events
 
 logger = logging.getLogger("nostr-operationsd")
 
@@ -685,6 +685,26 @@ async def subscribe_loop(
             await asyncio.sleep(5)
 
 
+def preload_capabilities(engine: OperationEngine, relay_url: str) -> None:
+    """Project the replaceable capability/delegation grants before the live
+    subscription starts.
+
+    The control relay's badger-backed store truncates parameterized-replaceable
+    (NIP-33) events when they share a REQ with the 2200-2205 chain kinds (only
+    the newest grant is returned), so the combined subscription alone would
+    leave every grant but the newest unprojected -> spurious `unauthorized`
+    rejections. Queried on their own kinds the relay returns the latest per
+    subject, so this loads the whole grant/delegation set first; the live
+    subscription still delivers newly published grants. Best-effort.
+    """
+    for preload_kind in (KIND_CAPABILITY, KIND_DELEGATION, KIND_DELEGATION_REVOCATION):
+        try:
+            for event in query_chain_events(relay_url, kinds=(preload_kind,), limit=500):
+                engine.handle_event(event)
+        except Exception as exc:  # noqa: BLE001 - best-effort; the live sub still sees new events
+            logger.warning("preload of kind %s failed (%s); grants may be missing until reconnect", preload_kind, exc)
+
+
 def run() -> None:
     """Entry point for bin/nostr-operationsd."""
     _configure_daemon_logging()
@@ -728,6 +748,12 @@ def run() -> None:
             publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
             restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
         )
+    # Preload the replaceable capability/delegation grants with dedicated
+    # single-kind queries before the live subscription (see
+    # preload_capabilities: the combined chain subscription truncates NIP-33
+    # grants to the single newest one, which would reject every other grantee
+    # with spurious `unauthorized` errors).
+    preload_capabilities(engine, cfg.control_relay)
     try:
         asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))
     except KeyboardInterrupt:

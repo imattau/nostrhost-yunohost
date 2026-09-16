@@ -490,6 +490,36 @@ def test_capability_events_scope_grants():
     assert not h.engine._authorized(h.agent_pk, "apps.read")
 
 
+def test_preload_capabilities_projects_all_grants(monkeypatch):
+    """The control relay's badger store truncates NIP-33 grants when they
+    share a REQ with the 2200-2205 chain kinds (only the newest is returned),
+    so operationsd must preload capability/delegation grants with dedicated
+    single-kind queries before the live subscription — otherwise every grant
+    but the newest is unprojected and its holder is rejected `unauthorized`."""
+    from yunohost.nostr_operationsd import preload_capabilities
+
+    h = Harness()
+    _, other_pk = new_key()
+    events = [
+        build_capability(h.admin_sk, h.admin_pk, h.agent_pk, "agent", ["services.read"]),
+        build_capability(h.admin_sk, h.admin_pk, other_pk, "agent", ["logs.read"]),
+    ]
+    seen_kinds = []
+
+    def fake_query(relay_url, *, kinds, limit):
+        seen_kinds.append(kinds)
+        return [e for e in events if e["kind"] in kinds]
+
+    monkeypatch.setattr("yunohost.nostr_operationsd.query_chain_events", fake_query)
+    preload_capabilities(h.engine, "ws://test")
+    assert h.engine.scopes[h.agent_pk] == {"services.read"}
+    assert h.engine.scopes[other_pk] == {"logs.read"}
+    assert h.engine._authorized(h.agent_pk, "services.read")
+    assert h.engine._authorized(other_pk, "logs.read")
+    # queried on their own kinds: capability + delegation + revocation
+    assert set(seen_kinds) == {(31100,), (27236,), (27237,)}
+
+
 def test_scope_gating_denies_other_scope():
     h = Harness()
     h.grant(["services.read"])  # wrong scope for system.version

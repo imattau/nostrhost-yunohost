@@ -1,3 +1,17 @@
+yunohost (12.1.41.62) stable; urgency=low
+
+  * Fix spurious `unauthorized` operation rejections: the control relay's
+    badger-backed store truncates parameterized-replaceable (NIP-33)
+    capability/delegation grants when they share a subscription with the
+    2200-2205 chain kinds (only the single newest grant is returned), so
+    nostr-operationsd only ever projected one grant and every other grantee
+    (e.g. the resident agent's periodic service.status, and any broker-relayed
+    scoped client) was rejected unauthorized. The daemon now preloads the
+    capability/delegation grants with dedicated single-kind queries before the
+    live subscription, and the live subscription still picks up new grants.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 00:45:00 +0000
+
 yunohost (12.1.41.61) stable; urgency=low
 
   * Fix a 500 on /package/diagnosis/run (and any native tool that shells into
