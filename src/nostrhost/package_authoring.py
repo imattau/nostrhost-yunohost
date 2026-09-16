@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Optional
@@ -136,6 +138,83 @@ def validate_manifest_text(content: str) -> tuple[PackageManifest | None, list[d
     except tomllib.TOMLDecodeError as exc:
         return None, [_diagnostic("package.toml_syntax", [], str(exc), "Check the reported line and column in package.toml.")]
     return validate_manifest_data(raw)
+
+
+def _validate_revision(revision: str) -> None:
+    """Reject a revision git could misparse as an option, or that carries
+    whitespace/control characters (the same option-injection hardening the
+    catalogue's own remote-preview clone applies)."""
+    if revision.startswith("-"):
+        raise ValueError(f"invalid revision {revision!r}: must not start with '-'")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in revision):
+        raise ValueError(f"invalid revision {revision!r}: contains whitespace or control characters")
+
+
+def fetch_manifest_from_repository(repository: str, revision: str = "", package_path: str = "") -> dict[str, Any]:
+    """Shallow-clone a package.toml manifest straight from its repository, so
+    authoring a package can start from "here is where it lives" instead of
+    hand-pasting the manifest. Returns the raw (unvalidated-shape) TOML data
+    alongside the same diagnostics `validate_manifest_text` would produce, and
+    the commit the manifest was read at.
+
+    Deliberately independent of the native catalogue CLI's own remote-preview
+    clone (`nostrhost-catalog`'s ReadRemoteMetadata): that tool reads a
+    manifest.toml/manifest.json describing a *legacy* YunoHost-style app, a
+    different, incompatible schema from this project's native package.toml
+    resource manifest (see catalog.declare's docstring). This clones
+    independently and reads package.toml instead.
+    """
+    if not repository.startswith("https://"):
+        raise ValueError("repository must be an https:// URL")
+    if revision:
+        _validate_revision(revision)
+    if package_path and (package_path.startswith("/") or ".." in package_path.split("/")):
+        raise ValueError("package_path must be a relative path without '..' segments")
+
+    content, commit = _clone_and_read_manifest(repository, revision, package_path)
+    package, diagnostics = validate_manifest_text(content)
+    raw = tomllib.loads(content)
+    return {
+        "package": raw,
+        "valid": package is not None,
+        "diagnostics": diagnostics,
+        "commit": commit,
+    }
+
+
+def _clone_and_read_manifest(repository: str, revision: str, package_path: str) -> tuple[str, str]:
+    """Shallow-clone `repository` (any git-cloneable location - the caller
+    validates it is an https:// URL before this point) and return
+    (package.toml content, commit). Split out from fetch_manifest_from_repository
+    so tests can exercise the clone/read mechanics against a local repository
+    without weakening the production https:// requirement."""
+    with tempfile.TemporaryDirectory(prefix="nostrhost-package-fetch-") as workdir:
+        clone_cmd = ["git", "clone", "--quiet", "--depth", "1", "--filter=blob:none"]
+        if revision:
+            clone_cmd += ["--branch", revision]
+        clone_cmd += [repository, workdir]
+        try:
+            proc = subprocess.run(clone_cmd, capture_output=True, timeout=60)
+        except FileNotFoundError:
+            raise ValueError("git is not installed on this host") from None
+        except subprocess.TimeoutExpired:
+            raise ValueError("cloning the repository timed out") from None
+        if proc.returncode != 0:
+            raise ValueError(f"could not clone {repository}: {proc.stderr.decode(errors='replace').strip()}")
+
+        manifest_dir = Path(workdir) / package_path if package_path else Path(workdir)
+        manifest_file = manifest_dir / "package.toml"
+        if not manifest_file.is_file():
+            where = f"{package_path}/package.toml" if package_path else "package.toml"
+            raise ValueError(f"{where} not found in {repository}" + (f"@{revision}" if revision else ""))
+        content = manifest_file.read_text(encoding="utf-8")
+
+        commit_proc = subprocess.run(
+            ["git", "-C", workdir, "rev-parse", "HEAD"], capture_output=True, timeout=10
+        )
+        commit = commit_proc.stdout.decode().strip() if commit_proc.returncode == 0 else ""
+
+    return content, commit
 
 
 def package_schema_document() -> dict[str, Any]:
