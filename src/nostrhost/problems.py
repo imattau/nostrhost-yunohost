@@ -123,7 +123,7 @@ def _error_code_message(exc: BaseException | None, status: int) -> tuple[str, st
 def record(
     request: Request,
     *,
-    status: int,
+    status: int | None = None,
     code: str,
     message: str,
     kind: str = "http",
@@ -131,7 +131,11 @@ def record(
     duration_ms: float | None = None,
     exc: BaseException | None = None,
 ) -> None:
-    """Write one structured problem record. Never raises."""
+    """Write one structured problem record. Never raises.
+
+    ``status`` is the HTTP status for server-side problems; client-side SPA
+    reports have no HTTP status and pass ``None``.
+    """
     try:
         _ensure_configured()
         entry: dict[str, Any] = {
@@ -149,7 +153,7 @@ def record(
             "message": _redact(str(message)),
             "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
         }
-        if exc is not None and status >= 500:
+        if exc is not None and (status or 0) >= 500:
             import traceback
 
             entry["exc_type"] = type(exc).__name__

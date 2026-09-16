@@ -1,3 +1,19 @@
+yunohost (12.1.41.59) stable; urgency=low
+
+  * Add POST /nostrhost/portalapi/report: a bounded, public client-side error
+    report endpoint the portal and admin SPAs use to post batched
+    JS/render/component errors (window error, unhandledrejection, Vue
+    errorHandler). Each event lands in the structured problem log
+    (kind=client, source=portal, no HTTP status) so logs.problems can diagnose
+    SPA failures end to end. Payloads are capped (16 KiB body, 50 events,
+    bounded message/stack/route) and policy-redacted on write.
+  * Fix the portal profile-edit 400: update_route returned an error body with a
+    status override that sync routes lose (threadpool context), so a too-short
+    full name came back as 200 and the client merged {path,error} into the
+    user object. The 400 now rides on the JSONResponse itself.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 00:05:00 +0000
+
 yunohost (12.1.41.58) stable; urgency=low
 
   * Add a structured server problem log: the API and portal-api error

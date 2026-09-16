@@ -21,7 +21,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from nostrhost import problems, web
 
@@ -47,8 +47,14 @@ def update_route():
     payload = web.request.json or {}
     fullname = (payload.get("fullname") or "").strip()
     if len(fullname) < 2:
-        web.response.status = 400
-        return {"path": "fullname", "error": "Full name must be at least 2 characters."}
+        # Raised web.HTTPResponse carries no JSON body, and the portal client
+        # reads error.value.data.path / .error — return a real JSON 400 (sync
+        # routes run in a threadpool, so the web.response.status override is
+        # lost: the response status must ride on the Response itself).
+        return JSONResponse(
+            {"path": "fullname", "error": "Full name must be at least 2 characters."},
+            status_code=400,
+        )
 
     record = user_get(username) or {}
     record["fullname"] = fullname
@@ -72,6 +78,60 @@ def logout_route():
         Authenticator().delete_session_cookie()
     except Exception as exc:  # noqa: BLE001 - session may already be gone
         logger.warning("logout session cleanup failed: %s", exc)
+    return {"ok": True}
+
+
+_CLIENT_REPORT_APPS = ("portal", "admin")
+_CLIENT_REPORT_MAX_BYTES = 16_384
+
+
+def client_error_report_route():
+    """POST /nostrhost/portalapi/report — bounded client-side error report.
+
+    The portal/admin SPAs capture window errors, unhandled rejections and Vue
+    render/component errors and post them here (batched). Each event lands in
+    the structured problem log (kind=client, source=portal) so the
+    ``logs.problems`` introspection tool can diagnose SPA render/JS failures.
+    Public by design (errors occur before/without sign-in); the payload is
+    size-bounded and message/stack are policy-redacted on write.
+    """
+    from nostrhost import problems
+
+    request = web.current_request()
+    if len(getattr(request.state, "body_bytes", b"")) > _CLIENT_REPORT_MAX_BYTES:
+        raise web.HTTPResponse("report too large", 413)
+    try:
+        payload = web.request.json or {}
+    except Exception:  # noqa: BLE001 - malformed body
+        payload = {}
+    if not isinstance(payload, dict):
+        raise web.HTTPResponse("malformed report", 400)
+    events = payload.get("events")
+    if isinstance(events, list):
+        events = [e for e in events[:50] if isinstance(e, dict)]
+    elif isinstance(payload.get("message"), str):
+        events = [payload]
+    else:
+        events = []
+    if not events:
+        raise web.HTTPResponse("empty report", 400)
+    for event in events:
+        app_name = str(event.get("app") or "portal")
+        if app_name not in _CLIENT_REPORT_APPS:
+            app_name = "portal"
+        message = str(event.get("message") or "")[:2000]
+        stack = str(event.get("stack") or "")[:8000]
+        route = str(event.get("route") or "")[:500]
+        if not message and not stack:
+            continue
+        problems.record(
+            request,
+            status=None,
+            code="client_error",
+            message=f"{app_name} SPA error{(' at ' + route) if route else ''}: {message}",
+            kind="client",
+            source="portal",
+        )
     return {"ok": True}
 
 
@@ -145,6 +205,7 @@ def build_app() -> FastAPI:
     app.get("/me")(portal_me_route)
     app.put("/update")(update_route)
     app.get("/logout")(logout_route)
+    app.post("/report")(client_error_report_route)
     app.get("/nostr/challenge")(challenge_route)
     app.post("/nostr/login")(login_route)
     app.get("/nostr/auth-request")(auth_request_route)

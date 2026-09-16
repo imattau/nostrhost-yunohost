@@ -100,3 +100,103 @@ def test_record_redacts_secrets(tmp_path):
     entry = json.loads(log.read_text().splitlines()[-1])
     assert "topsecret" not in entry["message"]
     assert "[REDACTED]" in entry["message"]
+
+
+# --------------------------------------------------------------------------- #
+# client-side SPA error reporting (POST /nostrhost/portalapi/report)
+
+def _portal_request(app, payload):
+    import asyncio
+
+    import httpx2
+
+    async def call():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/report", json=payload)
+
+    return asyncio.run(call())
+
+
+def test_client_error_report_records_kind_client(tmp_path, monkeypatch):
+    from nostrhost.portal_api import build_app as portal_build_app
+
+    problems.configure(str(tmp_path / "problems.log"))
+    response = _portal_request(
+        portal_build_app(),
+        {"events": [{"message": "Cannot read properties of undefined (reading 'x')", "stack": "TypeError: boom\n  at render", "route": "/dashboard", "app": "admin"}]},
+    )
+    assert response.status_code == 200
+    entry = json.loads((tmp_path / "problems.log").read_text().splitlines()[-1])
+    assert entry["status"] is None
+    assert entry["code"] == "client_error"
+    assert entry["kind"] == "client"
+    assert entry["source"] == "portal"
+    assert "admin SPA error at /dashboard" in entry["message"]
+    assert "Cannot read properties" in entry["message"]
+    assert entry["method"] == "POST"
+    assert entry["request_id"]
+
+
+def test_client_error_report_accepts_single_event(tmp_path, monkeypatch):
+    from nostrhost.portal_api import build_app as portal_build_app
+
+    problems.configure(str(tmp_path / "problems.log"))
+    response = _portal_request(portal_build_app(), {"message": "boom", "app": "portal"})
+    assert response.status_code == 200
+    entry = json.loads((tmp_path / "problems.log").read_text().splitlines()[-1])
+    assert entry["kind"] == "client"
+    assert "portal SPA error" in entry["message"]
+
+
+def test_client_error_report_rejects_empty_and_malformed(tmp_path, monkeypatch):
+    from nostrhost.portal_api import build_app as portal_build_app
+
+    problems.configure(str(tmp_path / "problems.log"))
+    app = portal_build_app()
+    assert _portal_request(app, {"events": []}).status_code == 400
+    assert _portal_request(app, {}).status_code == 400
+    assert _portal_request(app, {"events": [{"app": "admin"}]}).status_code == 200
+    assert all(json.loads(line)["code"] != "client_error" for line in (tmp_path / "problems.log").read_text().splitlines())
+
+
+def test_client_error_report_rejects_oversized_body(tmp_path, monkeypatch):
+    from nostrhost.portal_api import build_app as portal_build_app
+
+    problems.configure(str(tmp_path / "problems.log"))
+    response = _portal_request(
+        portal_build_app(),
+        {"events": [{"message": "x" * 20_000, "app": "portal"}]},
+    )
+    assert response.status_code == 413
+    assert all(json.loads(line)["code"] != "client_error" for line in (tmp_path / "problems.log").read_text().splitlines())
+
+
+def test_update_route_returns_real_json_400_for_short_fullname(monkeypatch):
+    """The portal reads error.value.data.path/.error: the 400 must ride on the
+    Response itself (sync routes run in a threadpool, so the web.response.status
+    override would be lost)."""
+    from nostrhost.portal_api import build_app as portal_build_app
+
+    import yunohost.nostr_account as nostr_account
+    import yunohost.nostrhost.accounts as accounts
+
+    monkeypatch.setattr(nostr_account, "_session_username", lambda: "alice")
+    monkeypatch.setattr(accounts, "user_get", lambda _u: {"username": "alice"})
+    monkeypatch.setattr(accounts, "users", lambda: {})
+    monkeypatch.setattr(accounts, "save_users", lambda _u: None)
+
+    import asyncio
+
+    import httpx2
+
+    app = portal_build_app()
+
+    async def call():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.put("/update", json={"fullname": "x"})
+
+    response = asyncio.run(call())
+    assert response.status_code == 400
+    assert response.json() == {"path": "fullname", "error": "Full name must be at least 2 characters."}
