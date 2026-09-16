@@ -564,7 +564,10 @@ def _get_status(domain):
     cert_subject = subject_cn[0].value if subject_cn else ""
     cert_issuer = issuer_cn[0].value if issuer_cn else ""
     organization_name = issuer_organization[0].value if issuer_organization else ""
-    valid_up_to = cert.not_valid_after_utc
+    try:
+        valid_up_to = cert.not_valid_after_utc  # cryptography >= 42
+    except AttributeError:  # Debian bookworm ships cryptography 38
+        valid_up_to = cert.not_valid_after.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     days_remaining = (valid_up_to - now).days
     expired = valid_up_to <= now

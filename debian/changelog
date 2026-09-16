@@ -1,3 +1,12 @@
+yunohost (12.1.41.56) stable; urgency=low
+
+  * Fix the certificate expiry reader on Debian bookworm: the system Python
+    ships cryptography 38, which predates `not_valid_after_utc`. nostr_certd
+    and the cert-status reader now fall back to `not_valid_after` (attached as
+    UTC), unbreaking nostrhost-certd.service after the 12.1.41.55 upgrade.
+
+ -- NostrHost <noreply@nostrhost.org>  Wed, 16 Sep 2026 23:30:00 +0000
+
 yunohost (12.1.41.55) stable; urgency=low
 
   * Modernize the residual YunoHost Python base (docs/MODERNIZATION.md):

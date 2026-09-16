@@ -48,7 +48,10 @@ def _leaf_not_after(crt_path: Path) -> datetime:
     from cryptography import x509
 
     cert = x509.load_pem_x509_certificate(crt_path.read_bytes())
-    return cert.not_valid_after_utc
+    try:
+        return cert.not_valid_after_utc  # cryptography >= 42
+    except AttributeError:  # Debian bookworm ships cryptography 38
+        return cert.not_valid_after.replace(tzinfo=timezone.utc)
 
 
 def _leaf_issuer(crt_path: Path) -> str:
