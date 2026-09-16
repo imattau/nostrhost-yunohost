@@ -30,10 +30,10 @@ _AUTH_CODES = ("badauth", "nohost", "notfqdn")
 
 def _get_request(url: str, headers: dict[str, str] | None = None, timeout: float = 30.0) -> tuple[int, str]:
     try:
-        import httpx
-    except ImportError:  # pragma: no cover - packaging provides httpx
-        raise RuntimeError("httpx is required for the dynu provider") from None
-    resp = httpx.get(url, headers=headers or {}, timeout=timeout, follow_redirects=True)
+        import httpx2
+    except ImportError:  # pragma: no cover - packaging provides httpx2
+        raise RuntimeError("httpx2 is required for the dynu provider") from None
+    resp = httpx2.get(url, headers=headers or {}, timeout=timeout, follow_redirects=True)
     return resp.status_code, resp.text
 
 

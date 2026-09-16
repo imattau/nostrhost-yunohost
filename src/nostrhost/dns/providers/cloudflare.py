@@ -63,10 +63,10 @@ class CloudflareApi:
 
     def _httpx(self, method: str, url: str, **kwargs: Any) -> Any:
         try:
-            import httpx
-        except ImportError:  # pragma: no cover - packaging provides httpx
-            raise RuntimeError("httpx is required for the cloudflare provider") from None
-        resp = httpx.request(method, url, headers=self._headers(), timeout=30.0, **kwargs)
+            import httpx2
+        except ImportError:  # pragma: no cover - packaging provides httpx2
+            raise RuntimeError("httpx2 is required for the cloudflare provider") from None
+        resp = httpx2.request(method, url, headers=self._headers(), timeout=30.0, **kwargs)
         resp.raise_for_status()
         return resp.json()
 

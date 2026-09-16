@@ -25,7 +25,7 @@ from unittest.mock import Mock
 
 import moulinette
 import pytest
-import toml
+import tomli_w
 import yaml
 from moulinette import Moulinette, m18n
 from yunohost.utils.error import YunohostError
@@ -142,7 +142,7 @@ def test_yaml(tmp_path):
 
 @pytest.fixture
 def test_toml(tmp_path):
-    test_toml = toml.dumps({"foo": "bar"})
+    test_toml = tomli_w.dumps({"foo": "bar"})
     test_file = tmp_path / "test.txt"
     test_file.write_bytes(test_toml.encode())
     return test_file

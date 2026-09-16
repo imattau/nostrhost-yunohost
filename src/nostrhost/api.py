@@ -29,7 +29,6 @@ from .cli import (
     _agent_contribution_settings_get,
     _agent_export_get,
     _agent_export_list,
-    _agent_init,
     _agent_mode_get,
     _agent_model_profile,
     _agent_model_recommend,

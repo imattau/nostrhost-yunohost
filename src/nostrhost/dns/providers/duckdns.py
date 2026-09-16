@@ -30,10 +30,10 @@ _SUFFIX = ".duckdns.org"
 def _get_request(url: str, timeout: float = 30.0) -> tuple[int, str]:
     """Default GET helper (httpx); returns (status_code, text)."""
     try:
-        import httpx
-    except ImportError:  # pragma: no cover - packaging provides httpx
-        raise RuntimeError("httpx is required for the duckdns provider") from None
-    resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+        import httpx2
+    except ImportError:  # pragma: no cover - packaging provides httpx2
+        raise RuntimeError("httpx2 is required for the duckdns provider") from None
+    resp = httpx2.get(url, timeout=timeout, follow_redirects=True)
     return resp.status_code, resp.text
 
 

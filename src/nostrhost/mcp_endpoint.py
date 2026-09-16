@@ -12,9 +12,10 @@ back without the operator re-typing it.
 from __future__ import annotations
 
 import os
+import tomllib
 from typing import Any
 
-import toml
+import tomli_w
 
 CONFIG_PATH = os.environ.get("NOSTRHOST_MCP_CONFIG", "/etc/nostrhost/mcp.toml")
 DEFAULT_PORT = 8930
@@ -35,8 +36,9 @@ def read_endpoint_config(path: str | None = None) -> dict[str, Any] | None:
     if not os.path.exists(path):
         return None
     try:
-        config = toml.load(path)
-    except (OSError, toml.TomlDecodeError):
+        with open(path, "rb") as fh:
+            config = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
         return None
     domain = config.get("domain")
     if not isinstance(domain, str) or not domain:
@@ -48,8 +50,8 @@ def read_endpoint_config(path: str | None = None) -> dict[str, Any] | None:
 def write_endpoint_config(domain: str, port: int, *, path: str | None = None) -> None:
     path = path or CONFIG_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        toml.dump({"domain": domain, "port": port}, fh)
+    with open(path, "wb") as fh:
+        tomli_w.dump({"domain": domain, "port": port}, fh)
     os.chmod(path, 0o644)  # not secret: a hostname + port, readable like relay.toml
 
 

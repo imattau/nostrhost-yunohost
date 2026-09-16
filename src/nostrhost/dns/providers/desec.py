@@ -37,13 +37,13 @@ def _request(
     timeout: float = 30.0,
 ) -> tuple[int, Any]:
     try:
-        import httpx
-    except ImportError:  # pragma: no cover - packaging provides httpx
-        raise RuntimeError("httpx is required for the desec provider") from None
+        import httpx2
+    except ImportError:  # pragma: no cover - packaging provides httpx2
+        raise RuntimeError("httpx2 is required for the desec provider") from None
     kwargs: dict[str, Any] = {"headers": headers or {}, "timeout": timeout}
     if body is not None:
         kwargs["json"] = body
-    resp = httpx.request(method, url, **kwargs)
+    resp = httpx2.request(method, url, **kwargs)
     text = resp.text
     try:
         payload: Any = json.loads(text) if text else None

@@ -20,7 +20,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import toml
+import tomli_w
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -724,10 +724,10 @@ class SourceProvider(InspectVerifiedProvider):
     @staticmethod
     def _download(url: str, destination: Path) -> None:
         try:
-            import httpx
-        except ImportError as exc:  # pragma: no cover - packaging provides httpx
-            raise ProviderError("httpx is required for native source downloads") from exc
-        with httpx.stream("GET", url, follow_redirects=True, timeout=900) as response:
+            import httpx2
+        except ImportError as exc:  # pragma: no cover - packaging provides httpx2
+            raise ProviderError("httpx2 is required for native source downloads") from exc
+        with httpx2.stream("GET", url, follow_redirects=True, timeout=900) as response:
             response.raise_for_status()
             with destination.open("wb") as output:
                 for chunk in response.iter_bytes():
@@ -890,7 +890,7 @@ class FpmProvider(InspectVerifiedProvider):
             f"user = {args['user']}",
             f"group = {args['group']}",
             f"listen = {args['socket']}",
-            f"pm = ondemand",
+            "pm = ondemand",
             f"pm.max_children = {args.get('max_children', 10)}",
             "",
         ])
@@ -1112,7 +1112,7 @@ class PolicyProvider(InspectVerifiedProvider):
         data = {"scenarios": enabled}
         temporary = target.with_suffix(".tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(toml.dumps(data), encoding="utf-8")
+        temporary.write_text(tomli_w.dumps(data), encoding="utf-8")
         os.chmod(temporary, 0o640)
         temporary.replace(target)
 
@@ -1779,10 +1779,10 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         # the system trust store (Caddy/Let's Encrypt certs). Testbeds that
         # use Caddy's internal CA add it to the trust store once.
         try:
-            import httpx
+            import httpx2
 
-            health_client = httpx.Client(follow_redirects=True)
-        except ImportError:  # pragma: no cover - packaging provides httpx
+            health_client = httpx2.Client(follow_redirects=True)
+        except ImportError:  # pragma: no cover - packaging provides httpx2
             health_client = None
         if health_client is not None:
             providers["health"] = HealthProvider(client=health_client)

@@ -400,7 +400,6 @@ def plan_native_settings_update(app_id: str, values: dict[str, Any], *, state_di
     # Settings are consumed by package-declared config templates. A service
     # restart is explicit and ordered after the rendered files, so the plan
     # preview shows the operational effect before approval.
-    package = updated.get("app", {})
     service = updated.get("service")
     if service and updated.get("config"):
         service_name = service.get("name") or app_id

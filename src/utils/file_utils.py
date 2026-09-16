@@ -22,11 +22,10 @@ import errno
 import json
 import os
 import shutil
-from collections import OrderedDict
+import tomllib
 from pathlib import Path
 from typing import Any, TextIO
 
-import toml
 import yaml
 
 from .error import YunohostError
@@ -120,7 +119,7 @@ def read_toml(file_path: str) -> Jsonable:
 
     # Try to load toml to check if it's syntactically correct
     try:
-        loaded_toml = toml.loads(file_content, _dict=OrderedDict)
+        loaded_toml: Any = tomllib.loads(file_content)
     except Exception as e:
         raise YunohostError("corrupted_toml", ressource=file_path, error=str(e))
 

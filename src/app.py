@@ -535,7 +535,7 @@ def app_map(
             continue
         # Users must at least have access to the main permission to have access to extra permissions
         if user:
-            if not app + ".main" in permissions:
+            if app + ".main" not in permissions:
                 logger.warning(
                     f"Uhoh, no main permission was found for app {app} ... sounds like an app was only partially removed due to another bug :/"
                 )

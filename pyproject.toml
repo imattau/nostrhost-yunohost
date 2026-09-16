@@ -32,25 +32,34 @@ dependencies = [
     "dnspython",
     "email-validator",
     "jinja2",
-    "httpx",
+    # HTTP client for the native providers/DNS. Replaces the previously
+    # undeclared `httpx` (nothing provided that module) — the runtime venv
+    # bundles httpx2 (via the MCP SDK), so use it directly.
+    "httpx2>=2",
     "psycopg[binary]",
     "pymysql",
-    "pyjwt>=1.7,<2.0",
+    "pyjwt>=2.0",
     "lexicon",
     "miniupnpc",
     "packaging",
+    # Fallback only: shadow sha512crypt is generated with the stdlib `crypt`
+    # on Python <=3.12 (see utils/password.py); passlib covers 3.13+, where
+    # PEP 594 removed `crypt`, until a libxcrypt/yescrypt binding is adopted.
     "passlib",
     "psutil",
     "publicsuffix2",
-    "pydantic>=1.0,<2.0",
+    "pydantic>=2.0",
     "pyopenssl",
     # "python-ldap",
     "python-magic",
     "pyyaml",
+    # Retained until the vendored acme_tiny ACME client is replaced/removed
+    # (it imports requests); the rest of the tree is migrating to httpx2.
     "requests",
     "sdbus",
     "sortedcollections",
-    "toml",
+    # TOML writing; reads use the stdlib `tomllib` (Python >=3.11).
+    "tomli-w",
     "typer>=0.7",
     "zeroconf",
     "zmq",
@@ -59,13 +68,13 @@ dependencies = [
 [dependency-groups]
 tests = [
     "mypy",
+    "ruff",
     "types-gevent",
     "types-passlib",
     "types-psutil",
     "types-pyOpenSSL",
     "types-pyYAML",
     "types-requests",
-    "types-toml",
     "pytest",
     "mock",
 ]
@@ -96,10 +105,19 @@ module = ["jwt", "sortedcollections", "IPython", "ldap.*", "dbus", "sdbus.*",
 ignore_missing_imports = true
 
 
-[tool.isort]
-profile = "black"
+[tool.ruff]
+target-version = "py311"
+# Matches the scope the previous flake8 run covered. The tree is not yet
+# `ruff format`-clean (the auto-format workflow handles formatting on the dev
+# branch), so ruff here is the linter only.
+exclude = ["src/vendor", "src/migrations", "tests", "tests_nostr"]
 
-[tool.black]
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# E501 (line length) and E402 (imports not at top) were dropped by the old
+# flake8 config; E741 is kept off for the same reason. W503/E203 are handled by
+# the formatter and no longer exist as ruff lint rules.
+ignore = ["E402", "E501", "E741"]
 
 [tool.ty]
 environment.root = ["."]
@@ -139,38 +157,21 @@ omit = [
 
 
 [tool.tox]
-env_list = ["py311-lint", "py311-invalidcode", "py311-black-check", "py311-black-run"]
+env_list = ["py311-lint", "py311-mypy", "py311-format"]
 
 [tool.tox.env_run_base]
 skip_install = true
-allowlist_externals = ["black"]
 
 [tool.tox.env.py311-lint]
-deps = ["flake8"]
-commands = [[
-    "flake8", "src", "doc", "maintenance",
-    "--ignore", "E402,E501,E203,W503,E741",
-    "--exclude", "src/vendor,tests"
-]]
+deps = ["ruff"]
+commands = [["ruff", "check", "src", "bin", "doc", "maintenance"]]
 
-[tool.tox.env.py311-invalidcode]
-deps = ["flake8"]
-commands = [[
-    "flake8", "src", "bin", "maintenance",
-    "--select", "F,E722,W605",
-    "--exclude", "src/vendor,tests"
-]]
+[tool.tox.env.py311-format]
+deps = ["ruff"]
+commands = [["ruff", "format", "--check", "--diff", "src", "bin", "doc", "maintenance", "tests", "tests_nostr"]]
 
 [tool.tox.env.py311-mypy]
 skip_install = false
 deps = ["mypy>=1.17"]
 dependency_groups = ["tests"]
 commands = [["mypy", "--install-types", "--non-interactive", "src/",]]
-
-[tool.tox.env.py311-black-check]
-deps = ["flake8"]
-commands = [["black", "bin", "src", "doc", "maintenance", "tests", "tests_nostr", "--check", "--diff"]]
-
-[tool.tox.env.py311-black-run]
-deps = ["black"]
-commands = [["black", "bin", "src", "doc", "maintenance", "tests", "tests_nostr"]]

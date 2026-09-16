@@ -19,8 +19,9 @@
 #
 
 import json
+import tomllib
 
-import toml
+import tomli_w
 import yaml
 
 """
@@ -49,7 +50,7 @@ def from_toml(value: str):
     """
     Load a string as Toml and return an object
     """
-    return toml.loads(value)
+    return tomllib.loads(value)
 
 
 def to_json(value: object) -> str:
@@ -70,4 +71,4 @@ def to_toml(value) -> str:
     """
     Serialize to string an object to Toml
     """
-    return toml.dumps(value)
+    return tomli_w.dumps(value)

@@ -74,12 +74,26 @@ def assert_password_is_strong_enough(profile: str, password: str) -> None:
 
 
 def _hash_user_password(password: str) -> str:
-    import passlib.hash
+    """Return a ``{CRYPT}`` sha512crypt hash suitable for ``chpasswd -e``.
 
-    # passlib will returns something like:
-    # $6$rounds=656000$AwCIMolbTAyQhtev$46UvYfVgs.k0Bt6fLTekBHyCcCFkix/NNfgAWiICX.9YUPVYZ3PsIAwY99yP5/tXhg2sYBaAhKj6W3kuYWaR3.
-    # cf https://passlib.readthedocs.io/en/stable/modular_crypt_format.html#modular-crypt-format
-    return "{CRYPT}" + passlib.hash.sha512_crypt.hash(password)
+    The result is a shadow-format modular-crypt string, e.g.::
+
+        $6$rounds=656000$AwCIMolbTAyQhtev$46UvYfVgs.k0Bt6fL...
+
+    Prefer the C library's ``crypt(3)`` (glibc / libxcrypt) over the
+    unmaintained ``passlib``: on the supported Python 3.11/3.12 targets it
+    produces the identical 656000-round sha512crypt format. ``crypt`` was
+    removed from the stdlib in Python 3.13 (PEP 594), so fall back to
+    ``passlib`` there until a ``libxcrypt``/yescrypt binding is adopted.
+    """
+    try:
+        import crypt
+    except ImportError:  # Python 3.13+ — crypt was removed from the stdlib
+        import passlib.hash
+
+        return "{CRYPT}" + passlib.hash.sha512_crypt.hash(password)
+
+    return "{CRYPT}" + crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512, rounds=656000))
 
 
 class PasswordValidator:
