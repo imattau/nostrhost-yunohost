@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Optional
@@ -153,16 +151,16 @@ def _validate_revision(revision: str) -> None:
 def fetch_manifest_from_repository(repository: str, revision: str = "", package_path: str = "") -> dict[str, Any]:
     """Shallow-clone a package.toml manifest straight from its repository, so
     authoring a package can start from "here is where it lives" instead of
-    hand-pasting the manifest. Returns the raw (unvalidated-shape) TOML data
-    alongside the same diagnostics `validate_manifest_text` would produce, and
-    the commit the manifest was read at.
-
-    Deliberately independent of the native catalogue CLI's own remote-preview
-    clone (`nostrhost-catalog`'s ReadRemoteMetadata): that tool reads a
-    manifest.toml/manifest.json describing a *legacy* YunoHost-style app, a
-    different, incompatible schema from this project's native package.toml
-    resource manifest (see catalog.declare's docstring). This clones
-    independently and reads package.toml instead.
+    hand-pasting the manifest - the same "paste a repo, we fetch the
+    manifest" method the legacy custom-app-install screen has always used
+    (app_manifest/_extract_app_from_gitrepo in app.py/utils/app_utils.py),
+    adapted to read this project's native package.toml resource schema
+    instead of the legacy manifest.toml/manifest.json one (see
+    catalog.declare's docstring for why those two schemas are incompatible
+    and the native catalogue CLI's own remote-preview clone can't be reused
+    for this either). Returns the raw (unvalidated-shape) TOML data alongside
+    the same diagnostics `validate_manifest_text` would produce, and the
+    commit the manifest was read at.
     """
     if not repository.startswith("https://"):
         raise ValueError("repository must be an https:// URL")
@@ -185,22 +183,28 @@ def fetch_manifest_from_repository(repository: str, revision: str = "", package_
 def _clone_and_read_manifest(repository: str, revision: str, package_path: str) -> tuple[str, str]:
     """Shallow-clone `repository` (any git-cloneable location - the caller
     validates it is an https:// URL before this point) and return
-    (package.toml content, commit). Split out from fetch_manifest_from_repository
-    so tests can exercise the clone/read mechanics against a local repository
-    without weakening the production https:// requirement."""
-    with tempfile.TemporaryDirectory(prefix="nostrhost-package-fetch-") as workdir:
-        clone_cmd = ["git", "clone", "--quiet", "--depth", "1", "--filter=blob:none"]
-        if revision:
-            clone_cmd += ["--branch", revision]
-        clone_cmd += [repository, workdir]
+    (package.toml content, commit).
+
+    Reuses the same clone helpers the legacy custom-app-install flow has
+    always used (_git_clone_light, _make_tmp_workdir_for_app in
+    yunohost.utils.app_utils - see app.app_manifest /
+    _extract_app_from_gitrepo) instead of a bespoke git subprocess call:
+    that gives this the same default-branch resolution, shallow-fetch
+    mechanics, and revision cache the legacy app-install path already
+    relies on. Split out from fetch_manifest_from_repository so tests can
+    exercise the clone/read mechanics against a local repository without
+    weakening the production https:// requirement.
+    """
+    from shutil import rmtree
+
+    from yunohost.utils.app_utils import _git_clone_light, _make_tmp_workdir_for_app
+
+    workdir = _make_tmp_workdir_for_app()
+    try:
         try:
-            proc = subprocess.run(clone_cmd, capture_output=True, timeout=60)
-        except FileNotFoundError:
-            raise ValueError("git is not installed on this host") from None
-        except subprocess.TimeoutExpired:
-            raise ValueError("cloning the repository timed out") from None
-        if proc.returncode != 0:
-            raise ValueError(f"could not clone {repository}: {proc.stderr.decode(errors='replace').strip()}")
+            commit = _git_clone_light(workdir, repository, branch=revision or None)
+        except Exception as exc:
+            raise ValueError(f"could not clone {repository}: {exc}") from exc
 
         manifest_dir = Path(workdir) / package_path if package_path else Path(workdir)
         manifest_file = manifest_dir / "package.toml"
@@ -208,11 +212,8 @@ def _clone_and_read_manifest(repository: str, revision: str, package_path: str) 
             where = f"{package_path}/package.toml" if package_path else "package.toml"
             raise ValueError(f"{where} not found in {repository}" + (f"@{revision}" if revision else ""))
         content = manifest_file.read_text(encoding="utf-8")
-
-        commit_proc = subprocess.run(
-            ["git", "-C", workdir, "rev-parse", "HEAD"], capture_output=True, timeout=10
-        )
-        commit = commit_proc.stdout.decode().strip() if commit_proc.returncode == 0 else ""
+    finally:
+        rmtree(workdir, ignore_errors=True)
 
     return content, commit
 
