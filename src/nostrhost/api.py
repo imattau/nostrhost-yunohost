@@ -142,7 +142,8 @@ def _run_tool(name: str, args: dict[str, Any]) -> Any:
 # parsing, error handling, response post-processing, ...) stays an explicit
 # function below.
 _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
-    ("/package/operations/<request_id>", "audit.get", {"audit_id": "request_id"}),
+    # /package/operations/<request_id> is served by package_operations_get
+    # below (control-relay replay), not a plain audit.get forward.
     ("/package/system/version", "system.version", {}),
     ("/package/system/status", "system.status", {}),
     # Cached apt/app updates + pending-migrations flag (no network refresh).
@@ -588,35 +589,15 @@ def build_app(
         return response
 
     # -- operations (audit history + pending approvals) ----------------------
-
-    @app.get("/package/operations")
-    def operations_list() -> Any:
-        limit_param = request.query.get("limit")
-        try:
-            limit = int(limit_param) if limit_param else None
-        except ValueError:
-            raise ApiError(400, "invalid_query", "'limit' must be an integer")
-        return _run_tool("audit.list", {"limit": limit})
-
-    # (operations/<request_id> GET -> audit.get: see _SIMPLE_GET_FORWARDS)
-
-    @app.post("/package/operations/<request_id>/approve")
-    def operations_approve(request_id: str) -> Any:
-        body = _json_body()
-        try:
-            event = approve_operation(request_id, note=body.get("note"))
-        except OperationError as exc:
-            raise ApiError(400, "operation_failed", str(exc)) from exc
-        return {"ok": True, "request_id": request_id, "event_id": event.get("id")}
-
-    @app.post("/package/operations/<request_id>/reject")
-    def operations_reject(request_id: str) -> Any:
-        body = _json_body()
-        try:
-            event = reject_operation(request_id, reason=body.get("reason"))
-        except OperationError as exc:
-            raise ApiError(400, "operation_failed", str(exc)) from exc
-        return {"ok": True, "request_id": request_id, "event_id": event.get("id")}
+    #
+    # The real handlers for GET/POST /package/operations... (list, get,
+    # approve, reject) are registered further down, alongside the
+    # approval/rejection-template routes they share context with — see the
+    # "operations (kind-2200..2204 approval chain)" section below. Bottle
+    # resolves duplicate route registrations by registration order, so a
+    # second definition here would silently shadow (for approve/reject) or
+    # be shadowed by (for the exact-static list route) that one; do not
+    # re-add plain audit.list/audit.get forwards for these paths.
 
     # -- system -------------------------------------------------------------
 
