@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from glob import glob
 from logging import getLogger
@@ -32,12 +33,10 @@ from nostrhost.i18n import tr
 from .diagnosis import Diagnoser
 from .log import OperationLogger
 from .regenconf import regen_conf
-from .service import _run_service_command
 from .utils.error import YunohostError, YunohostValidationError
-from .utils.file_utils import chmod, chown, read_file
+from .utils.file_utils import chmod, chown
 from .utils.network import get_public_ip
 from .utils.process import check_output
-from .vendor.acme_tiny.acme_tiny import get_crt as sign_certificate
 
 if TYPE_CHECKING:
     from .utils.logging import YunohostLogger
@@ -47,20 +46,12 @@ else:
     logger = getLogger("yunohost.certmanager")
 
 CERT_FOLDER = "/etc/yunohost/certs/"
-TMP_FOLDER = "/var/www/.well-known/acme-challenge-private/"
-WEBROOT_FOLDER = "/var/www/.well-known/acme-challenge-public/"
 
 SELF_CA_FILE = "/etc/ssl/certs/ca-yunohost_crt.pem"
-ACCOUNT_KEY_FILE = "/etc/yunohost/letsencrypt_account.pem"
 
 SSL_DIR = "/usr/share/yunohost/ssl"
 
-KEY_SIZE = 4096
-
 VALIDITY_LIMIT = 15  # days
-
-# For prod
-PRODUCTION_CERTIFICATION_AUTHORITY = "https://acme-v02.api.letsencrypt.org"
 
 #
 # Front-end stuff                                                           #
@@ -255,9 +246,6 @@ def _certificate_install_selfsigned(domain_list, force=False):
 
 def _certificate_install_letsencrypt(domains, force=False, no_checks=False):
     from .domain import _assert_domain_exists, domain_list
-
-    if not os.path.exists(ACCOUNT_KEY_FILE):
-        _generate_account_key()
 
     # If no domains given, consider all yunohost domains with self-signed
     # certificates
@@ -501,155 +489,50 @@ investigate :
 
 
 def _check_acme_challenge_configuration(domain):
-    domain_conf = f"/etc/nginx/conf.d/{domain}.conf"
-    return "include /etc/nginx/conf.d/acme-challenge.conf.inc" in read_file(domain_conf)
+    # Caddy owns the ACME HTTP-01 challenge for the domains it serves; there is
+    # no nginx/ACME-challenge config to check anymore.
+    return True
 
 
 def _fetch_and_enable_new_certificate(domain, no_checks=False):
-    if not os.path.exists(ACCOUNT_KEY_FILE):
-        _generate_account_key()
+    """Ensure Caddy serves the domain's certificate, then export it.
 
-    # Make sure tmp folder exists
-    logger.debug("Making sure tmp folders exists...")
+    Caddy is the platform TLS layer: it provisions and renews certificates
+    automatically for every domain it serves (ACME for public domains, its
+    local CA otherwise), so no separate ACME client is involved here. Ensuring
+    the domain's Caddy site exists triggers provisioning; the resulting
+    certificate is exported into the ``/etc/yunohost/certs`` store that non-web
+    consumers read (``nostr_certd``).
+    """
+    from nostrhost.caddy_admin import CaddyAdminClient
 
-    if not os.path.exists(WEBROOT_FOLDER):
-        os.makedirs(WEBROOT_FOLDER)
-
-    if not os.path.exists(TMP_FOLDER):
-        os.makedirs(TMP_FOLDER)
-
-    _set_permissions(WEBROOT_FOLDER, "root", "www-data", 0o650)
-    _set_permissions(TMP_FOLDER, "root", "root", 0o640)
+    from .nostr_certd import export_domain
 
     # Regen conf for dnsmasq if needed
     _regen_dnsmasq_if_needed()
 
-    # Prepare certificate signing request
-    logger.debug("Prepare key and certificate signing request (CSR) for %s...", domain)
-
-    domain_key_file = f"{TMP_FOLDER}/{domain}.pem"
-    _generate_key(domain_key_file)
-    _set_permissions(domain_key_file, "root", "ssl-cert", 0o640)
-
-    _prepare_certificate_signing_request(domain, domain_key_file, TMP_FOLDER)
-
-    # Sign the certificate
-    logger.debug("Now using ACME Tiny to sign the certificate...")
-
-    domain_csr_file = f"{TMP_FOLDER}/{domain}.csr"
-
     try:
-        signed_certificate = sign_certificate(
-            ACCOUNT_KEY_FILE,
-            domain_csr_file,
-            WEBROOT_FOLDER,
-            log=logger,
-            disable_check=no_checks,
-            CA=PRODUCTION_CERTIFICATION_AUTHORITY,
-        )
-    except ValueError as e:
-        if "urn:acme:error:rateLimited" in str(e):
-            raise YunohostError("certmanager_hit_rate_limit", domain=domain)
-        else:
-            logger.error(str(e))
-            raise YunohostError("certmanager_cert_signing_failed")
-
+        CaddyAdminClient().ensure_domain_site(domain)
     except Exception as e:
-        logger.error(str(e))
+        logger.error("Failed to ensure the Caddy site for %s: %s", domain, e)
+        raise YunohostError("certmanager_cert_signing_failed") from e
 
-        raise YunohostError("certmanager_cert_signing_failed")
-
-    # Now save the key and signed certificate
-    logger.debug("Saving the key and signed certificate...")
-
-    # Create corresponding directory
-    date_tag = datetime.utcnow().strftime("%Y%m%d.%H%M%S")
-
-    new_cert_folder = f"{CERT_FOLDER}/{domain}-history/{date_tag}-letsencrypt"
-
-    os.makedirs(new_cert_folder)
-
-    _set_permissions(new_cert_folder, "root", "root", 0o655)
-
-    # Move the private key
-    domain_key_file_finaldest = os.path.join(new_cert_folder, "key.pem")
-    shutil.move(domain_key_file, domain_key_file_finaldest)
-    _set_permissions(domain_key_file_finaldest, "root", "ssl-cert", 0o640)
-
-    # Write the cert
-    domain_cert_file = os.path.join(new_cert_folder, "crt.pem")
-
-    with open(domain_cert_file, "w") as f:
-        f.write(signed_certificate)
-
-    _set_permissions(domain_cert_file, "root", "ssl-cert", 0o640)
-
-    _enable_certificate(domain, new_cert_folder)
-
-    # Check the status of the certificate is now good
-    status_style = _get_status(domain)["style"]
-
-    if status_style != "success":
-        raise YunohostError(
-            "certmanager_certificate_fetching_or_enabling_failed", domain=domain
-        )
-
-
-def _prepare_certificate_signing_request(domain, key_file, output_folder):
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.x509.oid import NameOID
-
-    from .hook import hook_callback
-
-    builder = x509.CertificateSigningRequestBuilder().subject_name(
-        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)])
-    )
-
-    sanlist = []
-    hook_results = hook_callback("cert_alternate_names", env={"domain": domain})
-    for hook_name, results in hook_results.items():
-        #
-        # There can be multiple results per hook name, so results look like
-        # {'/some/path/to/hook1':
-        #       { 'state': 'succeed',
-        #         'stdreturn': ["foo", "bar"]
-        #       },
-        #  '/some/path/to/hook2':
-        #       { ... },
-        #  [...]
-        #
-        # Loop over the sub-results
-        for result in results.values():
-            if result.get("stdreturn"):
-                sanlist += result["stdreturn"]
-
-    if sanlist:
-        subsanlist = [f"DNS:{sub}.{domain}" for sub in sanlist if "." not in sub]
-        # This is meant for situation such as cryptpad where we need to be able to have a cert for sandbox-domain.tld (with a dash, not just sandbox.domain.tld)
-        domainsanlist = [f"DNS:{domain}" for domain in sanlist if "." in domain]
-        builder = builder.add_extension(
-            x509.SubjectAlternativeName(
-                [
-                    x509.DNSName(name.removeprefix("DNS:"))
-                    for name in subsanlist + domainsanlist
-                ]
-            ),
-            critical=False,
-        )
-
-    # Set the key
-    with open(key_file, "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
-
-    csr = builder.sign(key, hashes.SHA256())
-
-    # Save the request in tmp folder
-    csr_file = output_folder + domain + ".csr"
-    logger.debug("Saving to %s.", csr_file)
-
-    with open(csr_file, "wb") as f:
-        f.write(csr.public_bytes(serialization.Encoding.PEM))
+    # Caddy provisions asynchronously (near-instant for its local CA; a public
+    # ACME HTTP-01 challenge takes longer), so poll for the exported cert.
+    deadline = time.monotonic() + 60
+    while True:
+        export_domain(domain)
+        try:
+            status_style = _get_status(domain)["style"]
+        except YunohostError:
+            status_style = None
+        if status_style in ("success", "warning"):
+            return
+        if time.monotonic() >= deadline:
+            raise YunohostError(
+                "certmanager_certificate_fetching_or_enabling_failed", domain=domain
+            )
+        time.sleep(2)
 
 
 def _get_status(domain):
@@ -681,9 +564,10 @@ def _get_status(domain):
     cert_subject = subject_cn[0].value if subject_cn else ""
     cert_issuer = issuer_cn[0].value if issuer_cn else ""
     organization_name = issuer_organization[0].value if issuer_organization else ""
-    valid_up_to = cert.not_valid_after
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    valid_up_to = cert.not_valid_after_utc
+    now = datetime.now(timezone.utc)
     days_remaining = (valid_up_to - now).days
+    expired = valid_up_to <= now
 
     # Identify that a domain's cert is self-signed if the cert dir
     # is actually a symlink to a dir ending with -selfsigned
@@ -694,7 +578,7 @@ def _get_status(domain):
     else:
         CA_type = "other"
 
-    if days_remaining <= 0:
+    if expired:
         style = "danger"
         summary = "expired"
     elif CA_type == "selfsigned":
@@ -730,28 +614,6 @@ def _get_status(domain):
 #
 
 
-def _generate_account_key():
-    logger.debug("Generating account key ...")
-    _generate_key(ACCOUNT_KEY_FILE)
-    _set_permissions(ACCOUNT_KEY_FILE, "root", "root", 0o400)
-
-
-def _generate_key(destination_path):
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=KEY_SIZE)
-
-    with open(destination_path, "wb") as f:
-        f.write(
-            key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-
-
 def _set_permissions(path, user, group, permissions):
     chown(path, user, group)
     chmod(path, permissions)
@@ -775,17 +637,8 @@ def _enable_certificate(domain, new_cert_folder):
 
     os.symlink(new_cert_folder, live_link)
 
-    logger.debug("Restarting services...")
-
-    if os.path.isfile("/etc/yunohost/installed"):
-        # regen nginx conf to be sure it integrates OCSP Stapling
-        # (We don't do this yet if postinstall is not finished yet)
-        # We also regenconf for postfix to propagate the SNI hash map thingy
-        regen_conf(names=["nginx", "postfix"])
-
-    _run_service_command("reload", "nginx")
-    _run_service_command("restart", "dovecot")
-
+    # The web server is Caddy, which owns TLS itself and reads its own storage;
+    # the exported store is for non-web consumers, so only notify them.
     from .hook import hook_callback
 
     hook_callback("post_cert_update", args=[domain])

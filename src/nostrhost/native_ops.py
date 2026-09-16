@@ -1677,8 +1677,13 @@ def _safe_domain_cert_info(domain: str = "", **extra: Any) -> dict[str, Any]:
     if not domain:
         raise OperationError("domain.cert.info requires a 'domain'")
     from yunohost.certificate import certificate_status
+    from yunohost.utils.error import YunohostError
 
-    certs = (certificate_status([domain], full=True) or {}).get("certificates") or {}
+    try:
+        certs = (certificate_status([domain], full=True) or {}).get("certificates") or {}
+    except YunohostError as exc:
+        # Caddy has not provisioned/exported a certificate for the domain yet.
+        return {"domain": domain, "certificate": None, "error": str(exc)}
     return {"domain": domain, "certificate": certs.get(domain)}
 
 
@@ -1689,21 +1694,45 @@ def _safe_domain_cert_install(domain: str = "", letsencrypt: bool = True, stagin
     if not domain:
         raise OperationError("domain.cert.install requires a 'domain'")
     if staging:
-        raise OperationError("staging certificates are not supported: this YunoHost has no ACME staging endpoint configured")
+        raise OperationError("staging certificates are not supported: Caddy owns ACME and uses its configured CA")
     from yunohost.certificate import certificate_install, certificate_status
+    from yunohost.utils.error import YunohostError
 
+    # Caddy is the platform TLS layer and provisions/renews automatically: the
+    # op ensures the domain's Caddy site exists and exports the resulting cert.
+    # There is no separate self-signed-vs-ACME choice here (Caddy's policy
+    # decides per domain), so `letsencrypt` only annotates the result.
     acme_error = None
     try:
-        certificate_install(domain_list=[domain], force=True, self_signed=not bool(letsencrypt))
+        certificate_install(domain_list=[domain], force=True, no_checks=True)
     except Exception as exc:  # noqa: BLE001 - surface ACME failure via acme_error + reconciled status
         acme_error = str(exc)
-    certs = (certificate_status([domain], full=True) or {}).get("certificates") or {}
+    try:
+        certs = (certificate_status([domain], full=True) or {}).get("certificates") or {}
+    except YunohostError:
+        certs = {}
     return {
         "domain": domain,
         "requested": "letsencrypt" if letsencrypt else "selfsigned",
         "acme_error": acme_error,
         "certificate": certs.get(domain),
     }
+
+
+def _safe_domain_primary_set(domain: str = "", **extra: Any) -> dict[str, Any]:
+    if extra or not domain:
+        raise OperationError("domain.primary.set requires a domain")
+    from nostrhost.domains.primary import apply_primary
+
+    return apply_primary(domain)
+
+
+def _safe_nostr_connectivity_set(configuration: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+    if extra or not isinstance(configuration, dict):
+        raise OperationError("nostr.connectivity.set requires a configuration object")
+    from nostrhost.connectivity import apply_config
+
+    return apply_config(configuration)
 
 
 def _safe_user_update(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -59,24 +60,57 @@ def test_certd_reads_leaf_expiry_and_issuer_with_cryptography(tmp_path):
     _write_certificate(cert_path)
 
     assert nostr_certd._leaf_issuer(cert_path) == "Test Root"
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     assert nostr_certd._leaf_not_after(cert_path) > now
 
 
-def test_generated_key_and_csr_are_standard_pem(tmp_path, monkeypatch):
-    key_path = tmp_path / "key.pem"
-    certificate._generate_key(key_path)
-    monkeypatch.setattr("yunohost.hook.hook_callback", lambda *args, **kwargs: {})
+def test_fetch_certificate_delegates_to_caddy(monkeypatch):
+    """Issuance is delegated to Caddy: ensure the domain site, export the cert."""
+    from yunohost import nostr_certd
 
-    certificate._prepare_certificate_signing_request(
-        "example.test", str(key_path), f"{tmp_path}/"
-    )
+    calls = {}
 
-    key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-    csr = x509.load_pem_x509_csr((tmp_path / "example.test.csr").read_bytes())
-    assert key.key_size == certificate.KEY_SIZE
-    assert (
-        csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        == "example.test"
-    )
-    assert csr.is_signature_valid
+    class FakeClient:
+        def ensure_domain_site(self, domain):
+            calls["site"] = domain
+
+    monkeypatch.setattr("nostrhost.caddy_admin.CaddyAdminClient", lambda: FakeClient())
+    monkeypatch.setattr(certificate, "_regen_dnsmasq_if_needed", lambda: None)
+    monkeypatch.setattr(certificate, "_get_status", lambda domain: {"style": "success"})
+    monkeypatch.setattr(nostr_certd, "export_domain", lambda domain, dry_run=False: True)
+
+    certificate._fetch_and_enable_new_certificate("example.test")
+
+    assert calls["site"] == "example.test"
+
+
+def test_fetch_certificate_raises_when_caddy_has_no_cert(monkeypatch):
+    from yunohost import nostr_certd
+    from yunohost.utils.error import YunohostError
+
+    class FakeTime:
+        def __init__(self):
+            self.t = 0.0
+
+        def monotonic(self):
+            return self.t
+
+        def sleep(self, seconds):
+            self.t += seconds
+
+    class FakeClient:
+        def ensure_domain_site(self, domain):
+            return None
+
+    monkeypatch.setattr(certificate, "time", FakeTime())
+    monkeypatch.setattr("nostrhost.caddy_admin.CaddyAdminClient", lambda: FakeClient())
+    monkeypatch.setattr(certificate, "_regen_dnsmasq_if_needed", lambda: None)
+    monkeypatch.setattr(nostr_certd, "export_domain", lambda domain, dry_run=False: False)
+
+    def no_cert(_domain):
+        raise YunohostError("certmanager_no_cert_file")
+
+    monkeypatch.setattr(certificate, "_get_status", no_cert)
+
+    with pytest.raises(YunohostError):
+        certificate._fetch_and_enable_new_certificate("example.test")

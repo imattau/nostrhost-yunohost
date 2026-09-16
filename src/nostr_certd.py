@@ -44,11 +44,11 @@ CADDY_CERT_DIR = CADDY_STORAGE / "certificates"
 
 
 def _leaf_not_after(crt_path: Path) -> datetime:
-    """Not-after of the leaf (first) certificate in a PEM chain, naive-UTC."""
+    """Not-after of the leaf (first) certificate in a PEM chain, aware-UTC."""
     from cryptography import x509
 
     cert = x509.load_pem_x509_certificate(crt_path.read_bytes())
-    return cert.not_valid_after
+    return cert.not_valid_after_utc
 
 
 def _leaf_issuer(crt_path: Path) -> str:
