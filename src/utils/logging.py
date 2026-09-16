@@ -115,11 +115,6 @@ def init_logging(
         },
     }
 
-    if interface == "api":
-        from .sse import start_log_broker
-
-        start_log_broker()
-
     # add custom logging level and class
     addLevelName(SUCCESS, "SUCCESS")
     setLoggerClass(YunohostLogger)

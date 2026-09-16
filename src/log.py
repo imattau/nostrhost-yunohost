@@ -25,7 +25,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from io import IOBase
-from logging import INFO, FileHandler, Formatter, getLogger
+from logging import FileHandler, Formatter, getLogger
 from typing import Any
 
 import psutil
@@ -36,7 +36,6 @@ from nostrhost.core import NostrHostError
 
 from .utils.error import YunohostError, YunohostValidationError
 from .utils.file_utils import read_file, read_yaml
-from .utils.logging import SUCCESS
 from .utils.system import get_ynh_package_version
 
 logger = getLogger("yunohost.log")
@@ -616,7 +615,6 @@ class OperationLogger:
         self.ended_at = None
         self.logger = None
         self.file_handler = None
-        self.sse_handler = None
         self._name = None
         self.sse_only = sse_only
         self.flash = flash
@@ -712,12 +710,6 @@ class OperationLogger:
             self.started_at = datetime.utcnow()
             self.flush()
             self._register_log()
-            if self.sse_handler is not None and not self.flash:
-                self.sse_handler.emit_operation_start(
-                    self.started_at,
-                    _get_description_from_name(self.name),
-                    self.started_by,
-                )
 
     @property
     def md_path(self):
@@ -748,23 +740,10 @@ class OperationLogger:
                 "%(asctime)s: %(levelname)s - %(message)s", self.data_to_redact
             )
 
-        # Only do this one for the main parent operation
-        if not self.parent:
-            from .utils.sse import SSELogStreamingHandler
-
-            self.sse_handler = SSELogStreamingHandler(self.name, flash=self.flash)
-            self.sse_handler.level = INFO if not self.flash else SUCCESS
-            self.sse_handler.formatter = RedactingFormatter(
-                "%(message)s", self.data_to_redact
-            )
-
         # Listen to the root logger
         self.logger = getLogger("yunohost")
         if self.file_handler is not None:
             self.logger.addHandler(self.file_handler)
-
-        if self.sse_handler is not None:
-            self.logger.addHandler(self.sse_handler)
 
     def flush(self):
         """
@@ -884,20 +863,9 @@ class OperationLogger:
         self._error = error
         self._success = error is None
 
-        if self.sse_handler is not None:
-            if not self.flash:
-                self.sse_handler.emit_operation_end(
-                    self.ended_at, self._success, self._error
-                )
-            elif self._error:
-                self.sse_handler.emit_error_toast(self._error)
-
         if self.file_handler is not None:
             self.logger.removeHandler(self.file_handler)
             self.file_handler.close()
-        if self.sse_handler is not None:
-            self.logger.removeHandler(self.sse_handler)
-            self.sse_handler.close()
 
         if not self.flash:
             is_api = Moulinette.interface.type == "api"

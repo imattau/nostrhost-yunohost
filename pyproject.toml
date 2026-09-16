@@ -61,7 +61,6 @@ dependencies = [
     "tomli-w",
     "typer>=0.7",
     "zeroconf",
-    "zmq",
 ]
 
 [dependency-groups]

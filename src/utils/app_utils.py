@@ -1463,7 +1463,7 @@ def _display_notifications(notifications: dict[str, str], force=False) -> None:
 
     # i18n: confirm_notifications_read
     _ask_confirmation(
-        "confirm_notifications_read", kind="simple", force=force, inform_sse=True
+        "confirm_notifications_read", kind="simple", force=force
     )
 
 
@@ -1472,7 +1472,6 @@ def _ask_confirmation(
     params: dict = {},
     kind: Literal["simple", "soft", "hard"] = "hard",
     force: bool = False,
-    inform_sse: bool = False,
 ) -> None:
     """
     Ask confirmation
@@ -1491,29 +1490,6 @@ def _ask_confirmation(
     # skip confirmation (except in hard mode)
     if not os.isatty(1) and kind in ["simple", "soft"]:
         return
-
-    if inform_sse:
-        import logging
-
-        from ..log import OperationLogger
-
-        active_sse_handlers = [
-            o.sse_handler
-            for o in OperationLogger._instances
-            if o.sse_handler and o.started_at is not None and o.ended_at is None
-        ]
-        if active_sse_handlers:
-            active_sse_handlers[0].emit(
-                logging.LogRecord(
-                    "?",
-                    logging.INFO,
-                    "",
-                    0,
-                    "The CLI is currently waiting for confirmation before continuing.",
-                    {},
-                    None,
-                )
-            )
 
     if kind == "simple":
         answer = Moulinette.prompt(
