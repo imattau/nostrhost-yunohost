@@ -42,8 +42,10 @@ NOTICE_CONFIG = "/etc/nostrhost/portal.toml"
 # (execution.progress) is included so the operations daemon's progress
 # publishes are acknowledged — in allowlist mode the relay silently drops
 # disallowed kinds without an OK, so omitting 2205 makes every op stall on
-# the unacknowledged progress publish.
-CONTROL_KINDS = [2200, 2201, 2202, 2203, 2204, 2205, 2206, 2210, 2211, 2212, 2213, 31100, 31102, 30617, 2214]
+# the unacknowledged progress publish. 10000 (the operator's NIP-51 mute
+# list) is accepted so the nsite.discover npub blocklist can live on the
+# control relay.
+CONTROL_KINDS = [2200, 2201, 2202, 2203, 2204, 2205, 2206, 2210, 2211, 2212, 2213, 31100, 31102, 30617, 2214, 10000]
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")
 

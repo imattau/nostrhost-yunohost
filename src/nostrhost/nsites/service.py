@@ -24,7 +24,9 @@ import re
 import secrets
 import socket
 import subprocess
+import threading
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -56,6 +58,30 @@ _SITE_DIR = "sites"
 # after validation and per-site dedupe. Independent of the per-relay fetch
 # limit; keeps the on-demand scan bounded and the response small.
 DISCOVER_MAX_SITES = 200
+
+# Server-side TTL cache for nsite.discover. The relay scan + validation + blob
+# probes are expensive (~15s), and the catalogue is re-read every time a user
+# returns to the Browse tab; a 5-minute cache makes revisits instant. Keyed by
+# the effective relay set + blocklist fingerprint so a config or block change
+# invalidates it. ``refresh=True`` bypasses the cache (manual Refresh).
+DISCOVER_CACHE_TTL = 300
+
+# Blob-existence probe bounds for nsite.discover: at most ``MAX_PATHS`` paths
+# (index.html first) on at most ``MAX_SERVERS`` advertised server hints per
+# site, a per-probe timeout, and a hard wall-clock budget for the whole probe
+# phase so a scan of a slow/absent Blossom server cannot blow the request
+# budget. Sites whose blobs are unreachable everywhere are dropped; sites with
+# no server hints (or an exhausted budget) are kept as ``blobs_ok=None``.
+DISCOVER_BLOB_MAX_PATHS = 3
+DISCOVER_BLOB_MAX_SERVERS = 3
+DISCOVER_BLOB_PROBE_TIMEOUT = 3.0
+DISCOVER_BLOB_PHASE_TIMEOUT = 8.0
+
+# Module-level discover cache: persists across the transient ``NsiteService``
+# instances the operations layer builds per call, so the API (single uvicorn
+# worker) and repeated calls share one warm cache.
+_discover_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_discover_cache_lock = threading.Lock()
 
 # Phase 3b draft area (implementation plan §3.2 / D6): the one fixed
 # server-side file path involved in publishing. The Admin agent writes site
@@ -379,6 +405,120 @@ def _http_probe(url: str, timeout: float = 5.0, *, allow_private: bool = False) 
         return {"url": url, "ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "ok": False, "error": str(exc)}
+
+
+def _blob_probe(server_url: str, blob_hash: str, timeout: float = 3.0) -> dict[str, Any]:
+    """HEAD one Blossom blob (``https://<server>/<sha256>``), IP-pinned (M10).
+
+    Blossom servers address blobs by their sha256. ``HEAD`` first; servers that
+    reject HEAD (405/501) get a single-byte ranged GET (``Range: bytes=0-0``),
+    accepting 200/206. Server hints are untrusted manifest data, so the probe
+    validates the URL and pins the connection exactly like ``_http_probe``.
+
+    Returns ``{"ok", "status", "error", "definite"}`` where ``definite`` is
+    False when the outcome is inconclusive (invalid/private URL — can't check;
+    timeout — transient). Only definite failures (an HTTP status >= 400, a
+    refused connection, or an unresolvable host) count against a site.
+    """
+    url = server_url.rstrip("/") + "/" + blob_hash
+    try:
+        opener = _pinned_probe_opener(url, allow_private=False)
+        try:
+            with opener.open(urllib.request.Request(url, method="HEAD"), timeout=timeout) as resp:  # noqa: S310
+                return {"ok": True, "status": resp.status, "definite": True}
+        except urllib.error.HTTPError as exc:
+            if exc.code in (405, 501):
+                req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})  # noqa: S310
+                try:
+                    with opener.open(req, timeout=timeout) as resp:
+                        return {"ok": resp.status in (200, 206), "status": resp.status, "definite": True}
+                except urllib.error.HTTPError as exc2:
+                    return {"ok": False, "status": exc2.code, "error": str(exc2), "definite": True}
+            return {"ok": False, "status": exc.code, "error": str(exc), "definite": True}
+    except NsiteError as exc:
+        return {"ok": False, "status": None, "error": str(exc), "definite": False}
+    except (TimeoutError, urllib.error.URLError) as exc:
+        return {"ok": False, "status": None, "error": str(exc), "definite": False}
+    except (ConnectionRefusedError, socket.gaierror) as exc:
+        return {"ok": False, "status": None, "error": str(exc), "definite": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": None, "error": str(exc), "definite": False}
+
+
+def _site_blob_probes(event: dict[str, Any], verdict: Any) -> list[tuple[str, str]]:
+    """The bounded (server, blob_hash) probe grid for one validated site.
+
+    Up to ``DISCOVER_BLOB_MAX_SERVERS`` ``server`` hints x up to
+    ``DISCOVER_BLOB_MAX_PATHS`` paths (``/index.html`` probed first). Returns
+    an empty list when the manifest advertises no server hints.
+    """
+    servers: list[str] = []
+    tags = event.get("tags") or []
+    for tag in tags:
+        if not isinstance(tag, list) or not tag or not isinstance(tag[0], str):
+            continue
+        if tag[0] == "server" and len(tag) > 1 and isinstance(tag[1], str) and len(servers) < DISCOVER_BLOB_MAX_SERVERS:
+            servers.append(tag[1])
+    by_hash = {path: blob for path, blob in verdict.paths}
+    ordered = sorted(by_hash, key=lambda p: (p != "/index.html", p))[: DISCOVER_BLOB_MAX_PATHS]
+    probes: list[tuple[str, str]] = []
+    for server in servers:
+        for path in ordered:
+            blob = by_hash.get(path)
+            if blob:
+                probes.append((server, blob))
+    return probes
+
+
+def _site_blob_check(
+    event: dict[str, Any],
+    verdict: Any,
+    deadline: float,
+) -> tuple[bool | None, int, bool]:
+    """Probe one site's blobs until success, definite failure, or budget end.
+
+    Returns ``(blobs_ok, checked, truncated)``:
+      - ``True``  — at least one blob confirmed (2xx) on an advertised server.
+      - ``False`` — every probe was a *definite* failure (no blob anywhere).
+      - ``None``  — unverifiable: no server hints, an inconclusive probe
+        (invalid/private URL, timeout), or the phase deadline was hit.
+    ``checked`` is the number of probes actually sent; ``truncated`` marks a
+    deadline bail-out so the caller can surface partial verification.
+    """
+    probes = _site_blob_probes(event, verdict)
+    if not probes:
+        return None, 0, False
+    checked = 0
+    for server, blob_hash in probes:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None, checked, True
+        result = _blob_probe(server, blob_hash, timeout=min(DISCOVER_BLOB_PROBE_TIMEOUT, max(0.5, remaining)))
+        checked += 1
+        if result.get("ok"):
+            return True, checked, False
+        if not result.get("definite", False):
+            return None, checked, False
+    return False, checked, False
+
+
+def _operator_blocklist() -> frozenset[str]:
+    """The operator's NIP-51 kind-10000 mute list (blocked pubkeys).
+
+    Read from the local control relay, best-effort: any hiccup yields an empty
+    set so ``nsite.discover`` never fails over the blocklist.
+    """
+    from .blocklist import current_blocklist
+
+    try:
+        return frozenset(current_blocklist())
+    except Exception:  # noqa: BLE001 - best-effort read
+        return frozenset()
+
+
+def _discover_cache_key(scan_relays: list[str], blocked: frozenset[str]) -> str:
+    material = "\n".join([*sorted(scan_relays), *sorted(blocked)])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _draft_path_is_bad(path: str) -> bool:
@@ -1744,15 +1884,24 @@ class NsiteService:
         limit: int = 200,
         max_relays: int = 6,
         timeout: float = 8.0,
+        refresh: bool = False,
     ) -> dict[str, Any]:
         """Discover nsite manifests (kinds 15128/35128) from the relays.
 
         On-demand, bounded read — no state is written. Scans the
         operator-trusted catalogue + nsite-lookup relay sets, validates every
         candidate with the full NIP-5A checks, keeps the newest valid manifest
-        per site (pubkey + d), and returns bounded metadata only. Untrusted
-        free text (manifest ``content``, oversized ``title``) never leaves this
-        method, so the result is safe to render and to ship through MCP.
+        per site (pubkey + d), drops sites whose blobs are unreachable on every
+        advertised Blossom server (bounded, SSRF-safe probes) and the operator's
+        blocked npubs (NIP-51 kind-10000 mute list), and returns bounded
+        metadata only. Untrusted free text (manifest ``content``, oversized
+        ``title``) never leaves this method, so the result is safe to render
+        and to ship through MCP.
+
+        Results are cached for ``DISCOVER_CACHE_TTL`` seconds, keyed by the
+        effective relay set + blocklist fingerprint, so returning to the
+        catalogue is instant; ``refresh=True`` bypasses the cache (the admin
+        Refresh button / ``--refresh``).
         """
         from ..connectivity import effective as effective_connectivity
         from .manifest import validate_manifest as _validate
@@ -1770,6 +1919,17 @@ class NsiteService:
                 relays.append(url)
 
         scan_relays = relays[:max_relays]
+        blocked = _operator_blocklist()
+        cache_key = _discover_cache_key(scan_relays, blocked)
+        now = time.time()
+        with _discover_cache_lock:
+            cached = _discover_cache.get(cache_key)
+            if cached is not None and not refresh and (now - cached[0]) < DISCOVER_CACHE_TTL:
+                payload = dict(cached[1])
+                payload["cached"] = True
+                payload["cached_at"] = int(cached[0])
+                return payload
+
         # Concurrent relay fetch: a serial scan would take ~relays × timeout
         # (up to ~48s with max_relays=6 and an 8s per-relay deadline), routinely
         # overrunning the admin client's request timeout. Querying the relays
@@ -1817,20 +1977,59 @@ class NsiteService:
             ):
                 newest[key] = (created_at, event_id, event, verdict)
 
-        sites: list[dict[str, Any]] = []
+        # Drop blocked pubkeys, then verify blob existence (bounded, parallel,
+        # under one phase deadline) for everything that remains.
+        kept: list[tuple[dict[str, Any], Any]] = []
         for pubkey, d in newest:
             _created_at, _event_id, event, verdict = newest[(pubkey, d)]
-            meta = _site_metadata(event, verdict, registered_keys)
-            if meta:
-                sites.append(meta)
+            if pubkey in blocked:
+                continue
+            kept.append((event, verdict))
+
+        blob_stats: dict[str, int | bool] = {
+            "checked": 0,
+            "ok": 0,
+            "unknown": 0,
+            "excluded": 0,
+            "blocked": len(newest) - len(kept),
+            "truncated": False,
+        }
+        sites: list[dict[str, Any]] = []
+        if kept:
+            blob_deadline = time.time() + DISCOVER_BLOB_PHASE_TIMEOUT
+            with ThreadPoolExecutor(max_workers=min(16, len(kept))) as pool:
+                futures = {
+                    pool.submit(_site_blob_check, event, verdict, blob_deadline): (event, verdict)
+                    for event, verdict in kept
+                }
+                for future, (event, verdict) in futures.items():
+                    ok, checked, truncated = future.result()
+                    blob_stats["checked"] = int(blob_stats["checked"]) + checked
+                    blob_stats["truncated"] = bool(blob_stats["truncated"]) or truncated
+                    if ok is False:
+                        blob_stats["excluded"] = int(blob_stats["excluded"]) + 1
+                        continue
+                    blob_stats["ok" if ok else "unknown"] = int(blob_stats["ok" if ok else "unknown"]) + 1
+                    meta = _site_metadata(event, verdict, registered_keys)
+                    if meta:
+                        meta["blobs_ok"] = ok
+                        meta["blobs_checked"] = checked
+                        sites.append(meta)
+
         sites.sort(key=lambda site: (-site["created_at"], site["label"] or ""))
         truncated = len(sites) > DISCOVER_MAX_SITES
-        return {
+        payload: dict[str, Any] = {
             "sites": sites[:DISCOVER_MAX_SITES],
             "relays_queried": scan_relays,
             "count": len(sites[:DISCOVER_MAX_SITES]),
             "truncated": truncated,
+            "blob_check": blob_stats,
+            "cached": False,
+            "cached_at": None,
         }
+        with _discover_cache_lock:
+            _discover_cache[cache_key] = (now, payload)
+        return payload
 
     def reachability(
         self,

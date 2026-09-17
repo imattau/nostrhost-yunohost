@@ -162,8 +162,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/nsite/gateway/status", "nsite.gateway.status", {}),
     # Registered sites and the gateway mode.
     ("/package/nsite/list", "nsite.list", {}),
-    # Validated nsite manifests discovered on the catalogue + lookup relays.
-    ("/package/nsite/discover", "nsite.discover", {}),
+    # Validated nsite manifests on the catalogue + lookup relays. Served by an
+    # explicit handler below (reads the `refresh` query param to bypass cache).
     # Attached custom domains (read only).
     ("/package/nsite/domain/list", "nsite.domain.list", {}),
     # Desired-vs-actual DNS plan for a domain (no changes).
@@ -333,6 +333,10 @@ NSITE_ROUTE_SCOPES: dict[str, tuple[str, ...]] = {
     "/package/nsite/gateway/configure": ("nsites.admin",),
     "/package/nsite/list": ("nsites.read",),
     "/package/nsite/discover": ("nsites.read",),
+    "/package/nsite/block/list": ("nsites.read",),
+    "/package/nsite/block/add": ("nsites.admin",),
+    "/package/nsite/block/remove": ("nsites.admin",),
+    "/package/nsite/block/set": ("nsites.admin",),
     "/package/nsite/inspect": ("nsites.read",),
     "/package/nsite/resolve": ("nsites.read",),
     "/package/nsite/validate": ("nsites.read",),
@@ -826,6 +830,50 @@ def build_app(
         return _run_lifecycle(
             "nsite.unregister",
             {"pubkey": body.get("pubkey", ""), "d": body.get("d", "")},
+            state=_State(),
+        )
+
+    @app.get("/package/nsite/discover")
+    def nsite_discover(request: Request) -> Any:
+        """Validated nsite manifests on the catalogue + lookup relays.
+
+        ``?refresh=1`` bypasses the 5-minute server-side cache and forces a
+        live relay scan (the Browse tab's Refresh button)."""
+        refresh = request.query_params.get("refresh") in ("1", "true")
+        return _run_tool("nsite.discover", {"refresh": refresh})
+
+    @app.get("/package/nsite/block/list")
+    def nsite_block_list() -> Any:
+        """The operator's mute list (blocked npub pubkeys)."""
+        return _run_tool("nsite.block.list", {})
+
+    @app.post("/package/nsite/block/add")
+    def nsite_block_add() -> Any:
+        """Add one npub to the operator's mute list. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.block.add",
+            {"pubkey": body.get("pubkey", "")},
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/block/remove")
+    def nsite_block_remove() -> Any:
+        """Remove one npub from the operator's mute list. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.block.remove",
+            {"pubkey": body.get("pubkey", "")},
+            state=_State(),
+        )
+
+    @app.post("/package/nsite/block/set")
+    def nsite_block_set() -> Any:
+        """Replace the operator's mute list. Approval-gated."""
+        body = _json_body()
+        return _run_lifecycle(
+            "nsite.block.set",
+            {"pubkeys": body.get("pubkeys", [])},
             state=_State(),
         )
 

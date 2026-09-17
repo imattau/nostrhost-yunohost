@@ -141,6 +141,81 @@ class ReachabilityArgs(_Strict):
     timeout: float = Field(5.0, description="per-target timeout seconds")
 
 
+class DiscoverArgs(_Strict):
+    refresh: bool = Field(False, description="bypass the 5-minute result cache and force a live relay scan")
+
+
+class BlockPubkeyArgs(_Strict):
+    pubkey: str = Field(description="the site owner pubkey (hex or npub) to block/unblock")
+
+
+class BlockSetArgs(_Strict):
+    pubkeys: list[str] = Field(default_factory=list, description="the full blocked pubkey set (replaces the mute list)")
+
+
+def _safe_nsite_discover(**args: Any) -> dict[str, Any]:
+    extra = {k: v for k, v in args.items() if k != "refresh"}
+    if extra:
+        raise NostrHostError(f"nsite.discover does not accept extra args: {sorted(extra)}")
+    try:
+        return _service().discover(refresh=bool(args.get("refresh", False)))
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_block_list(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.block.list does not accept extra args: {sorted(args)}")
+    from .blocklist import current_blocklist
+
+    try:
+        pubkeys = current_blocklist()
+    except Exception as exc:  # noqa: BLE001
+        raise NostrHostError(f"could not read the blocklist: {exc}") from exc
+    return {"pubkeys": pubkeys, "count": len(pubkeys)}
+
+
+def _safe_nsite_block_set(pubkeys: list[str] | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.block.set does not accept extra args: {sorted(args)}")
+    from .blocklist import publish_blocklist
+
+    try:
+        return publish_blocklist(pubkeys or [])
+    except Exception as exc:  # noqa: BLE001
+        raise NostrHostError(f"could not publish the blocklist: {exc}") from exc
+
+
+def _safe_nsite_block_add(pubkey: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.block.add does not accept extra args: {sorted(args)}")
+    if not pubkey:
+        raise NostrHostError("nsite.block.add requires a pubkey")
+    from .blocklist import current_blocklist, publish_blocklist
+
+    try:
+        current = set(current_blocklist())
+        current.add(pubkey)
+        return publish_blocklist(sorted(current))
+    except Exception as exc:  # noqa: BLE001
+        raise NostrHostError(f"could not publish the blocklist: {exc}") from exc
+
+
+def _safe_nsite_block_remove(pubkey: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.block.remove does not accept extra args: {sorted(args)}")
+    if not pubkey:
+        raise NostrHostError("nsite.block.remove requires a pubkey")
+    from .blocklist import current_blocklist, publish_blocklist
+
+    try:
+        current = set(current_blocklist())
+        current.discard(pubkey)
+        return publish_blocklist(sorted(current))
+    except Exception as exc:  # noqa: BLE001
+        raise NostrHostError(f"could not publish the blocklist: {exc}") from exc
+
+
 def _service() -> NsiteService:
     return NsiteService()
 
@@ -315,12 +390,3 @@ def _safe_nsite_reachability(relays: list | None = None, servers: list | None = 
     if args:
         raise NostrHostError(f"nsite.reachability does not accept extra args: {sorted(args)}")
     return _service().reachability(relays=relays, servers=servers, timeout=timeout)
-
-
-def _safe_nsite_discover(**args: Any) -> dict[str, Any]:
-    if args:
-        raise NostrHostError(f"nsite.discover does not accept extra args: {sorted(args)}")
-    try:
-        return _service().discover()
-    except NsiteError as exc:
-        raise NostrHostError(str(exc)) from exc

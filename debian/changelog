@@ -1,3 +1,26 @@
+yunohost (12.1.41.69) stable; urgency=low
+
+  * nsite.discover hardening (blob verification, caching, npub blocklist):
+    - Blob-existence check: each validated site's blobs are probed on its
+      advertised Blossom servers (bounded: up to 3 paths, index.html first, on
+      up to 3 servers; IP-pinned M10 probes; HEAD with a single-byte ranged GET
+      fallback). A site is excluded only when every probe is a *definite*
+      failure (HTTP >= 400, refused connection, unresolvable host); sites with
+      no server hints or inconclusive/timeout probes are kept as
+      ``blobs_ok=None`` so a transient hiccup never hides a real site. A phase
+      deadline bounds the whole probe pass.
+    - Server-side cache: discover results are cached for 300s, keyed by the
+      effective relay set + blocklist fingerprint, so returning to the
+      catalogue is instant instead of re-scanning relays every time.
+      ``refresh=1`` (admin Refresh button / ``--refresh``) bypasses it.
+    - Operator npub blocklist: a standard NIP-51 kind-10000 mute list on the
+      local control relay (``nsite.block.set/add/remove/list`` operations +
+      ``nostrhost nsite block`` CLI + admin Blocked tab) is applied at scan
+      time, excluding blocked pubkeys from results. The control relay now
+      accepts kind 10000 (CONTROL_KINDS).
+
+ -- YunoHost Packaging Team <packaging@yunohost.org>  Thu, 17 Sep 2026 12:00:00 +0000
+
 yunohost (12.1.41.68) stable; urgency=low
 
   * nsite.discover: query the operator-trusted catalogue + nsite-lookup relays

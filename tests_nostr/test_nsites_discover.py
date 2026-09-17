@@ -77,6 +77,8 @@ def install_scan(monkeypatch, events, *, catalogue, lookup):
 
     monkeypatch.setattr(service, "_query_relay_events", lambda *a, **k: list(events))
     monkeypatch.setattr(service, "_validate_relay_url", lambda relay, allow_private=False: None)
+    monkeypatch.setattr(service, "_blob_probe", lambda *a, **k: {"ok": True, "status": 200, "definite": True})
+    monkeypatch.setattr(service, "_operator_blocklist", lambda: frozenset())
     monkeypatch.setattr(
         connectivity,
         "effective",
@@ -86,6 +88,14 @@ def install_scan(monkeypatch, events, *, catalogue, lookup):
             "sources": {},
         },
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_discover_cache():
+    """The discover cache is module-level; clear it so tests stay isolated."""
+    service._discover_cache.clear()
+    yield
+    service._discover_cache.clear()
 
 
 def test_discover_returns_validated_metadata(tmp_path: Path, monkeypatch):
@@ -251,3 +261,168 @@ def test_discover_never_leaks_content_or_raw_tags(tmp_path: Path, monkeypatch):
 def test_discover_handler_rejects_extra_args():
     with pytest.raises(NostrHostError, match="extra args"):
         _safe_nsite_discover(limit=5)
+
+
+def test_discover_handler_accepts_refresh():
+    with pytest.raises(NostrHostError, match="extra args"):
+        _safe_nsite_discover(fresh=True)
+    _safe_nsite_discover(refresh=False)
+
+
+# -- cache ----------------------------------------------------------------
+
+
+def test_discover_caches_results(tmp_path: Path, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_query(relay, *a, **k):
+        calls["n"] += 1
+        return []
+
+    install_scan(monkeypatch, [], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_query_relay_events", fake_query)
+
+    svc = make_service(tmp_path)
+    first = svc.discover()
+    assert first["cached"] is False
+    assert calls["n"] == 1
+
+    second = svc.discover()
+    assert second["cached"] is True
+    assert second["cached_at"] is not None
+    assert calls["n"] == 1
+
+    third = svc.discover(refresh=True)
+    assert third["cached"] is False
+    assert calls["n"] == 2
+
+
+def test_discover_cache_invalidates_on_blocklist_change(tmp_path: Path, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_query(relay, *a, **k):
+        calls["n"] += 1
+        return []
+
+    blocked = {"set": frozenset()}
+    install_scan(monkeypatch, [], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_operator_blocklist", lambda: blocked["set"])
+    monkeypatch.setattr(service, "_query_relay_events", fake_query)
+
+    svc = make_service(tmp_path)
+    svc.discover()
+    assert calls["n"] == 1
+    svc.discover()
+    assert calls["n"] == 1  # cache hit
+
+    blocked["set"] = frozenset({TEST_PUBKEY})
+    svc.discover()
+    assert calls["n"] == 2  # key changed -> live scan
+
+
+def test_discover_cache_invalidates_on_relay_set_change(tmp_path: Path, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_query(relay, *a, **k):
+        calls["n"] += 1
+        return []
+
+    install_scan(monkeypatch, [], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_query_relay_events", fake_query)
+
+    svc = make_service(tmp_path)
+    svc.discover()
+    svc.discover()
+    assert calls["n"] == 1
+
+    install_scan(monkeypatch, [], catalogue=["wss://cat.example", "wss://lookup.example"], lookup=[])
+    monkeypatch.setattr(service, "_query_relay_events", fake_query)
+    svc.discover()
+    assert calls["n"] == 3  # fresh key -> one query per scan relay (2 relays)
+
+
+# -- blocklist ------------------------------------------------------------
+
+
+def test_discover_excludes_blocked_pubkeys(tmp_path: Path, monkeypatch):
+    root = corpus_event("valid-root.json")
+    install_scan(monkeypatch, [root], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_operator_blocklist", lambda: frozenset({TEST_PUBKEY}))
+
+    result = make_service(tmp_path).discover()
+    assert result["sites"] == []
+    assert result["count"] == 0
+    assert result["blob_check"]["blocked"] == 1
+
+
+def test_discover_keeps_unblocked_pubkeys(tmp_path: Path, monkeypatch):
+    root = corpus_event("valid-root.json")
+    other_sk, other_pubkey = new_keys()
+    other = sign_event(other_sk, 35128, [["d", "blog"], ["path", "/index.html", "a" * 64]])
+    install_scan(monkeypatch, [root, other], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_operator_blocklist", lambda: frozenset({other_pubkey}))
+
+    result = make_service(tmp_path).discover()
+    assert [site["pubkey"] for site in result["sites"]] == [TEST_PUBKEY]
+
+
+# -- blob existence -------------------------------------------------------
+
+
+def test_discover_drops_sites_without_reachable_blobs(tmp_path: Path, monkeypatch):
+    root = corpus_event("valid-root.json")
+    install_scan(monkeypatch, [root], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_blob_probe", lambda *a, **k: {"ok": False, "status": 404, "definite": True})
+
+    result = make_service(tmp_path).discover()
+    assert result["sites"] == []
+    assert result["blob_check"]["excluded"] == 1
+    assert result["blob_check"]["checked"] >= 1
+
+
+def test_discover_keeps_sites_with_reachable_blobs(tmp_path: Path, monkeypatch):
+    root = corpus_event("valid-root.json")
+    install_scan(monkeypatch, [root], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_blob_probe", lambda *a, **k: {"ok": True, "status": 200, "definite": True})
+
+    result = make_service(tmp_path).discover()
+    assert result["count"] == 1
+    site = result["sites"][0]
+    assert site["blobs_ok"] is True
+    assert site["blobs_checked"] >= 1
+
+
+def test_discover_keeps_sites_with_no_server_hints(tmp_path: Path, monkeypatch):
+    sk, _ = new_keys()
+    event = sign_event(sk, 15128, [["path", "/index.html", "a" * 64]])
+    install_scan(monkeypatch, [event], catalogue=["wss://cat.example"], lookup=[])
+
+    result = make_service(tmp_path).discover()
+    assert result["count"] == 1
+    assert result["sites"][0]["blobs_ok"] is None
+    assert result["sites"][0]["blobs_checked"] == 0
+
+
+def test_discover_keeps_sites_on_inconclusive_probes(tmp_path: Path, monkeypatch):
+    """A timeout/refused-DNS probe is inconclusive, not a definite failure:
+    the site is kept (unverified) rather than hidden on a transient hiccup."""
+    root = corpus_event("valid-root.json")
+    install_scan(monkeypatch, [root], catalogue=["wss://cat.example"], lookup=[])
+    monkeypatch.setattr(service, "_blob_probe", lambda *a, **k: {"ok": False, "status": None, "definite": False})
+
+    result = make_service(tmp_path).discover()
+    assert result["count"] == 1
+    assert result["sites"][0]["blobs_ok"] is None
+
+
+def test_site_blob_check_bounds_probes():
+    """Probe grid honors the path/server caps and index.html-first ordering."""
+    probes = service._site_blob_probes(
+        {"tags": [["server", "https://a.example"], ["server", "https://b.example"], ["server", "https://c.example"], ["server", "https://d.example"]]},
+        type("V", (), {"paths": [("/index.html", "i" * 64), ("/about.html", "a" * 64), ("/x.html", "x" * 64), ("/y.html", "y" * 64)]})(),
+    )
+    servers = {p[0] for p in probes}
+    assert len(servers) == 3  # capped
+    assert "https://d.example" not in servers
+    assert probes[0][0] == "https://a.example" and probes[0][1] == "i" * 64  # index first
+    assert len(probes) == 3 * service.DISCOVER_BLOB_MAX_PATHS

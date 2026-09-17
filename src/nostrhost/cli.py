@@ -89,6 +89,10 @@ from yunohost.nostr_operations import (
     _safe_nsite_snapshot,
     _safe_nsite_unregister,
     _safe_nsite_validate,
+    _safe_nsite_block_add,
+    _safe_nsite_block_list,
+    _safe_nsite_block_remove,
+    _safe_nsite_block_set,
     _safe_nsite_domain_attach,
     _safe_nsite_domain_detach,
     _safe_nsite_domain_list,
@@ -161,6 +165,10 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "nsite.publish.plan": _safe_nsite_publish_plan,
     "nsite.register": _safe_nsite_register,
     "nsite.unregister": _safe_nsite_unregister,
+    "nsite.block.list": _safe_nsite_block_list,
+    "nsite.block.set": _safe_nsite_block_set,
+    "nsite.block.add": _safe_nsite_block_add,
+    "nsite.block.remove": _safe_nsite_block_remove,
     "nsite.publish": _safe_nsite_publish,
     "nsite.snapshot": _safe_nsite_snapshot,
     "nsite.domain.attach": _safe_nsite_domain_attach,
@@ -2577,13 +2585,42 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
     @nsite.command("discover")
     def nsite_discover(
+        refresh: bool = typer.Option(False, "--refresh", help="bypass the 5-minute cache and force a live relay scan"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Browse validated nsite manifests (15128/35128) on the catalogue + lookup relays."""
         _guard(
-            lambda: _run_tool("nsite.discover", {}),
+            lambda: _run_tool("nsite.discover", {"refresh": refresh}),
             output_as,
         )
+
+    @nsite.command("block")
+    def nsite_block(
+        pubkey: str = typer.Argument("", help="site owner pubkey (hex or npub) to block/unblock"),
+        list_: bool = typer.Option(False, "--list", help="print the current blocklist"),
+        remove: bool = typer.Option(False, "--remove", help="remove the pubkey instead of adding it"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Manage the operator's mute list (excludes npubs from nsite.discover).
+
+        The blocklist is the operator's NIP-51 kind-10000 mute list on the
+        control relay (full replacement): ``nostrhost nsite block <npub>``
+        adds, ``--remove`` removes, ``--list`` prints the current set.
+        """
+        def run() -> Any:
+            if list_:
+                return _run_tool("nsite.block.list", {})
+            if not pubkey:
+                raise NostrHostError("nsite block needs a pubkey, --list, or --remove <pubkey>")
+            body = _run_lifecycle(
+                "nsite.block.remove" if remove else "nsite.block.add",
+                {"pubkey": pubkey},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.block rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
 
     @nsite.command("reachability")
     def nsite_reachability(
