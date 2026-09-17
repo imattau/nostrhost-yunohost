@@ -530,11 +530,42 @@ def test_portal_public_returns_settings(monkeypatch):
 
     # no portal settings dir content, no session -> defaults with empty apps
     monkeypatch.setattr(ps, "PORTAL_SETTINGS_DIR", "/nonexistent")
+    monkeypatch.setattr(
+        "yunohost.nostrhost.domains.primary.current_primary",
+        lambda: "primary.test",
+    )
     monkeypatch.setattr("yunohost.nostr_account._session_username", lambda: None)
     with _web_context(host="w4.test"):
         out = ps.portal_public_route()
     assert out["domain"] == "w4.test"
+    assert out["admin_url"] == "https://primary.test/nostrhost/admin/"
     assert out["apps"] == {}
+
+
+def test_portal_admin_url_falls_back_to_current_domain(monkeypatch):
+    from yunohost.nostrhost import portal_settings as ps
+
+    monkeypatch.setattr(
+        "yunohost.nostrhost.domains.primary.current_primary",
+        lambda: "",
+    )
+
+    assert ps._default_settings("w4.test")["admin_url"] == (
+        "https://w4.test/nostrhost/admin/"
+    )
+
+
+def test_portal_admin_url_uses_primary_domain(monkeypatch):
+    from yunohost.nostrhost import portal_settings as ps
+
+    monkeypatch.setattr(
+        "yunohost.nostrhost.domains.primary.current_primary",
+        lambda: "primary.test",
+    )
+
+    assert ps._default_settings("app.primary.test")["admin_url"] == (
+        "https://primary.test/nostrhost/admin/"
+    )
 
 
 def test_portal_me_reports_admin_flag(monkeypatch):

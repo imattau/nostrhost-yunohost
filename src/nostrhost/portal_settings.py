@@ -25,6 +25,12 @@ def _host_domain(host: str) -> str:
 
 
 def _default_settings(domain: str) -> dict[str, Any]:
+    try:
+        from yunohost.nostrhost.domains.primary import current_primary
+
+        primary_domain = current_primary() or domain
+    except Exception:  # noqa: BLE001 - portal boot must survive incomplete installs
+        primary_domain = domain
     return {
         "apps": {},
         "public": False,
@@ -34,6 +40,11 @@ def _default_settings(domain: str) -> dict[str, Any]:
         "portal_title": "NostrHost",
         "show_other_domains_apps": True,
         "domain": domain,
+        # The native /package/* admin API is deliberately exposed only on the
+        # primary domain. Portals are available on every registered domain, so
+        # a same-origin admin link from an app subdomain lands on a static SPA
+        # whose API does not exist and causes an authentication loop.
+        "admin_url": f"https://{primary_domain}/nostrhost/admin/",
         "portal_allow_edit_email": False,
         "portal_allow_edit_email_alias": False,
         "portal_allow_edit_email_forward": False,
