@@ -74,8 +74,8 @@ DISCOVER_CACHE_TTL = 300
 # no server hints (or an exhausted budget) are kept as ``blobs_ok=None``.
 DISCOVER_BLOB_MAX_PATHS = 3
 DISCOVER_BLOB_MAX_SERVERS = 3
-DISCOVER_BLOB_PROBE_TIMEOUT = 3.0
-DISCOVER_BLOB_PHASE_TIMEOUT = 8.0
+DISCOVER_BLOB_PROBE_TIMEOUT = 2.0
+DISCOVER_BLOB_PHASE_TIMEOUT = 6.0
 
 # Module-level discover cache: persists across the transient ``NsiteService``
 # instances the operations layer builds per call, so the API (single uvicorn
@@ -1997,7 +1997,7 @@ class NsiteService:
         sites: list[dict[str, Any]] = []
         if kept:
             blob_deadline = time.time() + DISCOVER_BLOB_PHASE_TIMEOUT
-            with ThreadPoolExecutor(max_workers=min(16, len(kept))) as pool:
+            with ThreadPoolExecutor(max_workers=min(32, len(kept))) as pool:
                 futures = {
                     pool.submit(_site_blob_check, event, verdict, blob_deadline): (event, verdict)
                     for event, verdict in kept

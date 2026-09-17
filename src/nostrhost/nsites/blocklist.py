@@ -52,7 +52,7 @@ def current_blocklist(
     try:
         cfg = _operator_config(operator_sk, control_relay)
         if fetch is None:
-            from nostr_operations import fetch_chain_events
+            from yunohost.nostr_operations import fetch_chain_events
 
             fetch = fetch_chain_events
         events = fetch(cfg.control_relay, kinds=(BLOCK_KIND,), timeout=_BLOCK_FETCH_TIMEOUT)
