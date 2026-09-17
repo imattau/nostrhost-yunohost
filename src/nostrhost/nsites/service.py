@@ -51,6 +51,11 @@ DEFAULT_PUBLISH_RELAYS = [
 
 _SITE_DIR = "sites"
 
+# Upper bound on how many discovered sites a single nsite.discover call returns
+# after validation and per-site dedupe. Independent of the per-relay fetch
+# limit; keeps the on-demand scan bounded and the response small.
+DISCOVER_MAX_SITES = 200
+
 # Phase 3b draft area (implementation plan §3.2 / D6): the one fixed
 # server-side file path involved in publishing. The Admin agent writes site
 # files here; publish_plan can read its inventory ("shown to the user before
@@ -1732,6 +1737,86 @@ class NsiteService:
             },
         }
 
+    def discover(
+        self,
+        *,
+        limit: int = 200,
+        max_relays: int = 6,
+        timeout: float = 8.0,
+    ) -> dict[str, Any]:
+        """Discover nsite manifests (kinds 15128/35128) from the relays.
+
+        On-demand, bounded read — no state is written. Scans the
+        operator-trusted catalogue + nsite-lookup relay sets, validates every
+        candidate with the full NIP-5A checks, keeps the newest valid manifest
+        per site (pubkey + d), and returns bounded metadata only. Untrusted
+        free text (manifest ``content``, oversized ``title``) never leaves this
+        method, so the result is safe to render and to ship through MCP.
+        """
+        from ..connectivity import effective as effective_connectivity
+        from .manifest import validate_manifest as _validate
+
+        effective = effective_connectivity()
+        relays: list[str] = []
+        for purpose in ("catalogue", "nsite_lookup"):
+            for url in effective["relays"].get(purpose) or []:
+                if url in relays:
+                    continue
+                try:
+                    _validate_relay_url(url)
+                except NsiteError:
+                    continue
+                relays.append(url)
+
+        scan_relays = relays[:max_relays]
+        candidates: list[dict[str, Any]] = []
+        for relay in scan_relays:
+            candidates.extend(
+                _query_relay_events(
+                    relay,
+                    {"kinds": [KIND_ROOT, KIND_NAMED]},
+                    limit=limit,
+                    timeout=timeout,
+                )
+            )
+
+        registered_keys = {
+            f"{record.get('pubkey', '')}:{str(record.get('d', ''))}"
+            for record in _sites(self.state_dir)
+        }
+
+        # Newest valid manifest per site, deterministic tie-break on event id.
+        newest: dict[tuple[str, str], tuple[int, str, dict[str, Any], Any]] = {}
+        for event in candidates:
+            verdict = _validate(event)
+            if not verdict.valid or not verdict.pubkey:
+                continue
+            if verdict.site_type not in ("root", "named"):
+                continue
+            key = (verdict.pubkey, verdict.d or "")
+            created_at = int(event.get("created_at", 0))
+            event_id = str(event.get("id", ""))
+            existing = newest.get(key)
+            if existing is None or created_at > existing[0] or (
+                created_at == existing[0] and event_id > existing[1]
+            ):
+                newest[key] = (created_at, event_id, event, verdict)
+
+        sites: list[dict[str, Any]] = []
+        for pubkey, d in newest:
+            _created_at, _event_id, event, verdict = newest[(pubkey, d)]
+            meta = _site_metadata(event, verdict, registered_keys)
+            if meta:
+                sites.append(meta)
+        sites.sort(key=lambda site: (-site["created_at"], site["label"] or ""))
+        truncated = len(sites) > DISCOVER_MAX_SITES
+        return {
+            "sites": sites[:DISCOVER_MAX_SITES],
+            "relays_queried": scan_relays,
+            "count": len(sites[:DISCOVER_MAX_SITES]),
+            "truncated": truncated,
+        }
+
     def reachability(
         self,
         *,
@@ -1794,6 +1879,50 @@ def _app_from_event(event: dict[str, Any]) -> str:
         if isinstance(t, list) and len(t) >= 2 and t[0] == "app":
             return str(t[1])
     return ""
+
+
+def _site_metadata(
+    event: dict[str, Any],
+    verdict: Any,
+    registered_keys: set[str],
+) -> dict[str, Any]:
+    """Bounded, safe metadata for one validated manifest (nsite.discover).
+
+    Only whitelisted fields leave this function: identity, kind, the NIP-5A
+    ``title`` (length-capped), bounded ``server``/``r`` hints, aggregate
+    summary counts and whether the site is already registered on this host.
+    Manifest ``content`` and raw tags are never copied out.
+    """
+    title = ""
+    servers: list[str] = []
+    relays: list[str] = []
+    raw_tags = event.get("tags")
+    tags = raw_tags if isinstance(raw_tags, list) else []
+    for tag in tags:
+        if not isinstance(tag, list) or not tag or not isinstance(tag[0], str):
+            continue
+        key = tag[0]
+        value = tag[1] if len(tag) > 1 and isinstance(tag[1], str) else ""
+        if key == "title" and value and not title:
+            title = value
+        elif key == "server" and value and len(servers) < 10:
+            servers.append(value)
+        elif key in ("r", "relay") and value and len(relays) < 10:
+            relays.append(value)
+    return {
+        "label": verdict.label,
+        "pubkey": verdict.pubkey,
+        "kind": int(event.get("kind", 0)),
+        "d": verdict.d or "",
+        "title": title[:120],
+        "servers": servers,
+        "relays": relays,
+        "event_id": verdict.event_id,
+        "created_at": int(event.get("created_at", 0)),
+        "paths_count": len(verdict.paths),
+        "app": verdict.app or "",
+        "registered": f"{verdict.pubkey}:{verdict.d or ''}" in registered_keys,
+    }
 
 
 def _sites(state_dir: Path) -> list[dict[str, Any]]:

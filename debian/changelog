@@ -1,3 +1,18 @@
+yunohost (12.1.41.67) stable; urgency=low
+
+  * nsite.discover: browse validated NIP-5A site manifests (kinds 15128/35128)
+    discovered on the operator-trusted catalogue + nsite-lookup relays. A
+    bounded, on-demand read (nsites.read, no approval) scans up to 6 relays
+    (200 events each, 8s timeout), validates every candidate with the full
+    NIP-5A checks, keeps the newest manifest per site and returns bounded
+    metadata only (manifest content never leaves the server; no state written).
+    Exposed as GET /package/nsite/discover, `nostrhost nsite discover`, and
+    surfaced inside the Admin catalogue Browse flow via an All/Apps/Nsites
+    filter with a Register action for the hosted allowlist. Agent operation
+    catalog regenerated to include the new read tool.
+
+ -- NostrHost <noreply@nostrhost.org>  Fri, 18 Sep 2026 09:00:00 +0000
+
 yunohost (12.1.41.66) stable; urgency=low
 
   * External trust by default: the per-domain Caddy snippet no longer forces

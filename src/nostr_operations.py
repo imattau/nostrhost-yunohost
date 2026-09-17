@@ -88,6 +88,7 @@ from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models 
     _safe_nsite_reachability,
     _safe_nsite_register,
     _safe_nsite_resolve,
+    _safe_nsite_discover,
     _safe_nsite_snapshot,
     _safe_nsite_unregister,
     _safe_nsite_validate,
@@ -1051,6 +1052,13 @@ TOOLS: dict[str, ToolSpec] = {
         require_approval=False,
         input_model=ResolveArgs,
         description="fetch the current manifest for a label/pubkey from public relays (read only, bounded)",
+    ),
+    "nsite.discover": ToolSpec(
+        name="nsite.discover",
+        handler=_safe_nsite_discover,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        description="browse validated nsite manifests (15128/35128) found on the catalogue + lookup relays (read only, bounded)",
     ),
     "nsite.validate_manifest": ToolSpec(
         name="nsite.validate_manifest",

@@ -315,3 +315,12 @@ def _safe_nsite_reachability(relays: list | None = None, servers: list | None = 
     if args:
         raise NostrHostError(f"nsite.reachability does not accept extra args: {sorted(args)}")
     return _service().reachability(relays=relays, servers=servers, timeout=timeout)
+
+
+def _safe_nsite_discover(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.discover does not accept extra args: {sorted(args)}")
+    try:
+        return _service().discover()
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc

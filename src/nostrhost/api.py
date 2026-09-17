@@ -162,6 +162,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/nsite/gateway/status", "nsite.gateway.status", {}),
     # Registered sites and the gateway mode.
     ("/package/nsite/list", "nsite.list", {}),
+    # Validated nsite manifests discovered on the catalogue + lookup relays.
+    ("/package/nsite/discover", "nsite.discover", {}),
     # Attached custom domains (read only).
     ("/package/nsite/domain/list", "nsite.domain.list", {}),
     # Desired-vs-actual DNS plan for a domain (no changes).
@@ -330,6 +332,7 @@ NSITE_ROUTE_SCOPES: dict[str, tuple[str, ...]] = {
     "/package/nsite/gateway/disable": ("nsites.admin",),
     "/package/nsite/gateway/configure": ("nsites.admin",),
     "/package/nsite/list": ("nsites.read",),
+    "/package/nsite/discover": ("nsites.read",),
     "/package/nsite/inspect": ("nsites.read",),
     "/package/nsite/resolve": ("nsites.read",),
     "/package/nsite/validate": ("nsites.read",),

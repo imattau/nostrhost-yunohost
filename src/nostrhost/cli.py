@@ -79,6 +79,7 @@ from yunohost.nostr_operations import (
     _safe_nsite_gateway_configure,
     _safe_nsite_inspect,
     _safe_nsite_list,
+    _safe_nsite_discover,
     _safe_nsite_mirror,
     _safe_nsite_publish,
     _safe_nsite_publish_plan,
@@ -151,6 +152,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "nsite.gateway.disable": _safe_nsite_gateway_disable,
     "nsite.gateway.configure": _safe_nsite_gateway_configure,
     "nsite.list": _safe_nsite_list,
+    "nsite.discover": _safe_nsite_discover,
     "nsite.inspect": _safe_nsite_inspect,
     "nsite.mirror": _safe_nsite_mirror,
     "nsite.resolve": _safe_nsite_resolve,
@@ -686,6 +688,9 @@ def _agent_init() -> dict[str, Any]:
         # current NostrHost control-plane ToolSpec registry.
         "observation_queries": [
             {"operation": "service.status"},
+            {"operation": "nsite.gateway.status"},
+            {"operation": "nsite.list"},
+            {"operation": "nsite.discover"},
         ],
         "audit_path": str(Path(AGENT_STATE_DIR) / "audit.jsonl"),
         "interval": "6h",
@@ -2567,6 +2572,16 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 {"label": label, "pubkey": pubkey, "d": d,
                  "relays": [r for r in relays.split(",") if r] or None},
             ),
+            output_as,
+        )
+
+    @nsite.command("discover")
+    def nsite_discover(
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Browse validated nsite manifests (15128/35128) on the catalogue + lookup relays."""
+        _guard(
+            lambda: _run_tool("nsite.discover", {}),
             output_as,
         )
 
