@@ -13,6 +13,34 @@ from .models import DomainResource
 from .service import DomainError, DomainService
 
 
+_DUCKDNS_SUFFIX = ".duckdns.org"
+
+
+def _provider_domain(domain: str, provider_type: str) -> str:
+    """Return the canonical hostname expected by a DNS provider.
+
+    DuckDNS presents domains as bare account subnames in its own UI and API,
+    while the native domain registry stores fully-qualified hostnames.  Accept
+    either form at this boundary so a value copied from DuckDNS (``mybox``)
+    does not fail the generic hostname validator with an unhelpful message.
+    """
+    domain = str(domain or "").strip().lower().rstrip(".")
+    if provider_type != "duckdns":
+        return domain
+    if "." not in domain:
+        domain += _DUCKDNS_SUFFIX
+    if not domain.endswith(_DUCKDNS_SUFFIX):
+        raise NostrHostError(
+            "a DuckDNS domain must be a subname or end in .duckdns.org"
+        )
+    subname = domain[: -len(_DUCKDNS_SUFFIX)]
+    if not subname or "." in subname:
+        raise NostrHostError(
+            "a DuckDNS domain must contain exactly one subname before .duckdns.org"
+        )
+    return domain
+
+
 def _service() -> DomainService:
     return DomainService()
 
@@ -67,6 +95,7 @@ def _safe_domain_add(
 ) -> dict[str, Any]:
     if args or not domain:
         raise NostrHostError("domain.add requires a domain name")
+    domain = _provider_domain(domain, provider_type)
     from ..dns.models import DnsProviderResource
     from ..dns.providers import provider_capabilities
     from .models import DomainExposure, DomainNostr, DomainTls

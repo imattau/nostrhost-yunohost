@@ -21,6 +21,8 @@ from nostrhost.dns.providers.dynu import DynuProvider
 from nostrhost.dns.providers.desec import DesecProvider
 from nostrhost.dns.providers.manual import ManualProvider
 from nostrhost.domains.models import DomainResource
+from nostrhost.domains import operations as domain_operations
+from nostrhost.domains.operations import _provider_domain
 from nostrhost.domains.service import DomainService
 from nostrhost.network.ddns import DdnsWatchRunner, WatchState
 from nostrhost.network.public_ip import IpWatcher
@@ -104,8 +106,42 @@ def test_duckdns_push_rejects_ko(tmp_path):
     state = tmp_path / "state"
     set_secret("secret:dns/duckdns/main", "tok", state_dir=state)
     provider = DuckDnsProvider(credential="secret:dns/duckdns/main", state_dir=state, request=lambda url: (200, "KO"))
-    with pytest.raises(RuntimeError, match="duckdns update failed"):
+    with pytest.raises(RuntimeError, match="stored account token.*owns.*mybox"):
         provider.push_records([DnsRecord(zone="mybox.duckdns.org", name="@", type="A", value="1.2.3.4", owner="nostrhost")])
+
+
+def test_duckdns_bare_subname_is_canonicalized():
+    assert _provider_domain("MyBox", "duckdns") == "mybox.duckdns.org"
+    assert _provider_domain("mybox.duckdns.org.", "duckdns") == "mybox.duckdns.org"
+
+
+def test_domain_add_canonicalizes_duckdns_subname(monkeypatch):
+    captured = {}
+
+    class Service:
+        def add(self, resource, *, apply_dns, verify):
+            captured["resource"] = resource
+            return {"domain": resource.name, "ok": True}
+
+    monkeypatch.setattr(domain_operations, "_service", lambda: Service())
+    monkeypatch.setattr("nostrhost.credentials.resolve", lambda ref: None)
+
+    result = domain_operations._safe_domain_add(
+        domain="MyBox",
+        provider_type="duckdns",
+        credential="secret:dns/duckdns/main",
+        apply_dns=False,
+        verify=False,
+    )
+
+    assert result["domain"] == "mybox.duckdns.org"
+    assert captured["resource"].name == "mybox.duckdns.org"
+
+
+@pytest.mark.parametrize("domain", ["example.com", "nested.mybox.duckdns.org"])
+def test_duckdns_rejects_hostnames_outside_single_subname(domain):
+    with pytest.raises(Exception, match="DuckDNS domain"):
+        _provider_domain(domain, "duckdns")
 
 
 def test_duckdns_push_requires_credential(tmp_path):

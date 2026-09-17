@@ -34,3 +34,15 @@ def test_managed_service_uses_timer_as_health_signal():
 
     assert certd["actual_systemd_service"] == "nostrhost-certd"
     assert certd["test_status"] == "systemctl is-active --quiet nostrhost-certd.timer"
+
+
+def test_certd_service_uses_nostrhost_virtualenv():
+    service_path = (
+        Path(__file__).resolve().parents[1]
+        / "conf/yunohost/nostrhost-certd.service"
+    )
+
+    assert (
+        "ExecStart=/opt/nostrhost/venv/bin/python3 -m yunohost.nostr_certd --once"
+        in service_path.read_text()
+    )

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -m yunohost.nostr_certd --once
+ExecStart=/opt/nostrhost/venv/bin/python3 -m yunohost.nostr_certd --once
 Environment=NOSTR_CADDY_STORAGE=/var/lib/caddy
 
 [Install]

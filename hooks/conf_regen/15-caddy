@@ -29,7 +29,11 @@ do_pre_regen() {
     mkdir -p "$caddy_dir/conf.d"
     cd /usr/share/yunohost/conf/caddy
     ynh_render_template "Caddyfile.template" "${caddy_dir}/Caddyfile"
-    for domain in $(yunohost domain list --output-as json 2>/dev/null | jq -r '.domains[]'); do
+    # Native-only hosts no longer ship the legacy ``yunohost`` CLI.  Using it
+    # here failed silently (stderr is intentionally suppressed), leaving every
+    # non-bootstrap domain without a Caddy site block or TLS automation entry.
+    # The native CLI reads the authoritative domains-native registry.
+    for domain in $(nostrhost domain list --output-as json 2>/dev/null | jq -r '.domains[]'); do
         [ -n "$domain" ] || continue
         # ynh_render_template renders with os.environ only (it ignores extra
         # args), so `domain` must be exported for {{ domain }} to populate.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import types
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -27,6 +28,19 @@ from nostrhost.domains.service import (
     native_domain_registry,
 )
 from yunohost.nostr_operations import known_tools
+
+
+def test_caddy_regen_uses_native_domain_registry():
+    """Native-only installs must not call the removed ``yunohost`` CLI.
+
+    A suppressed command-not-found here leaves registered domains out of the
+    Caddyfile, so their short-lived internal certificates expire and they can
+    never become primary-domain candidates.
+    """
+    hook = Path(__file__).parents[1] / "hooks" / "conf_regen" / "15-caddy"
+    body = hook.read_text(encoding="utf-8")
+    assert "nostrhost domain list --output-as json" in body
+    assert "yunohost domain list --output-as json" not in body
 
 
 # --------------------------------------------------------------------------- #

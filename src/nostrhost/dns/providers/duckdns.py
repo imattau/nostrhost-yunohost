@@ -105,7 +105,13 @@ class DuckDnsProvider:
         status, body = self._request(f"{self.base}?{urlencode(params)}")
         text = (body or "").strip()
         if text != "OK":
-            raise RuntimeError(f"duckdns update failed: {text or f'http {status}'}")
+            detail = text or f"http {status}"
+            if text == "KO":
+                detail = (
+                    "DuckDNS returned KO; check that the stored account token "
+                    f"owns the {domains!r} subname"
+                )
+            raise RuntimeError(f"duckdns update failed: {detail}")
         return [{"action": "update", "record": r.fingerprint(), "domains": domains, "ipv4": ipv4, "ipv6": ipv6} for r in apex]
 
     def verify_record(self, record: DnsRecord) -> dict:
