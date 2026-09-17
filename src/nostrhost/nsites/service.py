@@ -516,9 +516,33 @@ def _operator_blocklist() -> frozenset[str]:
         return frozenset()
 
 
-def _discover_cache_key(scan_relays: list[str], blocked: frozenset[str]) -> str:
-    material = "\n".join([*sorted(scan_relays), *sorted(blocked)])
+def _discover_cache_key(scan_relays: list[str]) -> str:
+    material = "\n".join(sorted(scan_relays))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _filter_blocked(payload: dict[str, Any], blocked: frozenset[str]) -> dict[str, Any]:
+    """Drop the currently-blocked npubs from a (possibly cached) discover payload.
+
+    The cache stores the full valid site list (keyed by relay set only), so a
+    block takes effect on the next read without a rescan — and an unblock
+    restores the site just as instantly. Returns the input untouched when
+    nothing is blocked.
+    """
+    if not blocked:
+        return payload
+    sites = payload.get("sites") or []
+    kept = [site for site in sites if site.get("pubkey") not in blocked]
+    dropped = len(sites) - len(kept)
+    if not dropped:
+        return payload
+    payload = dict(payload)
+    payload["sites"] = kept
+    payload["count"] = len(kept)
+    blob = dict(payload.get("blob_check") or {})
+    blob["blocked"] = int(blob.get("blocked", 0)) + dropped
+    payload["blob_check"] = blob
+    return payload
 
 
 def _draft_path_is_bad(path: str) -> bool:
@@ -1899,9 +1923,11 @@ class NsiteService:
         and to ship through MCP.
 
         Results are cached for ``DISCOVER_CACHE_TTL`` seconds, keyed by the
-        effective relay set + blocklist fingerprint, so returning to the
-        catalogue is instant; ``refresh=True`` bypasses the cache (the admin
-        Refresh button / ``--refresh``).
+        effective relay set, so returning to the catalogue is instant;
+        ``refresh=True`` bypasses the cache (the admin Refresh button /
+        ``--refresh``). The cached payload is re-filtered against the current
+        blocklist on every read, so a newly blocked npub disappears from the
+        catalogue immediately without a rescan.
         """
         from ..connectivity import effective as effective_connectivity
         from .manifest import validate_manifest as _validate
@@ -1920,12 +1946,16 @@ class NsiteService:
 
         scan_relays = relays[:max_relays]
         blocked = _operator_blocklist()
-        cache_key = _discover_cache_key(scan_relays, blocked)
+        cache_key = _discover_cache_key(scan_relays)
         now = time.time()
         with _discover_cache_lock:
             cached = _discover_cache.get(cache_key)
             if cached is not None and not refresh and (now - cached[0]) < DISCOVER_CACHE_TTL:
+                # The cache stores the full valid site list keyed by relay set
+                # only, so a block added since caching takes effect on the next
+                # read (and an unblock restores) without a full rescan.
                 payload = dict(cached[1])
+                payload = _filter_blocked(payload, blocked)
                 payload["cached"] = True
                 payload["cached_at"] = int(cached[0])
                 return payload
@@ -1977,30 +2007,27 @@ class NsiteService:
             ):
                 newest[key] = (created_at, event_id, event, verdict)
 
-        # Drop blocked pubkeys, then verify blob existence (bounded, parallel,
-        # under one phase deadline) for everything that remains.
-        kept: list[tuple[dict[str, Any], Any]] = []
-        for pubkey, d in newest:
-            _created_at, _event_id, event, verdict = newest[(pubkey, d)]
-            if pubkey in blocked:
-                continue
-            kept.append((event, verdict))
-
+        # Verify blob existence (bounded, parallel, under one phase deadline)
+        # for every valid site. The cached payload deliberately keeps the full
+        # list unfiltered so the blocklist can be applied on each read (block
+        # and unblock both take effect without a rescan); sites are probed
+        # regardless of the blocklist so an unblocked site is immediately
+        # verifiable.
         blob_stats: dict[str, int | bool] = {
             "checked": 0,
             "ok": 0,
             "unknown": 0,
             "excluded": 0,
-            "blocked": len(newest) - len(kept),
+            "blocked": 0,
             "truncated": False,
         }
         sites: list[dict[str, Any]] = []
-        if kept:
+        if newest:
             blob_deadline = time.time() + DISCOVER_BLOB_PHASE_TIMEOUT
-            with ThreadPoolExecutor(max_workers=min(32, len(kept))) as pool:
+            with ThreadPoolExecutor(max_workers=min(32, len(newest))) as pool:
                 futures = {
                     pool.submit(_site_blob_check, event, verdict, blob_deadline): (event, verdict)
-                    for event, verdict in kept
+                    for _created_at, _event_id, event, verdict in newest.values()
                 }
                 for future, (event, verdict) in futures.items():
                     ok, checked, truncated = future.result()
@@ -2029,7 +2056,7 @@ class NsiteService:
         }
         with _discover_cache_lock:
             _discover_cache[cache_key] = (now, payload)
-        return payload
+        return _filter_blocked(payload, blocked)
 
     def reachability(
         self,

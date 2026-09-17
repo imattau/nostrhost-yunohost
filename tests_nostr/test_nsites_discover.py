@@ -297,27 +297,43 @@ def test_discover_caches_results(tmp_path: Path, monkeypatch):
     assert calls["n"] == 2
 
 
-def test_discover_cache_invalidates_on_blocklist_change(tmp_path: Path, monkeypatch):
+def test_discover_cache_filters_newly_blocked_on_hit(tmp_path: Path, monkeypatch):
     calls = {"n": 0}
+    root = corpus_event("valid-root.json")
 
     def fake_query(relay, *a, **k):
         calls["n"] += 1
-        return []
+        return [root]
 
     blocked = {"set": frozenset()}
-    install_scan(monkeypatch, [], catalogue=["wss://cat.example"], lookup=[])
+    install_scan(monkeypatch, [root], catalogue=["wss://cat.example"], lookup=[])
     monkeypatch.setattr(service, "_operator_blocklist", lambda: blocked["set"])
     monkeypatch.setattr(service, "_query_relay_events", fake_query)
+    monkeypatch.setattr(service, "_blob_probe", lambda *a, **k: {"ok": True, "status": 200, "definite": True})
 
     svc = make_service(tmp_path)
-    svc.discover()
+    first = svc.discover()
     assert calls["n"] == 1
+    assert [site["pubkey"] for site in first["sites"]] == [TEST_PUBKEY]
+    assert first["blob_check"]["blocked"] == 0
+
     svc.discover()
     assert calls["n"] == 1  # cache hit
 
     blocked["set"] = frozenset({TEST_PUBKEY})
-    svc.discover()
-    assert calls["n"] == 2  # key changed -> live scan
+    second = svc.discover()
+    assert calls["n"] == 1  # still a cache hit - no rescan needed
+    assert second["cached"] is True
+    assert second["sites"] == []
+    assert second["count"] == 0
+    assert second["blob_check"]["blocked"] == 1
+
+    blocked["set"] = frozenset()
+    third = svc.discover()
+    assert calls["n"] == 1  # still a cache hit
+    assert third["cached"] is True
+    assert [site["pubkey"] for site in third["sites"]] == [TEST_PUBKEY]
+    assert third["blob_check"]["blocked"] == 0
 
 
 def test_discover_cache_invalidates_on_relay_set_change(tmp_path: Path, monkeypatch):

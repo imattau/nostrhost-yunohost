@@ -418,7 +418,15 @@ def is_admin_user(username: str, *, db_path: str | Path | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 # authoring
 
-def _sign_event(operator_sk: str, operator_pubkey: str, kind: int, content: str, tags: list[list[str]]) -> dict[str, Any]:
+def _sign_event(
+    operator_sk: str,
+    operator_pubkey: str,
+    kind: int,
+    content: str,
+    tags: list[list[str]],
+    *,
+    created_at: int | None = None,
+) -> dict[str, Any]:
     """Build and sign a NIP-01 event through the rust-nostr SDK.
 
     The event id is byte-identical to the previous manual canonical
@@ -426,7 +434,7 @@ def _sign_event(operator_sk: str, operator_pubkey: str, kind: int, content: str,
     """
     from nostr_sdk import EventBuilder, Keys, Kind, Tag, Timestamp
 
-    created_at = int(time.time())
+    created_at = int(time.time()) if created_at is None else int(created_at)
     event = (
         EventBuilder(Kind(kind), content)
         .tags([Tag.parse(tag) for tag in tags])

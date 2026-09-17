@@ -191,12 +191,14 @@ def _safe_nsite_block_add(pubkey: str = "", **args: Any) -> dict[str, Any]:
         raise NostrHostError(f"nsite.block.add does not accept extra args: {sorted(args)}")
     if not pubkey:
         raise NostrHostError("nsite.block.add requires a pubkey")
-    from .blocklist import current_blocklist, publish_blocklist
+    from yunohost.nostr_identity import _parse_pubkey
+    from .blocklist import _current_block, publish_blocklist
 
     try:
-        current = set(current_blocklist())
-        current.add(pubkey)
-        return publish_blocklist(sorted(current))
+        target = _parse_pubkey(pubkey)
+        current, latest_created_at = _current_block()
+        pubkeys = sorted({*current, target})
+        return publish_blocklist(pubkeys, latest_created_at=latest_created_at)
     except Exception as exc:  # noqa: BLE001
         raise NostrHostError(f"could not publish the blocklist: {exc}") from exc
 
@@ -206,12 +208,14 @@ def _safe_nsite_block_remove(pubkey: str = "", **args: Any) -> dict[str, Any]:
         raise NostrHostError(f"nsite.block.remove does not accept extra args: {sorted(args)}")
     if not pubkey:
         raise NostrHostError("nsite.block.remove requires a pubkey")
-    from .blocklist import current_blocklist, publish_blocklist
+    from yunohost.nostr_identity import _parse_pubkey
+    from .blocklist import _current_block, publish_blocklist
 
     try:
-        current = set(current_blocklist())
-        current.discard(pubkey)
-        return publish_blocklist(sorted(current))
+        target = _parse_pubkey(pubkey)
+        current, latest_created_at = _current_block()
+        pubkeys = sorted(p for p in current if p != target)
+        return publish_blocklist(pubkeys, latest_created_at=latest_created_at)
     except Exception as exc:  # noqa: BLE001
         raise NostrHostError(f"could not publish the blocklist: {exc}") from exc
 

@@ -1,3 +1,20 @@
+yunohost (12.1.41.70) stable; urgency=low
+
+  * nsite.blocklist fixes (blocks now take effect immediately, both ways):
+    - discover cache is keyed by the relay set only and the cached full site
+      list is re-filtered against the current kind-10000 mute list on every
+      read. Blocking an npub removes its entries from the next (cache-hit)
+      reload instantly instead of waiting for a 22s forced rescan, and
+      unblocking restores them just as fast.
+    - kind-10000 mute-list events are published with a created_at forced
+      strictly newer than the previous event, so an add followed by a remove
+      in the same second is never lost to a same-timestamp clock tie on
+      relays that keep only the newest event per author+kind.
+    - nsite.block.add/remove normalise the pubkey (hex/npub) before the
+      read-modify-write, so removing by npub works.
+
+ -- YunoHost Packaging Team <packaging@yunohost.org>  Fri, 18 Sep 2026 09:00:00 +0000
+
 yunohost (12.1.41.69) stable; urgency=low
 
   * nsite.discover hardening (blob verification, caching, npub blocklist):

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -70,6 +71,23 @@ def test_publish_blocklist_empty_clears():
 
     event = transport.sent[0][1]
     assert [t for t in event["tags"] if t[0] == "p"] == []
+
+
+def test_publish_blocklist_created_at_strictly_newer_than_latest():
+    sk, pk = _new_key()
+    transport = FakeTransport()
+
+    result = publish_blocklist(
+        [pk],
+        operator_sk=sk,
+        control_relay="ws://127.0.0.1:4848",
+        transport=transport,
+        latest_created_at=int(time.time()),
+    )
+
+    event = transport.sent[0][1]
+    assert event["created_at"] > int(time.time())
+    assert result["published_at"] == event["created_at"]
 
 
 def _block_event(*, author, members=(), created_at=100, event_id="e1"):
