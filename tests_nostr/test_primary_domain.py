@@ -59,11 +59,16 @@ def test_primary_apply_sets_exactly_one_flag_and_reconciles_routes(tmp_path, mon
     module = types.ModuleType("yunohost.domain")
     module.domain_main_domain = lambda new_main_domain: changed.append(new_main_domain)
     monkeypatch.setitem(sys.modules, "yunohost.domain", module)
+    init_called = []
+    identity = types.ModuleType("yunohost.nostr_identity")
+    identity._init_headless_yunohost = lambda: init_called.append(True)
+    monkeypatch.setitem(sys.modules, "yunohost.nostr_identity", identity)
 
     result = apply_primary("new.example", service)
 
     assert result["new_domain"] == "new.example"
     assert changed == ["new.example"]
+    assert init_called == [True]
     assert load_domain(tmp_path, "old.example").primary is False
     assert load_domain(tmp_path, "new.example").primary is True
     assert ("new.example", True) in service.caddy.routes

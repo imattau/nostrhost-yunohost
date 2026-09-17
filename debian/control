@@ -20,11 +20,11 @@ Depends: python3-all (>= 3.11),
  , python3-zeroconf (>= 0.47), python3-lexicon,
  , python3-cryptography, python3-jwt, python3-passlib, python3-magic
  , python-is-python3, python3-pydantic, python3-email-validator
- , python3-debian
+ , python3-debian, python3-tomli-w
  , apt, apt-transport-https, apt-utils, aptitude, dirmngr
  , openssh-server, nftables, crowdsec, crowdsec-firewall-bouncer, bind9-dnsutils
  , openssl, ca-certificates, ssl-cert, netcat-openbsd, iproute2
- , dnsmasq, resolvconf, libnss-myhostname
+ , dnsmasq, resolvconf, libnss-myhostname, nscd
  , acl
  , restic
  , git, curl, wget, cron, unzip, jq, bc, at, procps, j2cli

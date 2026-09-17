@@ -1,3 +1,24 @@
+yunohost (12.1.41.65) stable; urgency=low
+
+  * Fix primary server-address changes from the native path (domain.primary.set
+    previously failed and rolled back, so setting/resetting the primary address
+    appeared to "not change").
+    - domain_main_domain is wrapped by @is_unit_operation() and its
+      OperationLogger reads Moulinette.interface.type. The native MCP/API
+      processes never mount a CLI/API interface, so apply_primary crashed with
+      "'NoneType' object has no attribute 'type'". apply_primary now runs the
+      same _init_headless_yunohost() setup as nostr-identityd /
+      nostr-operationsd / nostr-permissiond before calling it.
+    - _set_hostname subprocess-calls `nscd -i hosts`, which raised
+      FileNotFoundError on hosts without nscd -> "Unable to change the main
+      domain". nscd is now a nostrhost-core dependency.
+    - The readiness/plan path imported tomli_w (native_providers TOML writer)
+      which was undeclared in debian/control; python3-tomli-w is now a
+      dependency. Without it plan_primary failed with "No module named
+      'tomli_w'".
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 12:15:00 +0000
+
 yunohost (12.1.41.64) stable; urgency=low
 
   * Web routing: route the native admin API (/package/*) durably on the

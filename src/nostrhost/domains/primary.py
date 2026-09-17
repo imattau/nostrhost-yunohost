@@ -135,6 +135,14 @@ def plan_primary(domain: str, service: DomainService | None = None) -> dict[str,
 
 def apply_primary(domain: str, service: DomainService | None = None) -> dict[str, Any]:
     service = service or DomainService()
+    from yunohost.nostr_identity import _init_headless_yunohost
+
+    # domain_main_domain is wrapped by @is_unit_operation(); its OperationLogger
+    # reads Moulinette.interface.type. The native MCP/API processes never mount a
+    # CLI/API interface, so the headless init (same one nostr-identityd /
+    # nostr-operationsd / nostr-permissiond run) must happen here or the
+    # decorated call crashes with "'NoneType' object has no attribute 'type'".
+    _init_headless_yunohost()
     old_domain = current_primary(service)
     resources = {
         name: load_domain(service.state_dir, name)
