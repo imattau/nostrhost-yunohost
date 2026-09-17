@@ -1249,10 +1249,17 @@ def _render_caddy_base(domain: str) -> None:
     # (postinstall); the current_host marker is written right after this call,
     # so an unset marker also means `domain` is the primary.
     native_api = "1" if (not primary or domain == primary) else ""
+    # External trust by default: only special-use TLDs (.test/.local/...)
+    # render `tls internal`; public domains leave TLS to Caddy's automatic
+    # HTTPS (ACME).
+    from nostrhost.domains.trust import is_internal_trust_domain
+
+    tls_internal = "1" if is_internal_trust_domain(domain) else ""
     context = {
         **os.environ,
         "domain": domain,
         "native_api": native_api,
+        "tls_internal": tls_internal,
     }
     render = jinja2.Environment(autoescape=False).from_string
     Path(CADDY_BASE_DIR, "Caddyfile").write_text(

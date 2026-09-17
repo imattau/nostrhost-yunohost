@@ -446,6 +446,49 @@ def test_caddy_domain_template_gates_native_api_on_primary():
         assert "{{" not in rendered and "}}" not in rendered
 
 
+def test_caddy_domain_template_external_trust_by_default():
+    """External trust by default, internal CA only for special-use TLDs: the
+    caddy_domain.conf template renders `tls internal` ONLY when the renderers
+    set the `tls_internal` var (special-use domains like .test/.local), and
+    never leaks Jinja braces."""
+    import os
+
+    import jinja2
+
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[1] / "conf" / "caddy" / "caddy_domain.conf"
+    ).read_text()
+    env = jinja2.Environment(autoescape=False)
+    render = lambda tls_internal: env.from_string(template).render(
+        {**os.environ, "domain": "nostrhost.duckdns.org", "native_api": "", "tls_internal": tls_internal}
+    )
+
+    internal = render("1")
+    assert "tls internal" in internal
+
+    external = render("")
+    assert "tls internal" not in external
+
+    for rendered in (internal, external):
+        assert "{%" not in rendered and "%}" not in rendered
+        assert "{{" not in rendered and "}}" not in rendered
+
+
+def test_renderers_select_internal_tls_for_special_use_only():
+    """Both renderers (15-caddy hook, _render_caddy_base) must key the
+    `tls_internal` var off is_internal_trust_domain: .test/.local/.internal
+    get the internal CA, public TLDs (duckdns.org) get external trust."""
+    from nostrhost.domains.trust import is_internal_trust_domain
+
+    assert is_internal_trust_domain("nostrhost.test") is True
+    assert is_internal_trust_domain("opencode.nostrhost.test") is True
+    assert is_internal_trust_domain("lan.local") is True
+    assert is_internal_trust_domain("nsites.duckdns.org") is False
+    assert is_internal_trust_domain("example.com") is False
+
+
 def test_web_route_root_excludes_reserved_paths():
     """A [web] resource claiming path "/" gets a host-only catch-all matcher
     (no `path` key). insert_route() always inserts new routes at index 0, so

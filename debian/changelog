@@ -1,3 +1,16 @@
+yunohost (12.1.41.66) stable; urgency=low
+
+  * External trust by default: the per-domain Caddy snippet no longer forces
+    `tls internal` for every domain. Non-special-use domains (e.g. public
+    .duckdns.org names) now leave TLS to Caddy's automatic HTTPS (ACME), so
+    real Let's Encrypt certificates are served without per-domain setup;
+    only special-use TLDs (.test/.local/.localhost/.internal/.home.arpa/
+    .onion) fall back to Caddy's internal CA. The renderers (15-caddy hook
+    and _render_caddy_base) set a `tls_internal` Jinja var from
+    yunohost.utils.dns.is_special_use_tld, mirroring the native_api switch.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 14:30:00 +0000
+
 yunohost (12.1.41.65) stable; urgency=low
 
   * Fix primary server-address changes from the native path (domain.primary.set

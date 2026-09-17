@@ -46,6 +46,14 @@ do_pre_regen() {
         else
             export native_api=""
         fi
+        # External trust by default: only special-use TLDs (.test/.local/...)
+        # render `tls internal` (Caddy's internal CA); real public domains
+        # leave TLS to Caddy's automatic HTTPS (ACME).
+        if python3 -c "from nostrhost.domains.trust import is_internal_trust_domain; import sys; sys.exit(0 if is_internal_trust_domain('$domain') else 1)" 2>/dev/null; then
+            export tls_internal="1"
+        else
+            export tls_internal=""
+        fi
         ynh_render_template "caddy_domain.conf" "${caddy_dir}/conf.d/${domain}.conf"
     done
     exit 0
