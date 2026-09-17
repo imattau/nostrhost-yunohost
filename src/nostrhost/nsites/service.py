@@ -26,6 +26,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1769,16 +1770,30 @@ class NsiteService:
                 relays.append(url)
 
         scan_relays = relays[:max_relays]
+        # Concurrent relay fetch: a serial scan would take ~relays × timeout
+        # (up to ~48s with max_relays=6 and an 8s per-relay deadline), routinely
+        # overrunning the admin client's request timeout. Querying the relays
+        # in parallel drops wall time to ≈ the slowest relay, so the on-demand
+        # scan stays comfortably inside the request budget. Results are merged
+        # after the parallel fetch, so validation/dedupe stay order-independent.
         candidates: list[dict[str, Any]] = []
-        for relay in scan_relays:
-            candidates.extend(
-                _query_relay_events(
-                    relay,
-                    {"kinds": [KIND_ROOT, KIND_NAMED]},
-                    limit=limit,
-                    timeout=timeout,
-                )
-            )
+        if scan_relays:
+            with ThreadPoolExecutor(max_workers=len(scan_relays)) as pool:
+                futures = [
+                    pool.submit(
+                        _query_relay_events,
+                        relay,
+                        {"kinds": [KIND_ROOT, KIND_NAMED]},
+                        limit=limit,
+                        timeout=timeout,
+                    )
+                    for relay in scan_relays
+                ]
+                for future in futures:
+                    try:
+                        candidates.extend(future.result())
+                    except Exception:  # noqa: BLE001 - a failed relay scan is skipped
+                        continue
 
         registered_keys = {
             f"{record.get('pubkey', '')}:{str(record.get('d', ''))}"

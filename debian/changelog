@@ -1,3 +1,15 @@
+yunohost (12.1.41.68) stable; urgency=low
+
+  * nsite.discover: query the operator-trusted catalogue + nsite-lookup relays
+    concurrently instead of serially. A serial scan took ~relays × timeout (up
+    to ~48s with 6 relays and an 8s per-relay deadline), routinely overrunning
+    the admin client's 30s request timeout (browser requests died at ~30s with
+    status 0). The parallel fetch drops wall time to ≈ the slowest relay, so
+    the on-demand scan stays comfortably inside the request budget. Result
+    merging stays order-independent; per-relay failures are skipped.
+
+ -- YunoHost Packaging Team <packaging@yunohost.org>  Wed, 16 Sep 2026 10:00:00 +0000
+
 yunohost (12.1.41.67) stable; urgency=low
 
   * nsite.discover: browse validated NIP-5A site manifests (kinds 15128/35128)

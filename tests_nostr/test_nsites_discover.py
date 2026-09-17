@@ -13,6 +13,7 @@ Run with: PYTHONPATH=src:../../libs/nostrhost-policy/src:../../libs/nostrhost-au
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -177,6 +178,38 @@ def test_discover_bounds_relay_count(tmp_path: Path, monkeypatch):
     result = make_service(tmp_path).discover()
     assert len(result["relays_queried"]) == 6
     assert len(queries) == 6
+
+
+def test_discover_queries_relays_concurrently(tmp_path: Path, monkeypatch):
+    """Parallel relay fetch: every scan relay is queried at once, not serially.
+
+    A serial scan would take ~relays × timeout (up to ~48s), routinely
+    overrunning the admin client's request timeout; the concurrent fetch drops
+    wall time to ≈ the slowest relay. Distinct worker threads per relay prove
+    the parallel path (deterministic: the pool spawns one thread per task).
+    """
+    import nostrhost.connectivity as connectivity
+
+    relays = ["wss://cat.example", "wss://lookup.example", "wss://publish.example"]
+    seen: dict[str, int] = {}
+    barrier = threading.Barrier(len(relays))
+
+    def fake_query(relay, *a, **k):
+        seen[relay] = threading.get_ident()
+        barrier.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(service, "_query_relay_events", fake_query)
+    monkeypatch.setattr(service, "_validate_relay_url", lambda relay, allow_private=False: None)
+    monkeypatch.setattr(
+        connectivity,
+        "effective",
+        lambda: {"relays": {"catalogue": relays, "nsite_lookup": []}, "blossom_servers": [], "sources": {}},
+    )
+
+    make_service(tmp_path).discover()
+    assert set(seen) == set(relays)
+    assert len(set(seen.values())) == len(relays)
 
 
 def test_discover_empty_scan(tmp_path: Path, monkeypatch):
