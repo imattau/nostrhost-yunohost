@@ -59,6 +59,9 @@ class FakeBackend:
     def notifications(self) -> dict:
         return {"policy.toml": '[[rule]]\nrecipient = "npub1test"\nclasses = ["security"]\n', "recipients.toml": '[[recipient]]\nnpub = "npub1test"\nrole = "owner"\n'}
 
+    def network(self) -> dict:
+        return {"firewall.toml": 'router_forwarding_upnp = false\n\n[tcp]\n"22" = [true, true, "SSH"]\n'}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 

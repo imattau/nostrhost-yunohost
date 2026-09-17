@@ -1,3 +1,27 @@
+yunohost (12.1.41.63) stable; urgency=low
+
+  * State layer (nostrhost-state / ngit-NIP-34) follow-ups:
+    - Publish the kind-30617 announcement and kind-2214 state bundles to the
+      system-wide connectivity model's "publish" relays (the same defaults the
+      catalogue synchroniser and Nsite gateway use) when no explicit
+      --relay/NOSTRHOST_STATE_RELAYS is given; postinstall --new/--restore now
+      replicate state off-box automatically. The control relay remains the
+      single mandatory target: a failure there is fatal, while external relay
+      failures are reported (logged / surfaced in the publish summary) and no
+      longer abort the publish, so an isolated node or a temporarily
+      unreachable public relay never blocks the operator path.
+    - Add state/network/firewall.toml to the semantic state export (RM §18.6):
+      firewall intent from /etc/yunohost/firewall.yml (open/upnp/comment per
+      port, router_forwarding_upnp) is rendered verbatim and participates in
+      state git history, backups and restore, like notifications.
+    - Route `nostrhost-state reconcile apply` and `nostrhost-state rollback
+      apply` through the same shared `_run_reconcile_apply` /
+      `_run_rollback_apply` execution path the daemon and `nostrhost` CLI use
+      (removes the duplicated direct apply_* calls), keeping the local
+      --approve operator gate.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 01:20:00 +0000
+
 yunohost (12.1.41.62) stable; urgency=low
 
   * Fix spurious `unauthorized` operation rejections: the control relay's

@@ -198,20 +198,22 @@ def cmd_restore(args) -> int:
 
 def cmd_reconcile(args) -> int:
     if args.reconcile_action == "apply":
+        if not args.approve:
+            print("error: reconciliation plan not approved — re-run with --approve", file=sys.stderr)
+            return EXIT_ERR
         try:
             with open(args.plan, encoding="utf-8") as fh:
                 plan = json.load(fh)
-            from yunohost.nostr_state import apply_reconciliation_plan
+            from yunohost.nostr_operations import _run_reconcile_apply
             from yunohost.nostr_operationsd import YnhExecutorBackend
 
-            report = apply_reconciliation_plan(
-                plan, backend=YnhExecutorBackend(), approve=args.approve, repo=default_repo()
-            )
+            result = _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend(), repo=default_repo())
+            report = result["changes"]
         except Exception as exc:  # noqa: BLE001 - CLI boundary
             print(f"error: reconciliation apply failed: {exc}", file=sys.stderr)
             return EXIT_ERR
         print(json.dumps(report, indent=2, sort_keys=True))
-        return EXIT_OK if all(row["status"] == "executed" for row in report) else EXIT_ERR
+        return EXIT_OK if result["_ok"] else EXIT_ERR
     try:
         from yunohost.nostr_state import YunohostBackend
 
@@ -252,35 +254,37 @@ def cmd_rollback_plan(args) -> int:
 
 
 def cmd_rollback_apply(args) -> int:
-    from yunohost.nostr_rollback import RollbackError, read_plan
+    if not args.approve:
+        print("error: rollback plan not approved — re-run with --approve", file=sys.stderr)
+        return EXIT_ERR
+
+    from yunohost.nostr_rollback import read_plan
 
     try:
         plan = read_plan(args.plan)
     except Exception as exc:  # noqa: BLE001
         print(f"error: cannot read plan: {exc}", file=sys.stderr)
         return EXIT_ERR
-    if not args.approve:
-        print("error: rollback plan not approved — re-run with --approve", file=sys.stderr)
-        return EXIT_ERR
 
     from yunohost.nostr_identity import _init_headless_yunohost
+    from yunohost.nostr_operations import _run_rollback_apply
     from yunohost.nostr_operationsd import YnhExecutorBackend
     from yunohost.nostr_restic import restic_client
-    from yunohost.nostr_rollback import apply_rollback_plan
 
     _init_headless_yunohost()  # the tool handlers need moulinette's op logger
     backend = YnhExecutorBackend()
     restic = restic_client() if plan.get("restic_snapshot") else None
     try:
-        report = apply_rollback_plan(plan, backend=backend, restic=restic, approve=True, repo=default_repo())
-    except RollbackError as exc:
+        result = _run_rollback_apply({"plan": plan}, backend=backend, restic=restic, repo=default_repo())
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERR
+    report = result["steps"]
     for entry in report:
         step = entry["step"]
         fname = step["file"].split("/", 1)[-1]
         print(f"  {entry['status']:<9} {step['section']}/{fname}  {entry.get('detail', '')}")
-    ok = all(e["status"] in ("executed", "restored", "manual", "skipped") for e in report) and plan.get("_ok", True)
+    ok = all(e["status"] in ("executed", "restored", "manual", "skipped") for e in report) and result["_ok"]
     if ok:
         # Re-validation seam: record the post-rollback state so the repo shows
         # what the rollback did. It is NOT auto-marked known-good — the

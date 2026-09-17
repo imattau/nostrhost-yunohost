@@ -60,6 +60,9 @@ class FakeBackend:
     def notifications(self) -> dict:
         return {"policy.toml": '[[rule]]\nrecipient = "npub1test"\nclasses = ["security"]\n', "recipients.toml": '[[recipient]]\nnpub = "npub1test"\nrole = "owner"\n'}
 
+    def network(self) -> dict:
+        return {"firewall.toml": 'router_forwarding_upnp = false\n\n[tcp]\n"22" = [true, true, "SSH"]\n'}
+
     def users(self) -> dict:
         return {"matt": {"fullname": "Matt", "groups": ["all_users", "admins"]}}
 
@@ -80,6 +83,8 @@ def test_export_state_renders_semantic_tree():
     assert tree["security"]["intrusion-protection.toml"]["capi"] == {"enabled": False}
     assert "[[rule]]" in tree["notifications"]["policy.toml"]
     assert "[[recipient]]" in tree["notifications"]["recipients.toml"]
+    assert tree["network"]["firewall.toml"].startswith("router_forwarding_upnp = false")
+    assert '"22" = [true, true, "SSH"]' in tree["network"]["firewall.toml"]
     caps = tree["capabilities"]
     assert list(caps) == ["abc" * 21 + "a.toml"]
     assert caps["abc" * 21 + "a.toml"]["scopes"] == ["server.read"]
@@ -98,6 +103,16 @@ def test_notifications_rendered_verbatim_and_tracked(tmp_path: Path):
     assert "classes = [\"security\"]" in written
     assert "notifications/policy.toml" in repo._git(["ls-files"])
     assert "notifications/recipients.toml" in repo._git(["ls-files"])
+
+
+def test_firewall_state_rendered_verbatim_and_tracked(tmp_path: Path):
+    """state/network/firewall.toml must survive render/commit verbatim and be
+    git-tracked so firewall intent participates in state history (§18.6)."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="e" * 64, phase="post", known_good=True, health="passed")
+    written = (tmp_path / "state" / "network" / "firewall.toml").read_text()
+    assert '"22" = [true, true, "SSH"]' in written
+    assert "network/firewall.toml" in repo._git(["ls-files"])
 
 
 def test_state_repo_commit_history_known_good_and_diff(tmp_path: Path):
@@ -486,6 +501,75 @@ def test_state_bundle_publish_fans_out_and_reports(tmp_path: Path, monkeypatch):
     assert all(ev["kind"] == KIND_STATE_BUNDLE for _relay, ev in sent)
     assert result["sha256"] == result["sha256"]  # deterministic summary present
     assert result["relays"] == ["ws://127.0.0.1:4848", "wss://relay.example.com"]
+
+
+def test_state_publish_relays_falls_back_to_connectivity_publish(monkeypatch):
+    """Without explicit --relay, ngit/state events replicate to the
+    connectivity model's publish-purpose relays (the same defaults the
+    catalogue synchroniser and Nsite gateway use), deduplicated."""
+    from yunohost.nostr_state import _state_publish_relays
+
+    def fake_effective(*_a, **_k):
+        return {"relays": {"publish": ["wss://relay.a", "wss://relay.b", "wss://relay.a"]}}
+
+    monkeypatch.setattr("yunohost.nostrhost.connectivity.effective", fake_effective)
+    assert _state_publish_relays(None) == ["wss://relay.a", "wss://relay.b"]
+    # explicit relays always win over the connectivity fallback
+    assert _state_publish_relays(["wss://explicit"]) == ["wss://explicit"]
+    assert _state_publish_relays([]) == ["wss://relay.a", "wss://relay.b"]
+
+
+def test_state_publish_external_failures_are_best_effort(tmp_path: Path, monkeypatch):
+    """A failing external relay must not abort the publish — the control relay
+    is the only mandatory target. The failure is surfaced in the summary."""
+    from yunohost.nostr_state import publish_state_bundle
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    class _Cfg:
+        server_sk = "ab" * 32
+        server_pubkey = "cd" * 32
+        control_relay = "ws://127.0.0.1:4848"
+
+    sent: list[tuple[str, dict]] = []
+
+    def fake_transport(relay: str, event: dict) -> None:
+        if relay == "wss://down.example.com":
+            raise OSError("unreachable")
+        sent.append((relay, event))
+
+    monkeypatch.setattr("yunohost.nostr_state._operator_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr("yunohost.nostr_state._require_bootstrapped", lambda: None)
+    monkeypatch.setattr("yunohost.nostr_state.state_dir_from_env", lambda: tmp_path / "state")
+
+    result = publish_state_bundle(relays=["wss://down.example.com"], transport=fake_transport)
+    assert result["failed"] == ["wss://down.example.com"]
+    assert result["relays"] == ["ws://127.0.0.1:4848", "wss://down.example.com"]
+    assert len(sent) == result["chunks"]  # only the control relay received the chunks
+
+
+def test_state_publish_control_relay_failure_is_fatal(tmp_path: Path, monkeypatch):
+    """The control relay is mandatory: losing it must abort the publish."""
+    from yunohost.nostr_state import StateError, publish_state_bundle
+
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), op_event_id="c" * 64, phase="post", known_good=True, health="passed")
+
+    class _Cfg:
+        server_sk = "ab" * 32
+        server_pubkey = "cd" * 32
+        control_relay = "ws://127.0.0.1:4848"
+
+    def fake_transport(relay: str, _event: dict) -> None:
+        raise OSError(f"unreachable {relay}")
+
+    monkeypatch.setattr("yunohost.nostr_state._operator_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr("yunohost.nostr_state._require_bootstrapped", lambda: None)
+    monkeypatch.setattr("yunohost.nostr_state.state_dir_from_env", lambda: tmp_path / "state")
+
+    with pytest.raises(StateError):
+        publish_state_bundle(relays=["wss://down.example.com"], transport=fake_transport)
 
 
 def test_state_bundle_snapshot_only_flattens(tmp_path: Path):

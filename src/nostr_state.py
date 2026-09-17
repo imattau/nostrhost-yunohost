@@ -227,6 +227,10 @@ class Backend:
         """Raw policy/recipients TOML (state/notifications/*), verbatim."""
         raise NotImplementedError
 
+    def network(self) -> dict[str, Any]:  # pragma: no cover - interface
+        """Firewall / network desired state (state/network/firewall.toml)."""
+        raise NotImplementedError
+
     def users(self) -> dict[str, dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -418,6 +422,38 @@ class YunohostBackend(Backend):
                 logger.debug("notifications %s state unavailable: %s", name, exc)
         return out
 
+    def network(self) -> dict[str, str]:
+        """Firewall desired state (§18.6 network/firewall.toml).
+
+        Rendered verbatim (like notifications) from
+        ``/etc/yunohost/firewall.yml`` — the semantic firewall config, not the
+        live nftables state — so the open/upnp/comment intent round-trips
+        exactly through the git tree and is diffable. Best-effort: a missing
+        or unreadable firewall config yields an empty section rather than
+        aborting the snapshot."""
+        try:
+            import yaml
+
+            data = yaml.safe_load(Path("/etc/yunohost/firewall.yml").read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001 - best effort per section
+            logger.warning("firewall export failed: %s", exc)
+            return {}
+        lines = ["router_forwarding_upnp = " + str(bool(data.get("router_forwarding_upnp"))).lower()]
+        for protocol in ("tcp", "udp"):
+            ports = data.get(protocol) or {}
+            if not ports:
+                continue
+            lines.append(f"\n[{protocol}]")
+            for port, settings in ports.items():
+                settings = settings or {}
+                comment = str(settings.get("comment") or "")
+                open_ = str(bool(settings.get("open"))).lower()
+                upnp = str(bool(settings.get("upnp"))).lower()
+                # Quoted keys keep ranges/odd port labels valid TOML; the
+                # scalar triple [open, upnp, comment] stays diff-friendly.
+                lines.append(f"{json.dumps(str(port))} = [{open_}, {upnp}, {_tquote(comment)}]")
+        return {"firewall.toml": "\n".join(lines) + "\n"}
+
     def users(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         try:
@@ -460,6 +496,7 @@ def export_state(backend: Backend, capabilities: dict[str, list[str]] | None = N
         "identities": {f"{user}.toml": data for user, data in backend.users().items()},
         "package-versions": {"versions.toml": backend.packages()},
         "security": {"intrusion-protection.toml": backend.security()},
+        "network": backend.network(),
         "notifications": backend.notifications(),
     }
     if capabilities:
@@ -946,6 +983,31 @@ def build_repository_announcement(
     return _sign_event(server_sk, server_pubkey, KIND_REPOSITORY_ANNOUNCEMENT, description, tags)
 
 
+def _state_publish_relays(relays: list[str] | None) -> list[str]:
+    """Resolve the outbound relay targets for ngit/state events.
+
+    Explicit ``--relay`` flags / ``NOSTRHOST_STATE_RELAYS`` win. Otherwise the
+    system-wide connectivity model's ``publish`` purpose relays apply — the
+    same defaults the catalogue synchroniser and Nsite gateway use — so state
+    announcements and bundles replicate outbound to the configured public
+    relays without the operator re-declaring them here. Best-effort: if the
+    connectivity model is unavailable the caller falls back to the control
+    relay alone.
+    """
+    if relays:
+        return list(dict.fromkeys(relays))
+    try:
+        from .nostrhost.connectivity import effective
+    except Exception as exc:  # noqa: BLE001 - publishing must not hard-depend on connectivity
+        logger.warning("connectivity relay defaults unavailable (%s); publishing to the control relay only", exc)
+        return []
+    try:
+        return list(dict.fromkeys(effective()["relays"]["publish"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not resolve publish relays (%s); publishing to the control relay only", exc)
+        return []
+
+
 def announce_state_repository(
     control_relay: str | None = None,
     transport: Callable[[str, dict[str, Any]], None] | None = None,
@@ -953,14 +1015,18 @@ def announce_state_repository(
 ) -> dict[str, Any]:
     """Publish the announcement to the local and configured external relays.
 
-    The control relay is always first and remains mandatory. External relay
-    failures are reported after all targets have been attempted.
+    The control relay is always first and mandatory: a failure to reach it is
+    fatal (the announcement must land in the node's own audit plane). External
+    targets — explicit ``relays``, ``--relay``/env, or the connectivity
+    model's ``publish`` purpose — are best-effort DR/discovery targets: their
+    failures are logged, not raised, so a temporarily unreachable public relay
+    never blocks the operator or postinstall path.
     """
     _require_bootstrapped()
     cfg = _operator_config()
     event = build_repository_announcement(cfg.server_sk, cfg.server_pubkey)
     targets = [control_relay or cfg.control_relay]
-    for relay in relays or []:
+    for relay in _state_publish_relays(relays):
         if relay and relay not in targets:
             targets.append(relay)
     publisher = transport or publish_to_relay
@@ -968,11 +1034,13 @@ def announce_state_repository(
     for relay in targets:
         try:
             publisher(relay, event)
-        except Exception as exc:  # noqa: BLE001 - report fan-out failures after all attempts
+        except Exception as exc:  # noqa: BLE001 - fan-out is best-effort; the control relay is checked below
             failures.append((relay, exc))
-    if failures:
-        failed = ", ".join(f"{relay}: {exc}" for relay, exc in failures)
-        raise StateError(f"repository announcement failed on {len(failures)} relay(s): {failed}")
+    control_failed = [exc for relay, exc in failures if relay == targets[0]]
+    if control_failed:
+        raise StateError(f"repository announcement failed on the control relay ({targets[0]}): {control_failed[0]}")
+    for relay, exc in failures:
+        logger.warning("repository announcement not replicated to %s: %s", relay, exc)
     return event
 
 
@@ -1076,7 +1144,10 @@ def publish_state_bundle(
     Replicates the git objects as chunked, gzip-compressed, server-signed
     kind-2214 events so a blank node can reconstruct the repository from relays
     + identity alone (no central forge). The control relay is always first and
-    mandatory; external relay failures are reported after all targets attempt.
+    mandatory — a failure there is fatal. External targets (explicit
+    ``relays``/``--relay``/env, or the connectivity model's ``publish``
+    purpose) are best-effort DR targets: their failures are surfaced in the
+    returned summary and logged, but do not abort the publish.
     """
     _require_bootstrapped()
     cfg = _operator_config()
@@ -1085,7 +1156,7 @@ def publish_state_bundle(
         repo, cfg.server_sk, cfg.server_pubkey, snapshot_only=snapshot_only
     )
     targets = [control_relay or cfg.control_relay]
-    for relay in relays or []:
+    for relay in _state_publish_relays(relays):
         if relay and relay not in targets:
             targets.append(relay)
     publisher = transport or publish_to_relay
@@ -1096,9 +1167,16 @@ def publish_state_bundle(
                 publisher(relay, event)
             except Exception as exc:  # noqa: BLE001 - report fan-out failures after all attempts
                 failures.append((relay, exc))
-    if failures:
-        failed = ", ".join(f"{relay}: {exc}" for relay, exc in failures)
-        raise StateError(f"state bundle publish failed on {len(failures)} relay(s): {failed}")
+    control_failed = [exc for relay, exc in failures if relay == targets[0]]
+    if control_failed:
+        raise StateError(f"state bundle publish failed on the control relay ({targets[0]}): {control_failed[0]}")
+    external_failed = sorted({relay for relay, _exc in failures if relay != targets[0]})
+    if external_failed:
+        logger.warning(
+            "state bundle not replicated to %d external relay(s): %s",
+            len(external_failed),
+            ", ".join(external_failed),
+        )
     return {
         "revision": revision,
         "chunks": len(events),
@@ -1107,6 +1185,7 @@ def publish_state_bundle(
             b"".join(base64.b64decode(ev["content"]) for ev in events)
         ).hexdigest(),
         "relays": targets,
+        "failed": external_failed,
     }
 
 
