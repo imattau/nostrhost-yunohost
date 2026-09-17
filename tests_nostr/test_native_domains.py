@@ -413,6 +413,39 @@ def test_caddy_domain_template_serves_app_logos_before_sso():
     assert "root * /usr/share/yunohost/applogos" in template
 
 
+def test_caddy_domain_template_gates_native_api_on_primary():
+    """H4: /package/* (the native admin API) must be rendered into the conf.d
+    snippet ONLY for the primary admin domain. The renderers (15-caddy hook,
+    _render_caddy_base) set the `native_api` Jinja var for the primary domain
+    only; a snippet rendered without it must not proxy /package/* at all, and
+    neither render may leak Jinja control braces into the live Caddyfile."""
+    import os
+
+    import jinja2
+
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[1] / "conf" / "caddy" / "caddy_domain.conf"
+    ).read_text()
+    env = jinja2.Environment(autoescape=False)
+    render = lambda native_api: env.from_string(template).render(
+        {**os.environ, "domain": "nostrhost.test", "native_api": native_api}
+    )
+
+    primary = render("1")
+    assert "handle /package/* {" in primary
+    assert "reverse_proxy 127.0.0.1:8190" in primary
+
+    non_primary = render("")
+    assert "handle /package/* {" not in non_primary
+    assert "\treverse_proxy 127.0.0.1:8190" not in non_primary
+
+    for rendered in (primary, non_primary):
+        assert "{%" not in rendered and "%}" not in rendered
+        assert "{{" not in rendered and "}}" not in rendered
+
+
 def test_web_route_root_excludes_reserved_paths():
     """A [web] resource claiming path "/" gets a host-only catch-all matcher
     (no `path` key). insert_route() always inserts new routes at index 0, so

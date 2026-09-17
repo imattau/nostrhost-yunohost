@@ -1226,8 +1226,14 @@ def _render_caddy_base(domain: str) -> None:
 
     The native path renders ``/etc/caddy`` from the shipped templates;
     regenconf's ``15-caddy`` category tracks the same files so later domain
-    adds / drift detection keep working. Uses plain string substitution for
-    ``{{ domain }}`` — the snippet's only variable."""
+    adds / drift detection keep working. Templates are rendered with Jinja2
+    over os.environ (matching ``ynh_render_template`` in the hook) so the
+    per-domain ``{{ domain }}`` and the primary-only ``{{ native_api }}``
+    switch (H4: /package/* only on the primary admin domain) resolve the
+    same way as the regenconf hook. ``domain`` must be the primary server
+    address (postinstall renders it for the node's own domain)."""
+    import jinja2
+
     Path(CADDY_BASE_DIR).mkdir(parents=True, exist_ok=True)
     Path(CADDY_CONF_DIR).mkdir(parents=True, exist_ok=True)
     template_dir = Path(CADDY_TEMPLATE_DIR)
@@ -1235,9 +1241,26 @@ def _render_caddy_base(domain: str) -> None:
     domain_tpl = template_dir / "caddy_domain.conf"
     if not caddyfile.exists() or not domain_tpl.exists():
         raise NostrHostError(f"caddy templates not found in {CADDY_TEMPLATE_DIR}")
-    Path(CADDY_BASE_DIR, "Caddyfile").write_text(caddyfile.read_text(encoding="utf-8"))
-    conf = domain_tpl.read_text(encoding="utf-8").replace("{{ domain }}", domain)
-    Path(CADDY_CONF_DIR, f"{domain}.conf").write_text(conf)
+    try:
+        primary = Path("/etc/yunohost/current_host").read_text(encoding="utf-8").strip()
+    except OSError:
+        primary = ""
+    # `_render_caddy_base` is only invoked for the node's own primary address
+    # (postinstall); the current_host marker is written right after this call,
+    # so an unset marker also means `domain` is the primary.
+    native_api = "1" if (not primary or domain == primary) else ""
+    context = {
+        **os.environ,
+        "domain": domain,
+        "native_api": native_api,
+    }
+    render = jinja2.Environment(autoescape=False).from_string
+    Path(CADDY_BASE_DIR, "Caddyfile").write_text(
+        render(caddyfile.read_text(encoding="utf-8")).render(context)
+    )
+    Path(CADDY_CONF_DIR, f"{domain}.conf").write_text(
+        render(domain_tpl.read_text(encoding="utf-8")).render(context)
+    )
 
 
 def _normalize_sk(value: str) -> str:

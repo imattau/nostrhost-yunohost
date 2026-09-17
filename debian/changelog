@@ -1,3 +1,29 @@
+yunohost (12.1.41.64) stable; urgency=low
+
+  * Web routing: route the native admin API (/package/*) durably on the
+    primary admin domain.
+    - The admin console at /nostrhost/admin/ authenticates exclusively
+      through /package/* (src/nostrhost/api.py on 127.0.0.1:8190). That
+      route only ever existed as a Caddy admin-API route created on
+      domain.add / apply_primary, so domains set up before the native flow
+      (or bootstrapped through the regenconf conf.d snippets alone) never
+      got it: /package/session hit the per-domain root responder, the
+      console's session probe failed, and the admin link bounced back to the
+      portal (ConnectGateView -> portal login -> double-prefixed redirect ->
+      portal 404).
+    - conf/caddy/caddy_domain.conf now renders a `handle /package/*` ->
+      127.0.0.1:8190 proxy block gated on a `native_api` Jinja var, which
+      the renderers (hooks/conf_regen/15-caddy and the native
+      _render_caddy_base in the CLI) set only for the primary admin domain.
+      H4 holds: app subdomains render the snippet without the proxy block,
+      so a subdomain app XSS still cannot reach the admin API.
+    - _render_caddy_base now renders the templates with Jinja2 over
+      os.environ (matching ynh_render_template) instead of plain {{ domain }}
+      string substitution, so the primary-only switch resolves identically on
+      the native postinstall path and through regenconf.
+
+ -- NostrHost <noreply@nostrhost.org>  Thu, 17 Sep 2026 10:20:00 +0000
+
 yunohost (12.1.41.63) stable; urgency=low
 
   * State layer (nostrhost-state / ngit-NIP-34) follow-ups:

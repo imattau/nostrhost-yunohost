@@ -36,8 +36,16 @@ do_pre_regen() {
     for domain in $(nostrhost domain list --output-as json 2>/dev/null | jq -r '.domains[]'); do
         [ -n "$domain" ] || continue
         # ynh_render_template renders with os.environ only (it ignores extra
-        # args), so `domain` must be exported for {{ domain }} to populate.
+        # args), so `domain` and `native_api` must be exported for the
+        # template's {{ domain }} and {% if native_api %} to populate.
         export domain="$domain"
+        # H4: /package/* (the native admin API) is routed only on the primary
+        # admin domain; every other domain renders the snippet without it.
+        if [ "$domain" = "$(cat /etc/yunohost/current_host 2>/dev/null)" ]; then
+            export native_api="1"
+        else
+            export native_api=""
+        fi
         ynh_render_template "caddy_domain.conf" "${caddy_dir}/conf.d/${domain}.conf"
     done
     exit 0
