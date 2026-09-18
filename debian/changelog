@@ -1,3 +1,16 @@
+yunohost (12.1.41.76) stable; urgency=low
+
+  * Nostr network defaults: applying changes no longer loses added relays or
+    storage servers. The connectivity config is now persisted before the
+    catalogue/nsite projection side-effects, and the catalogue synchroniser
+    restart is queued with `systemctl --no-block` instead of running
+    synchronously (a slow-stopping unit could previously stall the apply
+    before the config was written, so added defaults did not survive).
+    - The admin "Nostr network" page also reports a failed apply instead of
+      claiming the defaults were updated.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 12:40:00 +0000
+
 yunohost (12.1.41.75) stable; urgency=low
 
   * Add a ``multi-tenant-runtime`` installation class between "shared" and

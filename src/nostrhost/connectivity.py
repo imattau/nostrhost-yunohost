@@ -176,9 +176,9 @@ def plan_config(value: dict[str, Any]) -> dict[str, Any]:
 def apply_config(value: dict[str, Any]) -> dict[str, Any]:
     before = load_config()
     cfg = validate_config(value)
+    path = save_config(cfg)
     _project_nsite(before, cfg)
     _project_catalogue(cfg)
-    path = save_config(cfg)
     return {
         "action": "nostr.connectivity.set",
         "configured": cfg.model_dump(),
@@ -233,7 +233,7 @@ def _project_catalogue(config: ConnectivityConfig) -> None:
     os.chmod(temporary, 0o600)
     temporary.replace(path)
     subprocess.run(
-        ["systemctl", "try-restart", "nostrhost-catalog.service"],
+        ["systemctl", "--no-block", "try-restart", "nostrhost-catalog.service"],
         capture_output=True,
         text=True,
         check=False,
