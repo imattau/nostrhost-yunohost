@@ -1,3 +1,10 @@
+yunohost (12.1.41.73) stable; urgency=low
+
+  * Portal /me and the admin password profile now follow the authoritative
+    ``admins`` group as well (previously they read only the raw account flag,
+    so a group-promoted user could still be shown as non-admin in the portal
+    and held to the weaker password policy).
+
 yunohost (12.1.41.72) stable; urgency=low
 
   * The ``admins`` group is authoritative for admin status again: adding a
