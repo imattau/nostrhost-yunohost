@@ -1958,19 +1958,41 @@ def test_mcp_endpoint_configure_rejects_invalid_domain(app, monkeypatch, domain)
 
 
 def test_mcp_ca_bundle_unavailable_when_no_internal_ca(app, monkeypatch):
-    monkeypatch.setattr(api_module, "export_ca_bundle", lambda: None)
+    monkeypatch.setattr(api_module, "export_ca_bundle", lambda **kwargs: None)
     status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
     assert status == "200"
     assert json.loads(body) == {"available": False}
 
 
 def test_mcp_ca_bundle_returns_pem_when_available(app, monkeypatch):
-    monkeypatch.setattr(api_module, "export_ca_bundle", lambda: b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n")
+    monkeypatch.setattr(
+        api_module, "export_ca_bundle", lambda **kwargs: b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"
+    )
     status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
     assert status == "200"
     data = json.loads(body)
     assert data["available"] is True
     assert data["pem"] == "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"
+
+
+def test_mcp_ca_bundle_passes_configured_domain(app, monkeypatch):
+    """The CA-bundle decision must be based on the configured endpoint domain:
+    a public ACME domain yields available False even when the node keeps an
+    internal CA for its lab/test domains."""
+    captured = {}
+
+    def fake_export(domain, **kwargs):
+        captured["domain"] = domain
+        return None
+
+    monkeypatch.setattr(api_module, "export_ca_bundle", fake_export)
+    monkeypatch.setattr(api_module, "read_endpoint_config", lambda: {"domain": "nmcp.example.com", "port": 8930})
+
+    status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
+
+    assert status == "200"
+    assert captured["domain"] == "nmcp.example.com"
+    assert json.loads(body) == {"available": False}
 
 
 # --------------------------------------------------------------------------- #

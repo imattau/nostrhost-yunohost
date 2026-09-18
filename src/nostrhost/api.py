@@ -1994,7 +1994,8 @@ def build_app(
         node's certificate — only meaningful when the MCP domain uses
         Caddy's internal CA (a lab/test domain); a public ACME certificate
         needs no client-side trust change, so ``available`` is false."""
-        bundle = export_ca_bundle()
+        config = read_endpoint_config()
+        bundle = export_ca_bundle(domain=config["domain"] if config else None)
         if bundle is None:
             return {"available": False}
         return {"available": True, "pem": bundle.decode("utf-8", errors="replace")}

@@ -17,6 +17,8 @@ from typing import Any
 
 import tomli_w
 
+from .domains.trust import is_internal_trust_domain
+
 CONFIG_PATH = os.environ.get("NOSTRHOST_MCP_CONFIG", "/etc/nostrhost/mcp.toml")
 DEFAULT_PORT = 8930
 
@@ -85,12 +87,22 @@ def remove_route(domain: str, *, caddy_admin_url: str | None = None) -> None:
 
 
 def export_ca_bundle(
-    *, caddy_root: str = CADDY_INTERNAL_ROOT, system_bundle: str = SYSTEM_CA_BUNDLE
+    *,
+    domain: str | None = None,
+    caddy_root: str = CADDY_INTERNAL_ROOT,
+    system_bundle: str = SYSTEM_CA_BUNDLE,
 ) -> bytes | None:
-    """The combined CA bundle (system CAs + Caddy's internal root), or None
-    when this node isn't using Caddy's internal CA — a public ACME
-    certificate needs no extra client trust at all, so there is nothing to
-    export."""
+    """The combined CA bundle (system CAs + Caddy's internal root) a remote
+    MCP client must trust, or None when no extra client-side trust is needed.
+
+    Extra trust is only meaningful when the endpoint's domain actually uses
+    Caddy's internal CA (a lab/test ``tls internal`` domain); a public ACME
+    certificate is already trusted by the client's system CAs, so there is
+    nothing to export. ``domain`` is the configured MCP endpoint domain —
+    without one (or with a public domain) nothing is exported.
+    """
+    if domain is None or not is_internal_trust_domain(domain):
+        return None
     if not os.path.exists(caddy_root):
         return None
     with open(caddy_root, "rb") as fh:

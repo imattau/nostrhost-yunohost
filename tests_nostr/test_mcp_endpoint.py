@@ -109,7 +109,9 @@ def test_remove_route_leaves_config_when_domain_does_not_match(monkeypatch, tmp_
 
 def test_export_ca_bundle_none_when_no_internal_ca(tmp_path):
     bundle = mcp_endpoint.export_ca_bundle(
-        caddy_root=str(tmp_path / "root.crt"), system_bundle=str(tmp_path / "system.crt")
+        domain="mcp.example.test",
+        caddy_root=str(tmp_path / "root.crt"),
+        system_bundle=str(tmp_path / "system.crt"),
     )
     assert bundle is None
 
@@ -120,7 +122,9 @@ def test_export_ca_bundle_combines_system_and_caddy_root(tmp_path):
     system_bundle = tmp_path / "system.crt"
     system_bundle.write_bytes(b"-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n")
 
-    bundle = mcp_endpoint.export_ca_bundle(caddy_root=str(caddy_root), system_bundle=str(system_bundle))
+    bundle = mcp_endpoint.export_ca_bundle(
+        domain="mcp.example.test", caddy_root=str(caddy_root), system_bundle=str(system_bundle)
+    )
 
     assert bundle == system_bundle.read_bytes() + caddy_root.read_bytes()
 
@@ -129,6 +133,34 @@ def test_export_ca_bundle_works_without_a_system_bundle(tmp_path):
     caddy_root = tmp_path / "root.crt"
     caddy_root.write_bytes(b"CADDY-ROOT\n")
 
-    bundle = mcp_endpoint.export_ca_bundle(caddy_root=str(caddy_root), system_bundle=str(tmp_path / "nope.crt"))
+    bundle = mcp_endpoint.export_ca_bundle(
+        domain="mcp.example.test", caddy_root=str(caddy_root), system_bundle=str(tmp_path / "nope.crt")
+    )
 
     assert bundle == b"CADDY-ROOT\n"
+
+
+def test_export_ca_bundle_none_for_public_acme_domain(tmp_path):
+    """A public ACME domain needs no client-side trust even when the node
+    keeps an internal CA for its lab/test domains (regression: the bundle
+    was previously exported whenever Caddy's internal root existed on disk,
+    so every public-cert endpoint wrongly reported self-signed)."""
+    caddy_root = tmp_path / "root.crt"
+    caddy_root.write_bytes(b"CADDY-ROOT\n")
+
+    bundle = mcp_endpoint.export_ca_bundle(
+        domain="mcp.example.com", caddy_root=str(caddy_root), system_bundle=str(tmp_path / "system.crt")
+    )
+
+    assert bundle is None
+
+
+def test_export_ca_bundle_none_without_a_configured_domain(tmp_path):
+    caddy_root = tmp_path / "root.crt"
+    caddy_root.write_bytes(b"CADDY-ROOT\n")
+
+    bundle = mcp_endpoint.export_ca_bundle(
+        caddy_root=str(caddy_root), system_bundle=str(tmp_path / "system.crt")
+    )
+
+    assert bundle is None
