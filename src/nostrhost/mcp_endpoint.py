@@ -12,6 +12,7 @@ back without the operator re-typing it.
 from __future__ import annotations
 
 import os
+import subprocess
 import tomllib
 from typing import Any
 
@@ -30,6 +31,13 @@ CADDY_INTERNAL_ROOT = os.environ.get(
     "NOSTRHOST_CADDY_INTERNAL_ROOT", "/var/lib/caddy/pki/authorities/local/root.crt"
 )
 SYSTEM_CA_BUNDLE = os.environ.get("NOSTRHOST_SYSTEM_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt")
+
+# The adapter unit's EnvironmentFile: reverse-proxy Host names the adapter's
+# DNS-rebinding protection must accept (NOSTRHOST_MCP_ALLOWED_HOSTS). A public
+# endpoint domain configured here is appended so requests arriving through
+# Caddy with that Host header reach the adapter instead of a 421.
+MCP_ENV_PATH = os.environ.get("NOSTRHOST_MCP_ENV", "/etc/nostrhost/mcp.env")
+MCP_SERVICE = os.environ.get("NOSTRHOST_MCP_SERVICE", "nostrhost-mcp.service")
 
 
 def read_endpoint_config(path: str | None = None) -> dict[str, Any] | None:
@@ -57,6 +65,38 @@ def write_endpoint_config(domain: str, port: int, *, path: str | None = None) ->
     os.chmod(path, 0o644)  # not secret: a hostname + port, readable like relay.toml
 
 
+def _ensure_adapter_host(domain: str) -> bool:
+    """Add ``domain`` to the adapter's NOSTRHOST_MCP_ALLOWED_HOSTS and restart
+    the adapter when the list changes, so requests proxied through Caddy with
+    that Host header are accepted instead of rejected with 421 (the MCP SDK's
+    DNS-rebinding protection only accepts loopback + the allowlisted hosts).
+
+    Returns True when the adapter was restarted. No-op when mcp.env is absent
+    (a dev/offline box without the adapter unit)."""
+    if not os.path.exists(MCP_ENV_PATH):
+        return False
+    with open(MCP_ENV_PATH, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    hosts: list[str] = []
+    prefix = "NOSTRHOST_MCP_ALLOWED_HOSTS="
+    out: list[str] = []
+    for line in lines:
+        if line.startswith(prefix):
+            hosts = [h.strip() for h in line[len(prefix) :].replace(",", " ").split() if h.strip()]
+            if domain in hosts:
+                return False  # already allowed, nothing to do
+            hosts.append(domain)
+            out.append(f"{prefix}{' '.join(hosts)}")
+        else:
+            out.append(line)
+    if not hosts:
+        out.append(f"{prefix}{domain}")
+    with open(MCP_ENV_PATH, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    subprocess.run(["systemctl", "restart", MCP_SERVICE], check=False)
+    return True
+
+
 def configure_route(domain: str, *, port: int = DEFAULT_PORT, caddy_admin_url: str | None = None) -> str:
     """Ensure the domain's Caddy site exists and routes to the local MCP
     adapter, then persist the choice. Idempotent — safe to re-run after
@@ -65,13 +105,16 @@ def configure_route(domain: str, *, port: int = DEFAULT_PORT, caddy_admin_url: s
     The domain itself must already be able to resolve/issue a certificate
     the way any other NostrHost domain does; this only adds the MCP app's
     route on top of it (the same shape a native ``[web]`` resource's route
-    takes), it does not run DNS/domain registration.
+    takes), it does not run DNS/domain registration. The adapter is also told
+    to accept the domain's Host header (and restarted) so proxied requests
+    aren't rejected by its DNS-rebinding protection.
     """
     from .caddy_admin import CaddyAdminClient, build_web_route
 
     client = CaddyAdminClient(caddy_admin_url) if caddy_admin_url else CaddyAdminClient()
     client.ensure_domain_site(domain)
     route_id = client.ensure_route(build_web_route({"app": "mcp", "domain": domain, "upstream": f"127.0.0.1:{port}"}))
+    _ensure_adapter_host(domain)
     write_endpoint_config(domain, port)
     return route_id
 

@@ -262,3 +262,35 @@ def test_main_entry_prints_help(capsys):
     code = cli_module.main(["--help"])
     assert code == 0
     assert "Usage:" in capsys.readouterr().out
+
+
+def test_reconcile_routes_replays_configured_mcp_endpoint(app, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli_module, "_iter_installed_manifests", lambda: [])
+    monkeypatch.setattr(
+        "nostrhost.mcp_endpoint.read_endpoint_config",
+        lambda: {"domain": "nmcp.example.com", "port": 8930},
+    )
+    monkeypatch.setattr(
+        "nostrhost.mcp_endpoint.configure_route",
+        lambda domain, **kwargs: captured.update(domain=domain, kwargs=kwargs) or "nostrhost-web:mcp",
+    )
+
+    result = _invoke(app, ["app", "reconcile-routes", "--output-as", "json"])
+
+    assert result.exit_code == 0
+    assert captured["domain"] == "nmcp.example.com"
+    assert captured["kwargs"] == {"port": 8930}
+    data = json.loads(result.stdout)
+    assert data["reconciled"]["mcp"] == {"ok": True, "configured": True, "domain": "nmcp.example.com"}
+
+
+def test_reconcile_routes_skips_mcp_when_unconfigured(app, monkeypatch):
+    monkeypatch.setattr(cli_module, "_iter_installed_manifests", lambda: [])
+    monkeypatch.setattr("nostrhost.mcp_endpoint.read_endpoint_config", lambda: None)
+
+    result = _invoke(app, ["app", "reconcile-routes", "--output-as", "json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["reconciled"]["mcp"] == {"ok": True, "configured": False}

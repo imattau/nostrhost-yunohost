@@ -1,3 +1,18 @@
+yunohost (12.1.41.82) stable; urgency=low
+
+  * MCP endpoint survives Caddy reloads and accepts public reverse-proxy
+    Host names:
+    - configure_route now appends the endpoint domain to the adapter's
+      NOSTRHOST_MCP_ALLOWED_HOSTS (/etc/nostrhost/mcp.env) and restarts
+      nostrhost-mcp when it changes, so requests proxied through Caddy with
+      that Host header reach the adapter instead of being rejected with 421
+      (the MCP SDK's DNS-rebinding protection).
+    - `nostrhost app reconcile-routes` now replays the ad-hoc MCP endpoint
+      route (from mcp.toml) alongside installed app routes, so the endpoint
+      no longer silently drops after any Caddy restart/reload.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 17:40:00 +0000
+
 yunohost (12.1.41.81) stable; urgency=low
 
   * Fix the MCP endpoint CA-bundle decision: export_ca_bundle now only

@@ -63,6 +63,7 @@ def test_read_endpoint_config_ignores_missing_domain(tmp_path):
 
 def test_configure_route_ensures_site_then_route_then_persists(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_endpoint, "CONFIG_PATH", str(tmp_path / "mcp.toml"))
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(tmp_path / "nope.env"))
     monkeypatch.setattr(caddy_admin_module, "CaddyAdminClient", FakeCaddyAdminClient)
 
     route_id = mcp_endpoint.configure_route("mcp.example.com", port=9999)
@@ -77,6 +78,7 @@ def test_configure_route_ensures_site_then_route_then_persists(monkeypatch, tmp_
 
 def test_configure_route_is_idempotent_on_reconfigure(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_endpoint, "CONFIG_PATH", str(tmp_path / "mcp.toml"))
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(tmp_path / "nope.env"))
     monkeypatch.setattr(caddy_admin_module, "CaddyAdminClient", FakeCaddyAdminClient)
 
     mcp_endpoint.configure_route("mcp.example.com", port=8930)
@@ -88,6 +90,7 @@ def test_configure_route_is_idempotent_on_reconfigure(monkeypatch, tmp_path):
 def test_remove_route_deletes_the_mcp_route_and_config(monkeypatch, tmp_path):
     config_path = str(tmp_path / "mcp.toml")
     monkeypatch.setattr(mcp_endpoint, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(tmp_path / "nope.env"))
     monkeypatch.setattr(caddy_admin_module, "CaddyAdminClient", FakeCaddyAdminClient)
 
     mcp_endpoint.configure_route("mcp.example.com", port=8930)
@@ -99,6 +102,7 @@ def test_remove_route_deletes_the_mcp_route_and_config(monkeypatch, tmp_path):
 
 def test_remove_route_leaves_config_when_domain_does_not_match(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_endpoint, "CONFIG_PATH", str(tmp_path / "mcp.toml"))
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(tmp_path / "nope.env"))
     monkeypatch.setattr(caddy_admin_module, "CaddyAdminClient", FakeCaddyAdminClient)
 
     mcp_endpoint.configure_route("mcp.example.com", port=8930)
@@ -164,3 +168,56 @@ def test_export_ca_bundle_none_without_a_configured_domain(tmp_path):
     )
 
     assert bundle is None
+
+
+def test_ensure_adapter_host_appends_domain_and_restarts(monkeypatch, tmp_path):
+    env_path = tmp_path / "mcp.env"
+    env_path.write_text("NOSTRHOST_AGENT_SK=abc\nNOSTRHOST_MCP_ALLOWED_HOSTS=mcp.nostrhost.test\n")
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(env_path))
+    restarts = []
+    monkeypatch.setattr(mcp_endpoint.subprocess, "run", lambda args, **kwargs: restarts.append(args))
+
+    restarted = mcp_endpoint._ensure_adapter_host("nmcp.example.com")
+
+    assert restarted is True
+    assert env_path.read_text() == (
+        "NOSTRHOST_AGENT_SK=abc\nNOSTRHOST_MCP_ALLOWED_HOSTS=mcp.nostrhost.test nmcp.example.com\n"
+    )
+    assert restarts == [["systemctl", "restart", mcp_endpoint.MCP_SERVICE]]
+
+
+def test_ensure_adapter_host_noop_when_domain_already_allowed(monkeypatch, tmp_path):
+    env_path = tmp_path / "mcp.env"
+    env_path.write_text("NOSTRHOST_MCP_ALLOWED_HOSTS=mcp.nostrhost.test nmcp.example.com\n")
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(env_path))
+    restarts = []
+    monkeypatch.setattr(mcp_endpoint.subprocess, "run", lambda args, **kwargs: restarts.append(args))
+
+    restarted = mcp_endpoint._ensure_adapter_host("nmcp.example.com")
+
+    assert restarted is False
+    assert env_path.read_text() == "NOSTRHOST_MCP_ALLOWED_HOSTS=mcp.nostrhost.test nmcp.example.com\n"
+    assert restarts == []
+
+
+def test_ensure_adapter_host_creates_var_when_missing(monkeypatch, tmp_path):
+    env_path = tmp_path / "mcp.env"
+    env_path.write_text("NOSTRHOST_AGENT_SK=abc\n")
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(env_path))
+    restarts = []
+    monkeypatch.setattr(mcp_endpoint.subprocess, "run", lambda args, **kwargs: restarts.append(args))
+
+    restarted = mcp_endpoint._ensure_adapter_host("nmcp.example.com")
+
+    assert restarted is True
+    assert env_path.read_text() == "NOSTRHOST_AGENT_SK=abc\nNOSTRHOST_MCP_ALLOWED_HOSTS=nmcp.example.com\n"
+    assert len(restarts) == 1
+
+
+def test_ensure_adapter_host_noop_without_env_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(mcp_endpoint, "MCP_ENV_PATH", str(tmp_path / "nope.env"))
+    restarts = []
+    monkeypatch.setattr(mcp_endpoint.subprocess, "run", lambda args, **kwargs: restarts.append(args))
+
+    assert mcp_endpoint._ensure_adapter_host("nmcp.example.com") is False
+    assert restarts == []

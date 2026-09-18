@@ -2132,6 +2132,24 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return _lifecycle_report("change-url", envelope, body)
         _guard(run, output_as)
 
+    def _reconcile_mcp_endpoint() -> dict[str, Any]:
+        """Re-apply the ad-hoc MCP endpoint route after a Caddy restart.
+
+        The MCP endpoint route is configured ad-hoc (mcp.toml) rather than by
+        an installed app, so ``reconcile-routes`` must replay it too or the
+        endpoint silently stops working after any Caddy reload/restart.
+        Best-effort: returns an ok/error envelope either way."""
+        try:
+            from .mcp_endpoint import configure_route, read_endpoint_config
+
+            mcp_config = read_endpoint_config()
+            if not mcp_config:
+                return {"ok": True, "configured": False}
+            configure_route(mcp_config["domain"], port=mcp_config["port"])
+            return {"ok": True, "configured": True, "domain": mcp_config["domain"]}
+        except Exception as exc:  # noqa: BLE001 - best-effort reconciliation
+            return {"ok": False, "error": str(exc)}
+
     @app_group.command("reconcile-routes")
     def app_reconcile_routes(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Re-apply every installed native app's Caddy route (best-effort).
@@ -2164,6 +2182,10 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                     results[app_id] = {"ok": bool(body.get("ok")), "reason": body.get("reason") or body.get("state")}
                 except Exception as exc:  # noqa: BLE001 - best-effort across every installed app
                     results[app_id] = {"ok": False, "error": str(exc)}
+            # The MCP endpoint route is configured ad-hoc (mcp.toml) rather than
+            # by an installed app, so a Caddy restart drops it just like the app
+            # routes above — replay it too so the endpoint survives reloads.
+            results["mcp"] = _reconcile_mcp_endpoint()
             return {"reconciled": results}
         _guard(run, output_as)
 
