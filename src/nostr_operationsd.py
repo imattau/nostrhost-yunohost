@@ -10,8 +10,7 @@ Consumes the operation chain (kinds 2200–2204) and capability grants
  2. authorises the requester (admin, or granted scope from 31100 events;
     otherwise → auto-reject),
  3. gates on admin approval (kind 2201) unless the tool does not require it
-    or the actor is itself an admin (an admin's own request is the approval;
-    owner-co-signed policies still require the configured operator),
+    or the actor is itself an admin (an admin's own request is the approval),
  4. publishes execution-started (2203) as the server key,
  5. runs the tool through the injected backend (real = fork's safe read-only
     functions),
@@ -41,6 +40,7 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _is_hex64,
     _operator_config,
+    pubkey_is_admin,
     _require_bootstrapped,
     _sign_auth_event,
     _wait_auth_ok_async,
@@ -128,11 +128,13 @@ class OperationEngine:
         policy: Callable[[str, dict[str, Any], str], dict[str, Any] | bool | None] | None = None,
         policy_owner: str | None = None,
         brokers: tuple[str, ...] | list[str] = (),
+        admin_authorizer: Callable[[str], bool] | None = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
         self._server_pubkey = _derive_pubkey(server_sk)
-        self._admins = tuple(admins)
+        self._admins = tuple(admin.lower() for admin in admins)
+        self._admin_authorizer = admin_authorizer
         self._brokers = tuple(brokers)
         self._backend = backend or YnhExecutorBackend()
         self._state = state  # optional StateRecorder (Stage A: pre/post snapshots)
@@ -266,28 +268,39 @@ class OperationEngine:
         The approval step exists to let an admin authorise a *non-admin*
         caller (a delegated agent or a broker-relayed scoped user). When the
         actor is already an admin there is no separate authority left to ask,
-        so the admin's own signed request is the approval. Owner-co-signed
-        policies (``owner_signature_required``) still require the configured
-        operator specifically - a different admin cannot stand in for them.
+        so the admin's own signed request is the approval. YunoHost's current
+        ``admins`` group is authoritative for operation approvals; the
+        operator has no additional approval privilege over another admin.
         """
-        admins = {admin.lower() for admin in self._admins}
-        if record.actor not in admins:
+        return self._is_approver(record.actor)
+
+    def _is_approver(self, pubkey: str | None) -> bool:
+        """Resolve operation approval authority at decision time.
+
+        Static keys remain the bootstrap fallback. The injected resolver adds
+        enabled identities linked to current members of the YunoHost
+        ``admins`` group without broadening operation-submission scopes.
+        """
+        if not isinstance(pubkey, str):
             return False
-        if record.policy and record.policy.get("owner_signature_required"):
-            return self._policy_owner is not None and record.actor == self._policy_owner.lower()
-        return True
+        normalized = pubkey.lower()
+        if normalized in self._admins:
+            return True
+        if self._admin_authorizer is None:
+            return False
+        try:
+            return bool(self._admin_authorizer(normalized))
+        except Exception:  # noqa: BLE001 - authorization backend must fail closed
+            logger.exception("dynamic admin resolution failed for %s", normalized[:16])
+            return False
 
     def handle_approval(self, event: dict[str, Any]) -> bool:
         record, request_id = self._chain_target(event)
         if record is None or request_id is None:
             return False
-        if event.get("pubkey") not in self._admins:
+        if not self._is_approver(event.get("pubkey")):
             logger.warning("approval for %s by non-admin ignored", request_id[:16])
             return False
-        if record.policy and record.policy.get("owner_signature_required"):
-            if not self._policy_owner or event.get("pubkey") != self._policy_owner:
-                logger.warning("owner approval for %s by non-owner ignored", request_id[:16])
-                return False
         try:
             self._evaluate_policy(record)
         except Exception as exc:  # noqa: BLE001 - policy may change while awaiting approval
@@ -306,7 +319,7 @@ class OperationEngine:
         record, request_id = self._chain_target(event)
         if record is None or request_id is None:
             return False
-        if event.get("pubkey") not in self._admins:
+        if not self._is_approver(event.get("pubkey")):
             logger.warning("rejection for %s by non-admin ignored", request_id[:16])
             return False
         try:
@@ -722,6 +735,7 @@ def run() -> None:
     engine = OperationEngine(
         publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
         restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
+        admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
     )
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
@@ -741,12 +755,14 @@ def run() -> None:
             policy=policy,
             policy_owner=cfg.operator_pubkey,
             brokers=cfg.broker_pubkeys,
+            admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
         )
     except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
         logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
         engine = OperationEngine(
             publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
             restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
+            admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
         )
     # Preload the replaceable capability/delegation grants with dedicated
     # single-kind queries before the live subscription (see

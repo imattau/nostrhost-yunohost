@@ -2098,6 +2098,7 @@ def test_package_operations_approve_falls_back_to_admin_key(app, monkeypatch):
     assert status == "200"
     data = json.loads(body)
     assert data["ok"] is True
+    assert data["status"] == "submitted"
     assert data["event_id"] == "event-id"
     assert captured["note"] == "ok"
 
@@ -2112,6 +2113,7 @@ def test_package_operations_approve_with_bunker_event(app, monkeypatch):
     status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/approve", {"event": signed})
     assert status == "200"
     data = json.loads(body)
+    assert data["status"] == "submitted"
     assert data["event_id"] == signed["id"]
     assert published["relay"] == "ws://relay.test"
 
@@ -2141,6 +2143,7 @@ def test_package_operations_reject_falls_back_to_admin_key(app, monkeypatch):
     monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
     status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/reject", {"reason": "no"})
     assert status == "200"
+    assert json.loads(body)["status"] == "submitted"
     assert captured["reason"] == "no"
 
 
@@ -2152,7 +2155,10 @@ def test_package_operations_reject_with_bunker_event(app, monkeypatch):
     monkeypatch.setattr(api_module, "_config_control_relay", lambda: None)
     status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/reject", {"event": signed})
     assert status == "200"
-    assert json.loads(body)["event_id"] == signed["id"]
+    data = json.loads(body)
+    assert data["status"] == "submitted"
+    assert data["event_id"] == signed["id"]
+
 
 def test_contribution_settings_returns_unwrapped_result(monkeypatch):
     """The admin client contract is the settings object, not the signed-chain

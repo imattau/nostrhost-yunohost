@@ -18,6 +18,7 @@ from yunohost.nostr_identity import (
     _store,
     is_admin_user,
     link_identity,
+    pubkey_is_admin,
     resolve_pubkey,
     resolve_username,
     revoke_identity,
@@ -106,6 +107,41 @@ def test_revoke_identity_publishes():
 
 def test_resolve_empty(tmp_path):
     assert resolve_pubkey("f" * 64, db_path=tmp_path / "i.db") is None
+
+
+def test_configured_pubkey_is_admin_without_identity_store():
+    _, admin_pk = new_key()
+    assert pubkey_is_admin(admin_pk.upper(), configured_admins=[admin_pk])
+
+
+def test_linked_identity_uses_current_account_admin_membership():
+    _, linked_pk = new_key()
+    identity = type("LinkedIdentity", (), {"username": "secondary", "enabled": True})()
+    memberships = {"secondary": True}
+
+    def resolve(_pubkey, *, db_path=None):
+        return identity
+
+    assert pubkey_is_admin(
+        linked_pk,
+        identity_resolver=resolve,
+        user_admin_resolver=lambda username: memberships.get(username, False),
+    )
+    memberships["secondary"] = False
+    assert not pubkey_is_admin(
+        linked_pk,
+        identity_resolver=resolve,
+        user_admin_resolver=lambda username: memberships.get(username, False),
+    )
+
+
+def test_dynamic_admin_resolution_fails_closed():
+    _, linked_pk = new_key()
+
+    def unavailable(_pubkey, *, db_path=None):
+        raise OSError("identity store unavailable")
+
+    assert not pubkey_is_admin(linked_pk, identity_resolver=unavailable)
 
 
 def test_projector_materializes_and_creates_account(tmp_path):
