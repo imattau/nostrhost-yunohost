@@ -1,3 +1,14 @@
+yunohost (12.1.41.79) stable; urgency=low
+
+  * Fix the bare-domain-root portal redirect shipped in 12.1.41.78: the
+    Caddyfile form `redir /nostrhost/sso/ permanent` was parsed as a redirect
+    OF /nostrhost/sso/ to the relative location "permanent" (302), so the
+    root still served the placeholder. Use the explicit three-argument form
+    `redir / /nostrhost/sso/ permanent` (301) so visiting the bare domain
+    reaches the portal.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 15:45:00 +0000
+
 yunohost (12.1.41.78) stable; urgency=low
 
   * Bare domain root now 301s to the user portal (/nostrhost/sso) instead of
