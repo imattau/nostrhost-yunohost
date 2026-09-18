@@ -1972,12 +1972,18 @@ def _read_e_tag(event: dict[str, Any]) -> str | None:
     return None
 
 
-def fetch_chain_events(relay_url: str, *, kinds: tuple[int, ...] | None = None, timeout: float = 3.0) -> list[dict[str, Any]]:
+def fetch_chain_events(relay_url: str, *, kinds: tuple[int, ...] | None = None, timeout: float = 10.0, page_limit: int = 20000) -> list[dict[str, Any]]:
     """REQ the chain kinds on the control relay; return the stored events.
 
     Handles the NIP-42 AUTH challenge (control kinds are protected by
     default), authenticating the connection as the operator - the same
-    handshake ``bin/nostr-opctl status`` performs."""
+    handshake ``bin/nostr-opctl status`` performs.
+
+    Pages with ``until`` until a short page is returned. The relay caps an
+    unlimited REQ well below the full chain (badger's default limit is
+    MaxLimit/4), so a single request would silently drop older events and
+    make chain reconstruction report stale states.
+    """
     import secrets
 
     from websockets.sync.client import connect
@@ -1985,31 +1991,50 @@ def fetch_chain_events(relay_url: str, *, kinds: tuple[int, ...] | None = None, 
     from .nostr_identity import _sign_auth_event, _wait_auth_ok, default_auth
 
     kinds = kinds or CHAIN_KINDS
-    events: list[dict[str, Any]] = []
-    with connect(relay_url) as ws:
-        sub_id = "nostrhost-ops-" + secrets.token_hex(4)
-        req = json.dumps(["REQ", sub_id, {"kinds": list(kinds)}])
-        ws.send(req)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                msg = json.loads(ws.recv(timeout=0.5))
-            except TimeoutError:
-                continue
-            if msg[0] == "AUTH":
-                auth = default_auth()
-                if auth is not None:
-                    challenge = msg[1] if len(msg) > 1 else ""
-                    auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
-                    ws.send(json.dumps(["AUTH", auth_ev]))
-                    _wait_auth_ok(ws, auth_ev["id"], deadline)
-                    ws.send(req)  # re-send the REQ now that the connection is authed
-                continue
-            if msg[0] == "EVENT":
-                events.append(msg[2])
-            elif msg[0] == "EOSE":
-                break
-    return events
+    collected: dict[str, dict[str, Any]] = {}
+    until: int | None = None
+    while True:
+        filter_obj: dict[str, Any] = {"kinds": list(kinds), "limit": page_limit}
+        if until is not None:
+            filter_obj["until"] = until
+        page: list[dict[str, Any]] = []
+        with connect(relay_url) as ws:
+            sub_id = "nostrhost-ops-" + secrets.token_hex(4)
+            req = json.dumps(["REQ", sub_id, filter_obj])
+            ws.send(req)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    msg = json.loads(ws.recv(timeout=0.5))
+                except TimeoutError:
+                    continue
+                if msg[0] == "AUTH":
+                    auth = default_auth()
+                    if auth is not None:
+                        challenge = msg[1] if len(msg) > 1 else ""
+                        auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
+                        ws.send(json.dumps(["AUTH", auth_ev]))
+                        _wait_auth_ok(ws, auth_ev["id"], deadline)
+                        ws.send(req)  # re-send the REQ now that the connection is authed
+                    continue
+                if msg[0] == "EVENT":
+                    page.append(msg[2])
+                elif msg[0] == "EOSE":
+                    break
+        fresh = [event for event in page if event.get("id") not in collected]
+        for event in page:
+            collected[event["id"]] = event
+        # A short page means the store is exhausted; stop. A full page with no
+        # new events would otherwise loop forever on a same-second boundary.
+        if len(page) < page_limit or not fresh:
+            break
+        oldest = min(int(event.get("created_at") or 0) for event in page)
+        if until is not None and oldest >= until:
+            oldest = until - 1  # same-second guard: step strictly backwards
+        until = oldest
+        if until <= 0:
+            break
+    return list(collected.values())
 
 
 def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:

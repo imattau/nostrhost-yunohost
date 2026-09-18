@@ -1,3 +1,17 @@
+yunohost (12.1.41.87) stable; urgency=low
+
+  * Make the operation chain replay complete. fetch_chain_events (used by
+    list_operations/get_operation and the CLI) now pages with `until` and an
+    explicit limit; a single unlimited REQ was silently truncated by the
+    relay, so the admin console could report APPROVED for an operation the
+    executor had already rejected or executed. The executor's replay REQ now
+    asks for the full chain explicitly, so a restart rebuilds every in-flight
+    request instead of only the newest slice. Approvals/rejections that
+    reference a request missing from executor state now log a warning instead
+    of being dropped silently.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 12:15:00 +0000
+
 yunohost (12.1.41.86) stable; urgency=low
 
   * Authorize operation approvals from current YunoHost admins. operationsd

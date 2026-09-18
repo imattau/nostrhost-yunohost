@@ -296,7 +296,10 @@ class OperationEngine:
 
     def handle_approval(self, event: dict[str, Any]) -> bool:
         record, request_id = self._chain_target(event)
-        if record is None or request_id is None:
+        if request_id is None:
+            return False
+        if record is None:
+            logger.warning("approval for %s ignored: request not in executor state", request_id[:16])
             return False
         if not self._is_approver(event.get("pubkey")):
             logger.warning("approval for %s by non-admin ignored", request_id[:16])
@@ -317,7 +320,10 @@ class OperationEngine:
 
     def handle_rejection(self, event: dict[str, Any]) -> bool:
         record, request_id = self._chain_target(event)
-        if record is None or request_id is None:
+        if request_id is None:
+            return False
+        if record is None:
+            logger.warning("rejection for %s ignored: request not in executor state", request_id[:16])
             return False
         if not self._is_approver(event.get("pubkey")):
             logger.warning("rejection for %s by non-admin ignored", request_id[:16])
@@ -594,6 +600,12 @@ SUBSCRIBE_KINDS = [
     KIND_DELEGATION_REVOCATION,
 ]
 
+# The replay REQ asks for the whole chain explicitly: the relay's badger
+# backend defaults an unlimited REQ to a small window (MaxLimit/4), so without
+# this a restart would rebuild only the newest slice of state and silently
+# drop approvals for older in-flight requests.
+REPLAY_LIMIT = 20000
+
 # Replay order within the same created_at second: capability grants must be
 # projected before the requests they authorise, then requests before the
 # approval/rejection/execution events that reference them. The relay's
@@ -641,7 +653,7 @@ async def subscribe_loop(
         try:
             async with websockets.connect(relay_url, ping_interval=None, ping_timeout=None) as ws:
                 sub_id = "nostrhost-operations-" + secrets.token_hex(4)
-                await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS}]))
+                await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS, "limit": REPLAY_LIMIT}]))
                 logger.info("operations executor subscribed to %s", relay_url)
                 replay: list[dict[str, Any]] = []
                 replaying = True
@@ -656,7 +668,7 @@ async def subscribe_loop(
                             await _wait_auth_ok_async(ws, auth_ev["id"])
                             replay = []
                             replaying = True
-                            await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS}]))
+                            await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS, "limit": REPLAY_LIMIT}]))
                         continue
                     if msg[0] == "EVENT":
                         if replaying:
