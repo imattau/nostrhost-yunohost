@@ -441,7 +441,11 @@ def test_policy_writer_quotes_dotted_keys(tmp_path: Path, monkeypatch):
     assert rules["apps.upgrade"].minimum_free_space_bytes == 2_000_000_000
     assert rules["apps.remove"].require_confirmation is True
     assert rules["apps.remove"].max_backup_age_seconds == 86400
-    assert rules["backups.restore"].require_owner_signature is True
+    # Restore/rollback are the recovery path: admin confirmation, no owner co-signature.
+    assert rules["backups.restore"].require_confirmation is True
+    assert rules["backups.restore"].require_owner_signature is False
+    assert rules["state.write"].require_confirmation is True
+    assert rules["state.write"].require_owner_signature is False
 
 
 def test_portal_api_serves_authd_and_nostr_routes():

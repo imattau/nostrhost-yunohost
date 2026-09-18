@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +41,7 @@ from yunohost.nostr_operations import (
     SCOPE_BACKUPS_DELETE,
     SCOPE_BACKUPS_READ,
     SCOPE_BACKUPS_RESTORE,
+    SCOPE_BACKUPS_WRITE,
     SCOPE_DIAGNOSIS_READ,
     SCOPE_DIAGNOSIS_WRITE,
     SCOPE_FIREWALL_READ,
@@ -114,27 +116,52 @@ class AppConfigSetArgs(_Strict):
 
 
 class BackupCreateArgs(_Strict):
-    name: str | None = None
-    description: str | None = None
-    apps: list[str] = Field(default_factory=list)
-    system: list[str] = Field(default_factory=list)
-    output_directory: str | None = None
+    tag: str = ""
+    paths: list[str] = Field(default_factory=list, description="paths to snapshot; empty uses the configured restic paths")
+    host: str = ""
 
 
 class BackupListArgs(_Strict):
-    with_info: bool = False
+    tag: str = ""
+    host: str = ""
 
 
 class BackupInfoArgs(_Strict):
-    name: str
-    with_details: bool = False
+    snapshot: str = Field(description="snapshot id or unique prefix")
 
 
 class BackupRestoreArgs(_Strict):
-    name: str
-    apps: list[str] = Field(default_factory=list)
-    system: list[str] = Field(default_factory=list)
-    force: bool = False
+    snapshot: str = Field(description="snapshot id or unique prefix to restore")
+    target: str = Field(default="", description="restore target base directory; empty uses the configured restore_target")
+    include: list[str] = Field(default_factory=list, description="optional paths within the snapshot to restore")
+
+
+class BackupDeleteArgs(_Strict):
+    snapshot: str = Field(default="", description="snapshot id(s) to forget (comma/space separated)")
+    apply_retention: bool = Field(default=False, description="apply the configured retention policy instead of named snapshots")
+    prune: bool = True
+
+
+class BackupCheckArgs(_Strict):
+    pass
+
+
+class BackupStatsArgs(_Strict):
+    pass
+
+
+class BackupPolicyReadArgs(_Strict):
+    pass
+
+
+class BackupScheduleArgs(_Strict):
+    pass
+
+
+class BackupPolicySetArgs(_Strict):
+    retention: dict[str, int] | None = Field(default=None, description="keep_last/keep_daily/keep_weekly/keep_monthly/keep_yearly counts")
+    schedule_enabled: bool | None = None
+    schedule_calendar: str | None = Field(default=None, description="systemd OnCalendar value, e.g. 'daily'")
 
 
 class UserListArgs(_Strict):
@@ -380,10 +407,6 @@ class LogsProblemsArgs(_Strict):
     lines: int = 200
 
 
-class BackupDeleteArgs(_Strict):
-    name: str = Field(..., description="local backup archive name to delete")
-
-
 class DomainCertInfoArgs(_Strict):
     domain: str = Field(..., description="already-registered domain to report certificate status for")
 
@@ -560,48 +583,159 @@ def _safe_app_config_set(app: str = "", key: str = "", value: Any = None, **extr
     return {"app": app, "key": key}
 
 
-def _safe_backup_create(name: str | None = None, description: str | None = None, apps: list[str] | None = None, system: list[str] | None = None, output_directory: str | None = None, **extra: Any) -> dict[str, Any]:
+def _restic() -> Any:
+    """The configured Restic client, or an OperationError when unset.
+
+    Restic is the data-recovery system (§7.4): the backup.* tools operate on
+    Restic snapshots, not the retired YunoHost archive format."""
+    from yunohost.nostr_restic import ResticError, restic_client
+
+    try:
+        return restic_client()
+    except ResticError as exc:
+        raise OperationError(str(exc)) from exc
+
+
+def _restic_config() -> Any:
+    from yunohost.nostr_restic import load_restic_config
+
+    conf = load_restic_config()
+    if conf is None:
+        raise OperationError("restic is not configured (missing /etc/nostrhost/restic.toml)")
+    return conf
+
+
+def _safe_backup_create(tag: str = "", paths: list[str] | None = None, host: str = "", **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.create does not accept extra args: {sorted(extra)}")
-    apps = apps or []
-    system = system or []
-    from yunohost.backup import backup_create
+    client = _restic()
+    targets = [str(p) for p in (paths or [])]
+    if not targets:
+        targets = list(_restic_config().paths)
+    snapshot = client.snapshot(targets, tag=str(tag or "").strip() or None, host=str(host or "").strip() or None)
+    return {"snapshot": snapshot, "paths": targets}
 
-    backup_create(name=name, description=description, apps=apps, system=system, output_directory=output_directory)
-    return {"name": name, "apps": apps, "system": system}
 
-
-def _safe_backup_list(with_info: bool = False, **extra: Any) -> dict[str, Any]:
+def _safe_backup_list(tag: str = "", host: str = "", **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.list does not accept extra args: {sorted(extra)}")
-    from yunohost.backup import backup_list
-
-    return backup_list(with_info=bool(with_info))
+    return {"snapshots": _restic().snapshots(tag=str(tag or "").strip() or None, host=str(host or "").strip() or None)}
 
 
-def _safe_backup_info(name: str = "", with_details: bool = False, **extra: Any) -> dict[str, Any]:
-    name = str(name or "").strip()
+def _safe_backup_info(snapshot: str = "", **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.info does not accept extra args: {sorted(extra)}")
-    if not name:
-        raise OperationError("backup.info requires a non-empty 'name'")
-    from yunohost.backup import backup_info
+    sid = str(snapshot or "").strip()
+    if not sid:
+        raise OperationError("backup.info requires a non-empty 'snapshot'")
+    for snap in _restic().snapshots():
+        if str(snap.get("id", "")) == sid or str(snap.get("short_id", "")) == sid or str(snap.get("id", "")).startswith(sid):
+            return snap
+    raise OperationError(f"no snapshot matching {sid!r}")
 
-    return backup_info(name, with_details=bool(with_details))
 
-
-def _safe_backup_restore(name: str = "", apps: list[str] | None = None, system: list[str] | None = None, force: bool = False, **extra: Any) -> dict[str, Any]:
-    name = str(name or "").strip()
+def _safe_backup_restore(snapshot: str = "", target: str = "", include: list[str] | None = None, **extra: Any) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.restore does not accept extra args: {sorted(extra)}")
-    if not name:
-        raise OperationError("backup.restore requires a non-empty 'name'")
-    apps = apps or []
-    system = system or []
-    from yunohost.backup import backup_restore
+    sid = str(snapshot or "").strip()
+    if not sid:
+        raise OperationError("backup.restore requires a non-empty 'snapshot'")
+    conf = _restic_config()
+    dest = str(target or "").strip() or conf.restore_target
+    result = _restic().restore(sid, dest, include=[str(p) for p in (include or [])])
+    return {"snapshot": sid, "target": dest, "include": [str(p) for p in (include or [])], "result": result}
 
-    backup_restore(name=name, apps=apps, system=system, force=bool(force))
-    return {"name": name, "apps": apps, "system": system}
+
+def _safe_backup_check(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"backup.check does not accept extra args: {sorted(extra)}")
+    return _restic().check()
+
+
+def _safe_backup_stats(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"backup.stats does not accept extra args: {sorted(extra)}")
+    return {"stats": _restic().stats()}
+
+
+def _safe_backup_policy_read(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"backup.policy.read does not accept extra args: {sorted(extra)}")
+    conf = _restic_config()
+    # repo is a location, never the password: safe to surface to an admin.
+    return {
+        "retention": conf.retention,
+        "schedule": {"enabled": conf.schedule_enabled, "calendar": conf.schedule_calendar},
+        "repo": conf.repo,
+        "paths": list(conf.paths),
+        "host": conf.host,
+        "tag": conf.tag,
+    }
+
+
+def _safe_backup_schedule(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"backup.schedule does not accept extra args: {sorted(extra)}")
+    conf = _restic_config()
+    timer: dict[str, Any] = {}
+    try:
+        res = subprocess.run(
+            ["systemctl", "show", "nostrhost-backup.timer",
+             "--property", "Id,LoadState,ActiveState,SubState,LastTriggerUSec,NextElapseUSecRealtime"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                timer[key.strip()] = value.strip()
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001 - best-effort status
+        timer = {"error": str(exc)}
+    return {
+        "enabled": conf.schedule_enabled,
+        "calendar": conf.schedule_calendar,
+        "active_state": timer.get("ActiveState", "unknown"),
+        "sub_state": timer.get("SubState", ""),
+        "last_trigger": timer.get("LastTriggerUSec", ""),
+        "next_elapse": timer.get("NextElapseUSecRealtime", ""),
+    }
+
+
+def _safe_backup_policy_set(
+    retention: dict[str, int] | None = None,
+    schedule_enabled: bool | None = None,
+    schedule_calendar: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"backup.policy.set does not accept extra args: {sorted(extra)}")
+    from yunohost.nostr_restic import write_restic_policy
+
+    conf = write_restic_policy(
+        retention=retention,
+        schedule_enabled=schedule_enabled,
+        schedule_calendar=schedule_calendar,
+    )
+    if schedule_calendar:
+        try:
+            dropin = Path("/etc/systemd/system/nostrhost-backup.timer.d/calendar.conf")
+            dropin.parent.mkdir(parents=True, exist_ok=True)
+            dropin.write_text(f"[Timer]\nOnCalendar=\nOnCalendar={schedule_calendar}\n")
+            subprocess.run(["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):  # noqa: BLE001 - best-effort
+            pass
+    if schedule_enabled is not None:
+        action = "enable" if schedule_enabled else "disable"
+        try:
+            subprocess.run(
+                ["systemctl", action, "--now", "nostrhost-backup.timer"],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):  # noqa: BLE001 - unit may not exist in tests
+            pass
+    return {
+        "retention": conf.retention,
+        "schedule": {"enabled": conf.schedule_enabled, "calendar": conf.schedule_calendar},
+    }
 
 
 def _safe_user_list(**extra: Any) -> dict[str, Any]:
@@ -1793,18 +1927,29 @@ def _safe_service_history(names: list[str] | None = None, lines: int = 50, **ext
 # --------------------------------------------------------------------------- #
 # backup.delete / domain.cert.* / user.* / groups / permissions
 
-def _safe_backup_delete(name: str = "", **extra: Any) -> dict[str, Any]:
-    name = str(name or "").strip()
+def _safe_backup_delete(
+    snapshot: str = "",
+    apply_retention: bool = False,
+    prune: bool = True,
+    **extra: Any,
+) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.delete does not accept extra args: {sorted(extra)}")
-    if not name:
-        raise OperationError("backup.delete requires a non-empty 'name'")
-    if any(c in name for c in ("/", "\\")) or name in (".", ".."):
-        raise OperationError(f"invalid backup archive name {name!r}")
-    from yunohost.backup import backup_delete
-
-    backup_delete(name=name)
-    return {"name": name, "deleted": True}
+    ids = [part for part in str(snapshot or "").replace(",", " ").split() if part]
+    if not ids and not apply_retention:
+        raise OperationError("backup.delete requires a 'snapshot' id or apply_retention=true")
+    client = _restic()
+    result = client.forget(
+        policy=client.retention if apply_retention else {},
+        prune=bool(prune),
+        snapshot_ids=ids or None,
+    )
+    return {
+        "deleted": ids,
+        "apply_retention": bool(apply_retention),
+        "pruned": bool(prune),
+        "result": result,
+    }
 
 
 def _safe_domain_cert_info(domain: str = "", **extra: Any) -> dict[str, Any]:
@@ -2297,22 +2442,47 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
     "backup.create": ToolSpec(
         name="backup.create", handler=_safe_backup_create, scope=SCOPE_BACKUPS_CREATE,
         input_model=BackupCreateArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
-        description="create a local backup archive (apps/system)",
+        description="create a Restic data snapshot (configured paths by default)",
     ),
     "backup.list": ToolSpec(
         name="backup.list", handler=_safe_backup_list, scope=SCOPE_BACKUPS_READ,
         require_approval=False, input_model=BackupListArgs,
-        description="list local backup archives",
+        description="list Restic restore points (snapshots)",
     ),
     "backup.info": ToolSpec(
         name="backup.info", handler=_safe_backup_info, scope=SCOPE_BACKUPS_READ,
         require_approval=False, input_model=BackupInfoArgs,
-        description="details for one local backup archive (apps/system contents)",
+        description="details for one Restic snapshot",
     ),
     "backup.restore": ToolSpec(
         name="backup.restore", handler=_safe_backup_restore, scope=SCOPE_BACKUPS_RESTORE,
         input_model=BackupRestoreArgs, risk=RISK_HIGH, reversibility=REVERSIBLE_WITH_PLAN,
-        description="restore a local backup archive (admin + owner co-signature)",
+        description="restore a Restic snapshot (admin confirmation)",
+    ),
+    "backup.check": ToolSpec(
+        name="backup.check", handler=_safe_backup_check, scope=SCOPE_BACKUPS_READ,
+        require_approval=False, input_model=BackupCheckArgs,
+        description="verify Restic repository integrity",
+    ),
+    "backup.stats": ToolSpec(
+        name="backup.stats", handler=_safe_backup_stats, scope=SCOPE_BACKUPS_READ,
+        require_approval=False, input_model=BackupStatsArgs,
+        description="Restic repository size/growth statistics",
+    ),
+    "backup.policy.read": ToolSpec(
+        name="backup.policy.read", handler=_safe_backup_policy_read, scope=SCOPE_BACKUPS_READ,
+        require_approval=False, input_model=BackupPolicyReadArgs,
+        description="Restic retention policy, schedule and repository location",
+    ),
+    "backup.schedule": ToolSpec(
+        name="backup.schedule", handler=_safe_backup_schedule, scope=SCOPE_BACKUPS_READ,
+        require_approval=False, input_model=BackupScheduleArgs,
+        description="scheduled-backup timer state (active, last run, next run)",
+    ),
+    "backup.policy.set": ToolSpec(
+        name="backup.policy.set", handler=_safe_backup_policy_set, scope=SCOPE_BACKUPS_WRITE,
+        input_model=BackupPolicySetArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="set Restic retention policy and scheduled-backup cadence",
     ),
     "user.list": ToolSpec(
         name="user.list", handler=_safe_user_list, scope=SCOPE_USERS_READ,
@@ -2482,7 +2652,7 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
     "backup.delete": ToolSpec(
         name="backup.delete", handler=_safe_backup_delete, scope=SCOPE_BACKUPS_DELETE,
         input_model=BackupDeleteArgs, risk=RISK_HIGH, reversibility=IRREVERSIBLE,
-        description="delete one local backup archive (admin + owner co-signature)",
+        description="forget Restic snapshots or apply the retention policy (admin confirmation)",
     ),
     "domain.cert.info": ToolSpec(
         name="domain.cert.info", handler=_safe_domain_cert_info, scope=SCOPE_DOMAINS_READ,

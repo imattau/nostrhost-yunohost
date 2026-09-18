@@ -1028,57 +1028,153 @@ def build_app(
             state=_State(),
         )
 
-    # -- backup ---------------------------------------------------------------
+    # -- backup (Restic restore points) ---------------------------------------
 
     @app.get("/package/backup/list")
     def backup_list() -> Any:
-        with_info = _req().query_params.get("with_info", "").lower() == "true"
-        return _run_tool("backup.list", {"with_info": with_info})
+        params = _req().query_params
+        return _run_tool("backup.list", {"tag": params.get("tag", ""), "host": params.get("host", "")})
 
-    @app.get("/package/backup/{name}")
-    def backup_info(name: str) -> Any:
-        with_details = _req().query_params.get("with_details", "").lower() == "true"
-        return _run_tool("backup.info", {"name": name, "with_details": with_details})
+    @app.get("/package/backup/policy")
+    def backup_policy() -> Any:
+        return _run_tool("backup.policy.read", {})
+
+    @app.get("/package/backup/schedule")
+    def backup_schedule() -> Any:
+        return _run_tool("backup.schedule", {})
+
+    @app.get("/package/backup/stats")
+    def backup_stats() -> Any:
+        return _run_tool("backup.stats", {})
+
+    @app.post("/package/backup/check")
+    def backup_check() -> Any:
+        """Verify repository integrity (read-only; POST because it is slow)."""
+        return _run_tool("backup.check", {})
 
     @app.post("/package/backup/create")
     def backup_create() -> Any:
-        """Create a local backup archive. Medium-risk: still routed through
-        the signed operation chain (owner co-signature), not _run_tool."""
+        """Create a Restic snapshot. Medium-risk: routed through the signed
+        operation chain (admin confirmation)."""
         body = _json_body()
         return _run_lifecycle(
             "backup.create",
             {
-                "name": body.get("name"),
-                "description": body.get("description"),
-                "apps": body.get("apps", []),
-                "system": body.get("system", []),
-                "output_directory": body.get("output_directory"),
+                "tag": body.get("tag", ""),
+                "paths": body.get("paths", []),
+                "host": body.get("host", ""),
             },
             state=_State(),
         )
 
     @app.post("/package/backup/restore")
     def backup_restore() -> Any:
-        """Restore a local backup archive. High-risk: routed through the
-        signed operation chain (owner co-signature), not _run_tool."""
+        """Restore a Restic snapshot. High-risk: routed through the signed
+        operation chain (admin confirmation)."""
         body = _json_body()
         return _run_lifecycle(
             "backup.restore",
             {
-                "name": body.get("name", ""),
-                "apps": body.get("apps", []),
-                "system": body.get("system", []),
-                "force": bool(body.get("force", False)),
+                "snapshot": body.get("snapshot", ""),
+                "target": body.get("target", ""),
+                "include": body.get("include", []),
             },
             state=_State(),
         )
 
     @app.post("/package/backup/delete")
     def backup_delete() -> Any:
-        """Delete a local backup archive. High-risk/irreversible: routed
-        through the signed operation chain (owner co-signature)."""
+        """Forget Restic snapshots / apply the retention policy. Irreversible:
+        routed through the signed operation chain (admin confirmation)."""
         body = _json_body()
-        return _run_lifecycle("backup.delete", {"name": body.get("name", "")}, state=_State())
+        return _run_lifecycle(
+            "backup.delete",
+            {
+                "snapshot": body.get("snapshot", ""),
+                "apply_retention": bool(body.get("apply_retention", False)),
+                "prune": bool(body.get("prune", True)),
+            },
+            state=_State(),
+        )
+
+    @app.post("/package/backup/policy")
+    def backup_policy_set() -> Any:
+        """Set the Restic retention policy and scheduled-backup cadence."""
+        body = _json_body()
+        return _run_lifecycle(
+            "backup.policy.set",
+            {
+                "retention": body.get("retention"),
+                "schedule_enabled": body.get("schedule_enabled"),
+                "schedule_calendar": body.get("schedule_calendar"),
+            },
+            state=_State(),
+        )
+
+    @app.get("/package/backup/{snapshot}")
+    def backup_info(snapshot: str) -> Any:
+        return _run_tool("backup.info", {"snapshot": snapshot})
+
+    # -- state / recovery (ngit state repo, §7 / §15) --------------------------
+
+    @app.get("/package/state/status")
+    def state_status() -> Any:
+        return _run_tool("state.status", {})
+
+    @app.get("/package/state/history")
+    def state_history() -> Any:
+        raw = _req().query_params.get("limit", "20")
+        try:
+            limit = int(raw)
+        except (TypeError, ValueError):
+            limit = 20
+        return _run_tool("state.history", {"limit": limit})
+
+    @app.get("/package/state/diff")
+    def state_diff() -> Any:
+        params = _req().query_params
+        return _run_tool("state.diff", {"from_ref": params.get("from", ""), "to_ref": params.get("to", "")})
+
+    @app.get("/package/state/reconcile/plan")
+    def state_reconcile_plan() -> Any:
+        return _run_tool("state.reconcile.plan", {})
+
+    @app.post("/package/state/rollback/plan")
+    def state_rollback_plan() -> Any:
+        body = _json_body()
+        return _run_tool(
+            "state.rollback.plan",
+            {
+                "from_ref": body.get("from", ""),
+                "to_ref": body.get("to", ""),
+                "restic_snapshot": body.get("restic_snapshot", ""),
+            },
+        )
+
+    @app.post("/package/state/rollback/apply")
+    def state_rollback_apply() -> Any:
+        """Execute an approved rollback plan (write, admin confirmation)."""
+        body = _json_body()
+        return _run_lifecycle("rollback.apply", {"plan": body.get("plan")}, state=_State())
+
+    @app.post("/package/state/reconcile")
+    def state_reconcile() -> Any:
+        """Apply an approved bounded reconciliation plan."""
+        body = _json_body()
+        return _run_lifecycle("state.reconcile", {"plan": body.get("plan")}, state=_State())
+
+    @app.post("/package/state/publish")
+    def state_publish() -> Any:
+        """Replicate the state repository to relays (disaster recovery)."""
+        body = _json_body()
+        return _run_lifecycle(
+            "state.publish",
+            {
+                "snapshot_only": bool(body.get("snapshot_only", False)),
+                "relays": body.get("relays", []),
+            },
+            state=_State(),
+        )
 
     # -- diagnosis --------------------------------------------------------------
 

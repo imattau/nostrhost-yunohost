@@ -1125,13 +1125,13 @@ def test_get_backup_list(app, monkeypatch):
 
     def fake(**kwargs):
         captured.update(kwargs)
-        return {"archives": []}
+        return {"snapshots": []}
 
     monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.list", fake)
-    status, _, body = wsgi_request(app, "GET", "/package/backup/list?with_info=true")
+    status, _, body = wsgi_request(app, "GET", "/package/backup/list?tag=nostrhost&host=box")
     assert status == "200"
-    assert captured == {"with_info": True}
-    assert json.loads(body) == {"archives": []}
+    assert captured == {"tag": "nostrhost", "host": "box"}
+    assert json.loads(body) == {"snapshots": []}
 
 
 def test_get_backup_list_defaults(app, monkeypatch):
@@ -1139,37 +1139,44 @@ def test_get_backup_list_defaults(app, monkeypatch):
 
     def fake(**kwargs):
         captured.update(kwargs)
-        return {"archives": []}
+        return {"snapshots": []}
 
     monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.list", fake)
     status, _, body = wsgi_request(app, "GET", "/package/backup/list")
     assert status == "200"
-    assert captured == {"with_info": False}
+    assert captured == {"tag": "", "host": ""}
+
+
+def test_get_backup_policy(app, monkeypatch):
+    captured = {}
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.policy.read", lambda **kw: captured.update(kw) or {"retention": {}})
+    status, _, body = wsgi_request(app, "GET", "/package/backup/policy")
+    assert status == "200"
+    assert captured == {}
+    assert json.loads(body) == {"retention": {}}
+
+
+def test_get_backup_info(app, monkeypatch):
+    captured = {}
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "backup.info", lambda **kw: captured.update(kw) or {"id": "abc"})
+    status, _, body = wsgi_request(app, "GET", "/package/backup/abc123")
+    assert status == "200"
+    assert captured == {"snapshot": "abc123"}
+    assert json.loads(body) == {"id": "abc"}
 
 
 def test_post_backup_create_uses_signed_chain(app, monkeypatch):
-    """backup.create is medium-risk: it must still go through
-    _run_lifecycle (signed chain + owner co-signature), never _run_tool."""
+    """backup.create is medium-risk: it must go through _run_lifecycle
+    (signed chain + admin confirmation), never _run_tool."""
     calls = []
     monkeypatch.setattr(
         api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
     )
-    body = {"name": "before-upgrade", "description": "manual snapshot"}
+    body = {"tag": "manual", "paths": ["/etc"], "host": "box"}
     status, _, resp = wsgi_request(app, "POST", "/package/backup/create", body)
     assert status == "200"
     assert json.loads(resp)["request_id"] == "r" * 64
-    assert calls == [
-        (
-            "backup.create",
-            {
-                "name": "before-upgrade",
-                "description": "manual snapshot",
-                "apps": [],
-                "system": [],
-                "output_directory": None,
-            },
-        )
-    ]
+    assert calls == [("backup.create", {"tag": "manual", "paths": ["/etc"], "host": "box"})]
 
 
 def test_post_backup_restore_uses_signed_chain(app, monkeypatch):
@@ -1179,14 +1186,14 @@ def test_post_backup_restore_uses_signed_chain(app, monkeypatch):
     monkeypatch.setattr(
         api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
     )
-    body = {"name": "before-upgrade", "apps": ["myapp"], "force": True}
+    body = {"snapshot": "abc123", "target": "/tmp/restore", "include": ["/etc"]}
     status, _, resp = wsgi_request(app, "POST", "/package/backup/restore", body)
     assert status == "200"
     assert json.loads(resp)["request_id"] == "r" * 64
     assert calls == [
         (
             "backup.restore",
-            {"name": "before-upgrade", "apps": ["myapp"], "system": [], "force": True},
+            {"snapshot": "abc123", "target": "/tmp/restore", "include": ["/etc"]},
         )
     ]
 
@@ -1198,10 +1205,43 @@ def test_post_backup_delete_uses_signed_chain(app, monkeypatch):
     monkeypatch.setattr(
         api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
     )
-    status, _, resp = wsgi_request(app, "POST", "/package/backup/delete", {"name": "before-upgrade"})
+    status, _, resp = wsgi_request(app, "POST", "/package/backup/delete", {"snapshot": "abc123", "prune": False})
     assert status == "200"
     assert json.loads(resp)["request_id"] == "r" * 64
-    assert calls == [("backup.delete", {"name": "before-upgrade"})]
+    assert calls == [("backup.delete", {"snapshot": "abc123", "apply_retention": False, "prune": False})]
+
+
+def test_post_backup_policy_set_uses_signed_chain(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    body = {"retention": {"keep_last": 3}, "schedule_enabled": True, "schedule_calendar": "weekly"}
+    status, _, resp = wsgi_request(app, "POST", "/package/backup/policy", body)
+    assert status == "200"
+    assert calls == [
+        ("backup.policy.set", {"retention": {"keep_last": 3}, "schedule_enabled": True, "schedule_calendar": "weekly"})
+    ]
+
+
+def test_get_state_status(app, monkeypatch):
+    captured = {}
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "state.status", lambda **kw: captured.update(kw) or {"revision": "abc"})
+    status, _, body = wsgi_request(app, "GET", "/package/state/status")
+    assert status == "200"
+    assert captured == {}
+    assert json.loads(body) == {"revision": "abc"}
+
+
+def test_post_state_rollback_apply_uses_signed_chain(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64}
+    )
+    plan = {"steps": [{"path": "x"}]}
+    status, _, resp = wsgi_request(app, "POST", "/package/state/rollback/apply", {"plan": plan})
+    assert status == "200"
+    assert calls == [("rollback.apply", {"plan": plan})]
 
 
 def test_post_diagnosis_run(app, monkeypatch):

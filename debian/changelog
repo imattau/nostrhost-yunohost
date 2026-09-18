@@ -1,3 +1,16 @@
+yunohost (12.1.41.93) stable; urgency=low
+
+  * Backups and recovery, Restic-only. The `backup.*` registry now wraps
+    Restic snapshots (create/list/info/restore/delete/check/stats) instead of
+    the retired YunoHost archive format, adds `backup.policy.read/set` and
+    `backup.schedule` (retention + scheduled snapshots), and ships a
+    `nostrhost-backup.timer`. New `state.*` read tools (status/history/diff/
+    rollback.plan/reconcile.plan) plus `state.publish`, and API routes under
+    `/package/state/*` for the console. Recovery writes (backups.restore,
+    state.write) are admin-confirmation gated, not owner co-signed.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 09:30:00 +0000
+
 yunohost (12.1.41.92) stable; urgency=low
 
   * Remote-signer phase 2. `nostrhost notify signer pair` runs the

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import textwrap
 from pathlib import Path
 
@@ -51,6 +50,12 @@ elif cmd == "restore":
     print(json.dumps({"message_type": "summary", "files_restored": 1, "snapshot_id": sid}))
 elif cmd == "check":
     pass
+elif cmd == "forget":
+    print(json.dumps([{"tags": ["nostrhost"], "host": "h", "keep": [{"id": "b"*64}]}]))
+elif cmd == "prune":
+    print(json.dumps({"message_type": "summary", "files_removed": 2}))
+elif cmd == "stats":
+    print(json.dumps({"total_size": 1234, "snapshots_count": 3}))
 else:
     print(f"fake restic: unexpected {cmd}", file=sys.stderr); sys.exit(2)
 '''
@@ -165,6 +170,84 @@ def test_restore_parses_summary(tmp_path: Path):
 
 def test_check_ok(tmp_path: Path):
     assert make_client(tmp_path).check() == {"ok": True}
+
+
+def test_config_retention_and_schedule(tmp_path: Path):
+    path = tmp_path / "restic.toml"
+    path.write_text(
+        'repo = "s3:x"\npassword = "p"\npaths = ["/etc"]\n'
+        '[retention]\nkeep_last = 3\nkeep_daily = 7\n'
+        '[schedule]\nenabled = true\ncalendar = "weekly"\n'
+    )
+    cfg = load_restic_config(path)
+    assert cfg.retention == {"keep_last": 3, "keep_daily": 7}
+    assert cfg.schedule_enabled is True
+    assert cfg.schedule_calendar == "weekly"
+
+
+def test_config_retention_must_be_integer(tmp_path: Path):
+    path = tmp_path / "restic.toml"
+    path.write_text('repo = "x"\npassword = "p"\npaths = ["/etc"]\n[retention]\nkeep_last = "soon"\n')
+    with pytest.raises(ResticError, match="must be an integer"):
+        load_restic_config(path)
+
+
+def test_forget_applies_retention_flags_and_prune(tmp_path: Path):
+    recorder = tmp_path / "forget-args.json"
+    body = r'''#!/usr/bin/env python3
+import json, os, sys
+open(os.environ["RECORD_ARGS"], "w").write(json.dumps(sys.argv[1:]))
+print(json.dumps([{"keep": [{"id": "b"*64}]}]))
+'''
+    script = tmp_path / "restic-rec-forget"
+    script.write_text(textwrap.dedent(body))
+    script.chmod(0o755)
+    os.environ["RECORD_ARGS"] = str(recorder)
+    try:
+        client = ResticClient(repo="x", password=PASSWORD, binary=str(script))
+        result = client.forget(policy={"keep_last": 3, "keep_daily": 7}, prune=True)
+    finally:
+        del os.environ["RECORD_ARGS"]
+    assert result["groups"]
+    args = json.loads(recorder.read_text())
+    assert "--keep-last" in args and args[args.index("--keep-last") + 1] == "3"
+    assert "--keep-daily" in args and args[args.index("--keep-daily") + 1] == "7"
+    assert "--prune" in args
+
+
+def test_forget_requires_selection(tmp_path: Path):
+    with pytest.raises(ResticError, match="forget requires"):
+        make_client(tmp_path).forget()
+
+
+def test_prune_and_stats(tmp_path: Path):
+    client = make_client(tmp_path)
+    assert client.prune()["files_removed"] == 2
+    assert client.stats()["total_size"] == 1234
+
+
+def test_write_restic_policy_preserves_unknown_keys(tmp_path: Path):
+    from yunohost.nostr_restic import write_restic_policy
+
+    path = tmp_path / "restic.toml"
+    path.write_text(
+        'repo = "s3:x"\npassword = "p"\npaths = ["/etc"]\ncustom_operator_key = "keepme"\n'
+        '[schedule]\nenabled = false\ncalendar = "daily"\n'
+    )
+    conf = write_restic_policy(
+        retention={"keep_last": 5}, schedule_enabled=True, schedule_calendar="weekly", path=path
+    )
+    assert conf.retention == {"keep_last": 5}
+    assert conf.schedule_enabled is True
+    assert conf.schedule_calendar == "weekly"
+    assert "custom_operator_key" in path.read_text()
+
+
+def test_write_restic_policy_requires_existing_config(tmp_path: Path):
+    from yunohost.nostr_restic import write_restic_policy
+
+    with pytest.raises(ResticError, match="does not exist"):
+        write_restic_policy(retention={"keep_last": 1}, path=tmp_path / "absent.toml")
 
 
 def test_missing_binary_raises(tmp_path: Path):

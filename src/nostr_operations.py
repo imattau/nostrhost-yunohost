@@ -147,9 +147,11 @@ SCOPE_SERVICES_READ = "services.read"
 SCOPE_SERVICES_RESTART = "services.restart"
 SCOPE_SERVICES_WRITE = "services.write"
 SCOPE_STATE_WRITE = "state.write"
+SCOPE_STATE_READ = "state.read"
 SCOPE_BACKUPS_READ = "backups.read"
 SCOPE_BACKUPS_CREATE = "backups.create"
 SCOPE_BACKUPS_RESTORE = "backups.restore"
+SCOPE_BACKUPS_WRITE = "backups.write"
 SCOPE_USERS_READ = "users.read"
 SCOPE_USERS_WRITE = "users.write"
 SCOPE_USERS_DELETE = "users.delete"
@@ -194,9 +196,11 @@ KNOWN_SCOPES = frozenset(
         SCOPE_SERVICES_RESTART,
         SCOPE_SERVICES_WRITE,
         SCOPE_STATE_WRITE,
+        SCOPE_STATE_READ,
         SCOPE_BACKUPS_READ,
         SCOPE_BACKUPS_CREATE,
         SCOPE_BACKUPS_RESTORE,
+        SCOPE_BACKUPS_WRITE,
         SCOPE_USERS_READ,
         SCOPE_USERS_WRITE,
         SCOPE_USERS_DELETE,
@@ -350,6 +354,34 @@ class RollbackApplyArgs(_Strict):
 
 class StateReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the approved reconciliation plan for the state layer")
+
+
+class StateStatusArgs(_Strict):
+    pass
+
+
+class StateHistoryArgs(_Strict):
+    limit: int = Field(default=20, description="maximum number of recent state revisions")
+
+
+class StateDiffArgs(_Strict):
+    from_ref: str = Field(default="", description="base revision (default: current HEAD's parent diff base)")
+    to_ref: str = Field(default="", description="target revision (default: current revision)")
+
+
+class StateRollbackPlanArgs(_Strict):
+    from_ref: str = Field(default="", description="known-good revision to roll back to (default: latest known-good)")
+    to_ref: str = Field(default="", description="target revision (default: current revision)")
+    restic_snapshot: str = Field(default="", description="override the Restic snapshot id to restore")
+
+
+class StateReconcilePlanArgs(_Strict):
+    pass
+
+
+class StatePublishArgs(_Strict):
+    snapshot_only: bool = Field(default=False, description="publish only the flattened latest known-good revision")
+    relays: list[str] = Field(default_factory=list, description="relay URLs to publish to (default: configured)")
 
 
 class IdentityLinkArgs(_Strict):
@@ -767,6 +799,96 @@ def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
     return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
 
 
+# -- state read / plan / DR (ngit state repo, §7 / §15) --------------------- #
+
+def _state_repo() -> Any:
+    from .nostr_state import StateError, default_repo
+
+    try:
+        return default_repo()
+    except StateError as exc:
+        raise OperationError(str(exc)) from exc
+
+
+def _safe_state_status(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.status does not accept extra args: {sorted(extra)}")
+    import os
+    from pathlib import Path
+
+    from .nostr_state import state_dir_from_env
+
+    repo = _state_repo()
+    revision = repo.revision() or ""
+    known_good = repo.known_good_revision() or ""
+    recovery_bundle = Path(os.environ.get("NOSTRHOST_KEYS_RECOVERY", "/etc/nostrhost/keys.recovery"))
+    return {
+        "path": str(state_dir_from_env()),
+        "revision": revision,
+        "known_good": known_good,
+        "dirty": bool(repo.is_dirty()),
+        "on_known_good": bool(revision) and revision == known_good,
+        # A recovery bundle holds the node keys (never in state); its presence
+        # is the operator's off-box recovery material indicator.
+        "recovery_bundle": recovery_bundle.is_file(),
+    }
+
+
+def _safe_state_history(limit: int = 20, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.history does not accept extra args: {sorted(extra)}")
+    repo = _state_repo()
+    return {"history": repo.history(max(1, int(limit)))}
+
+
+def _safe_state_diff(from_ref: str = "", to_ref: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.diff does not accept extra args: {sorted(extra)}")
+    repo = _state_repo()
+    to = str(to_ref or "").strip() or repo.revision() or ""
+    if not to:
+        raise OperationError("no state revisions yet")
+    frm = str(from_ref or "").strip()
+    return {"from": frm, "to": to, "diff": repo.diff(frm, to)}
+
+
+def _safe_state_rollback_plan(from_ref: str = "", to_ref: str = "", restic_snapshot: str = "", **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.rollback.plan does not accept extra args: {sorted(extra)}")
+    from .nostr_rollback import RollbackError, build_rollback_plan
+
+    repo = _state_repo()
+    try:
+        return build_rollback_plan(
+            repo,
+            from_rev=str(from_ref or "").strip() or None,
+            to_rev=str(to_ref or "").strip() or None,
+            restic_snapshot=str(restic_snapshot or "").strip() or None,
+        )
+    except RollbackError as exc:
+        raise OperationError(str(exc)) from exc
+
+
+def _safe_state_reconcile_plan(**extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.reconcile.plan does not accept extra args: {sorted(extra)}")
+    from .nostr_state import YunohostBackend, export_state
+
+    repo = _state_repo()
+    return repo.reconciliation_plan(export_state(YunohostBackend()))
+
+
+def _safe_state_publish(snapshot_only: bool = False, relays: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+    if extra:
+        raise OperationError(f"state.publish does not accept extra args: {sorted(extra)}")
+    from .nostr_state import StateError, publish_state_bundle
+
+    try:
+        return publish_state_bundle(snapshot_only=bool(snapshot_only), relays=list(relays or []) or None)
+    except StateError as exc:
+        raise OperationError(str(exc)) from exc
+
+
 # -- identity / capability / agent writes (H5) ------------------------------ #
 #
 # These are admin-only host-plane operations. Each handler pulls the ambient
@@ -996,6 +1118,55 @@ TOOLS: dict[str, ToolSpec] = {
         scope=SCOPE_STATE_WRITE,
         input_model=StateReconcileArgs,
         description="apply an approved, bounded reconciliation plan",
+    ),
+    "state.status": ToolSpec(
+        name="state.status",
+        handler=_safe_state_status,
+        scope=SCOPE_STATE_READ,
+        require_approval=False,
+        input_model=StateStatusArgs,
+        description="state repository revision, known-good marker and dirty flag",
+    ),
+    "state.history": ToolSpec(
+        name="state.history",
+        handler=_safe_state_history,
+        scope=SCOPE_STATE_READ,
+        require_approval=False,
+        input_model=StateHistoryArgs,
+        description="recent ngit/NIP-34 state revisions",
+    ),
+    "state.diff": ToolSpec(
+        name="state.diff",
+        handler=_safe_state_diff,
+        scope=SCOPE_STATE_READ,
+        require_approval=False,
+        input_model=StateDiffArgs,
+        description="semantic diff between two state revisions",
+    ),
+    "state.rollback.plan": ToolSpec(
+        name="state.rollback.plan",
+        handler=_safe_state_rollback_plan,
+        scope=SCOPE_STATE_READ,
+        require_approval=False,
+        input_model=StateRollbackPlanArgs,
+        description="generate a change-class-aware rollback plan (never executed)",
+    ),
+    "state.reconcile.plan": ToolSpec(
+        name="state.reconcile.plan",
+        handler=_safe_state_reconcile_plan,
+        scope=SCOPE_STATE_READ,
+        require_approval=False,
+        input_model=StateReconcilePlanArgs,
+        description="report drift between committed state and live host (apply=False)",
+    ),
+    "state.publish": ToolSpec(
+        name="state.publish",
+        handler=_safe_state_publish,
+        scope=SCOPE_STATE_WRITE,
+        input_model=StatePublishArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="replicate the ngit state repository to relays (disaster recovery)",
     ),
     "domain.list": ToolSpec(
         name="domain.list",

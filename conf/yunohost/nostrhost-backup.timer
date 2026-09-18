@@ -1,0 +1,10 @@
+[Unit]
+Description=Run nostrhost Restic backup periodically
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

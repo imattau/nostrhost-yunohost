@@ -37,6 +37,8 @@ conf/yunohost/caddy.service /lib/systemd/system/
 conf/yunohost/nostrhost-web-reconcile.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.service /lib/systemd/system/
 conf/yunohost/nostrhost-certd.timer /lib/systemd/system/
+conf/yunohost/nostrhost-backup.service /lib/systemd/system/
+conf/yunohost/nostrhost-backup.timer /lib/systemd/system/
 locales/* /usr/share/yunohost/locales/
 # The historical layout installs the whole src/ tree (including src/nostrhost)
 # into the yunohost package; the live copy of nostrhost ships as a top-level

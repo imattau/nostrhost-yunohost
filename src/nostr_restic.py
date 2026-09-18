@@ -26,7 +26,7 @@ import logging
 import os
 import subprocess
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -57,6 +57,13 @@ class ResticConfig:
     tag: str = "nostrhost"
     restore_target: str = "/"
     timeout: int = 3600
+    # Retention policy for `forget`/scheduled pruning: keep_last / keep_daily /
+    # keep_weekly / keep_monthly / keep_yearly → N. Empty means "keep
+    # everything" (a conservative default: never delete data unprompted).
+    retention: dict[str, int] = field(default_factory=dict)
+    # Scheduled snapshots (systemd timer): disabled until an operator opts in.
+    schedule_enabled: bool = False
+    schedule_calendar: str = "daily"
 
 
 def load_restic_config(path: str | Path | None = None) -> ResticConfig | None:
@@ -74,6 +81,13 @@ def load_restic_config(path: str | Path | None = None) -> ResticConfig | None:
     paths = tuple(str(p) for p in (conf.get("paths") or []))
     if not paths:
         raise ResticError(f"{path} must set a non-empty 'paths' list")
+    retention: dict[str, int] = {}
+    for key, value in (conf.get("retention") or {}).items():
+        try:
+            retention[str(key)] = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ResticError(f"{path} retention.{key} must be an integer") from exc
+    schedule = conf.get("schedule") or {}
     return ResticConfig(
         repo=repo,
         password=password,
@@ -83,6 +97,9 @@ def load_restic_config(path: str | Path | None = None) -> ResticConfig | None:
         tag=str(conf.get("tag") or "nostrhost"),
         restore_target=str(conf.get("restore_target") or "/"),
         timeout=int(conf.get("timeout") or 3600),
+        retention=retention,
+        schedule_enabled=bool(schedule.get("enabled", False)),
+        schedule_calendar=str(schedule.get("calendar") or "daily"),
     )
 
 
@@ -104,6 +121,7 @@ class ResticClient:
         host: str = "",
         tag: str = "nostrhost",
         timeout: int = 3600,
+        retention: dict[str, int] | None = None,
     ) -> None:
         self.repo = repo
         self.password = password
@@ -111,6 +129,7 @@ class ResticClient:
         self.host = host
         self.tag = tag
         self.timeout = timeout
+        self.retention = dict(retention or {})
         self._env = dict(env or {})
 
     # -- mechanics ---------------------------------------------------------- #
@@ -213,6 +232,61 @@ class ResticClient:
         self._run(["check"])
         return {"ok": True}
 
+    def stats(self) -> dict[str, Any]:
+        """Repository size/growth statistics (restic ``stats --json``)."""
+        res = self._run(["stats", "--json"])
+        try:
+            return json.loads(res.stdout)
+        except json.JSONDecodeError:  # pragma: no cover - defensive
+            return {}
+
+    def forget(
+        self,
+        *,
+        policy: dict[str, int] | None = None,
+        prune: bool = False,
+        tag: str | None = None,
+        host: str | None = None,
+        snapshot_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Apply a retention policy (``--keep-*``) or delete named snapshots.
+
+        ``policy`` defaults to the client's configured retention; when both are
+        empty and no ``snapshot_ids``/``tag``/``host`` filter is given this
+        raises rather than risking ``restic forget`` with no selection. Set
+        ``prune=True`` to also reclaim space (``--prune``)."""
+        policy = dict(policy if policy is not None else self.retention)
+        ids = [str(s) for s in (snapshot_ids or [])]
+        if not policy and not ids and not tag and not host:
+            raise ResticError(
+                "forget requires a retention policy, snapshot ids, or a tag/host filter"
+            )
+        args = ["forget", "--json"]
+        if tag:
+            args += ["--tag", tag]
+        if host or self.host:
+            args += ["--host", host or self.host]
+        for key, value in policy.items():
+            if not value:
+                continue
+            name = str(key)
+            if name.startswith("keep_"):
+                name = name[len("keep_"):]
+            args += [f"--keep-{name.replace('_', '-')}", str(value)]
+        args += ids
+        if prune:
+            args.append("--prune")
+        res = self._run(args)
+        return {"groups": self._json_lines(res.stdout)}
+
+    def prune(self) -> dict[str, Any]:
+        """Reclaim space for snapshots already removed by ``forget``."""
+        res = self._run(["prune", "--json"])
+        try:
+            return json.loads(res.stdout)
+        except json.JSONDecodeError:  # pragma: no cover - defensive
+            return {}
+
 
 # --------------------------------------------------------------------------- #
 # state-layer integration
@@ -229,7 +303,42 @@ def restic_client(cfg: ResticConfig | None = None) -> ResticClient:
         host=conf.host,
         tag=conf.tag,
         timeout=conf.timeout,
+        retention=conf.retention,
     )
+
+
+def write_restic_policy(
+    *,
+    retention: dict[str, int] | None = None,
+    schedule_enabled: bool | None = None,
+    schedule_calendar: str | None = None,
+    path: str | Path | None = None,
+) -> ResticConfig:
+    """Update the ``[retention]`` / ``[schedule]`` sections of restic.toml.
+
+    Only the fields passed are changed; every other key (including unknowns an
+    operator added) is preserved. The file must already exist (postinstall
+    provisions it) — this never invents repository credentials."""
+    import tomli_w
+
+    target = Path(path or os.environ.get("NOSTRHOST_RESTIC_CONFIG", DEFAULT_RESTIC_CONFIG))
+    if not target.exists():
+        raise ResticError(f"restic config {target} does not exist; run postinstall first")
+    with target.open("rb") as fh:
+        data = tomllib.load(fh)
+    if retention is not None:
+        data["retention"] = {str(k): int(v) for k, v in retention.items() if v}
+    schedule = dict(data.get("schedule") or {})
+    if schedule_enabled is not None:
+        schedule["enabled"] = bool(schedule_enabled)
+    if schedule_calendar is not None:
+        schedule["calendar"] = str(schedule_calendar)
+    data["schedule"] = schedule
+    target.write_text(tomli_w.dumps(data))
+    os.chmod(target, 0o600)
+    conf = load_restic_config(target)
+    assert conf is not None  # target exists, load_restic_config raised otherwise
+    return conf
 
 
 def restic_snapshot_hook(cfg: ResticConfig | None = None) -> Callable[[], str]:

@@ -1,0 +1,14 @@
+[Unit]
+Description=nostrhost Restic backup (snapshot + retention)
+Documentation=man:restic(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nostrhost backup run
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

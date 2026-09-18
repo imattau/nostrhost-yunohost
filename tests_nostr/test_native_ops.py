@@ -39,7 +39,13 @@ def test_native_tools_registered_with_scope_and_approval():
         "app.config.set": ("apps.config.write", True),
         "backup.create": ("backups.create", True),
         "backup.list": ("backups.read", False),
+        "backup.info": ("backups.read", False),
         "backup.restore": ("backups.restore", True),
+        "backup.check": ("backups.read", False),
+        "backup.stats": ("backups.read", False),
+        "backup.policy.read": ("backups.read", False),
+        "backup.schedule": ("backups.read", False),
+        "backup.policy.set": ("backups.write", True),
         "user.list": ("users.read", False),
         "user.create": ("users.write", True),
         "user.delete": ("users.delete", True),
@@ -58,6 +64,12 @@ def test_native_tools_registered_with_scope_and_approval():
         "logs.read": ("logs.read", False),
         "logs.web": ("logs.read", False),
         "backup.delete": ("backups.delete", True),
+        "state.status": ("state.read", False),
+        "state.history": ("state.read", False),
+        "state.diff": ("state.read", False),
+        "state.rollback.plan": ("state.read", False),
+        "state.reconcile.plan": ("state.read", False),
+        "state.publish": ("state.write", True),
         "domain.cert.info": ("domains.read", False),
         "domain.cert.install": ("domains.write", True),
         "user.update": ("users.write", True),
@@ -145,12 +157,39 @@ def test_system_upgrade_validates_target(monkeypatch):
 
 def test_backup_create_bounds_arguments(monkeypatch):
     calls = []
-    _install_fake(monkeypatch, "yunohost.backup", backup_create=lambda **kw: calls.append(kw))
-    result = native_ops._safe_backup_create(apps=["myapp"], system=["yunohost"])
-    assert result["apps"] == ["myapp"] and result["system"] == ["yunohost"]
-    assert calls[0]["apps"] == ["myapp"]
+
+    class FakeClient:
+        def snapshot(self, paths, tag=None, host=None):
+            calls.append({"paths": paths, "tag": tag, "host": host})
+            return "deadbeef"
+
+    class FakeConf:
+        paths = ["/etc", "/var/www"]
+
+    monkeypatch.setattr(native_ops, "_restic", lambda: FakeClient())
+    monkeypatch.setattr(native_ops, "_restic_config", lambda: FakeConf())
+    result = native_ops._safe_backup_create(paths=["/srv/app"])
+    assert result == {"snapshot": "deadbeef", "paths": ["/srv/app"]}
+    assert calls[0]["paths"] == ["/srv/app"]
+    # No explicit paths -> the configured restic paths.
+    assert native_ops._safe_backup_create()["paths"] == ["/etc", "/var/www"]
     with pytest.raises(OperationError):
-        native_ops._safe_backup_create(apps=["x"], something_else=True)
+        native_ops._safe_backup_create(something_else=True)
+
+
+def test_backup_delete_requires_selection(monkeypatch):
+    class FakeClient:
+        retention = {"keep_last": 3}
+
+        def forget(self, **kwargs):
+            return {"forgot": kwargs}
+
+    monkeypatch.setattr(native_ops, "_restic", lambda: FakeClient())
+    with pytest.raises(OperationError):
+        native_ops._safe_backup_delete()
+    result = native_ops._safe_backup_delete(snapshot="abc123")
+    assert result["deleted"] == ["abc123"]
+    assert result["pruned"] is True
 
 
 def test_firewall_open_validates_protocol(monkeypatch):

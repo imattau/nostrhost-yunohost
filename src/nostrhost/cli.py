@@ -111,6 +111,12 @@ from yunohost.nostr_operations import (
     _safe_service_control,
     _safe_service_restart,
     _safe_service_status,
+    _safe_state_diff,
+    _safe_state_history,
+    _safe_state_publish,
+    _safe_state_reconcile_plan,
+    _safe_state_rollback_plan,
+    _safe_state_status,
     _safe_system_version,
     delegate_capability,
     grant_capability,
@@ -188,6 +194,17 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "backup.info": native_ops._safe_backup_info,
     "backup.list": native_ops._safe_backup_list,
     "backup.restore": native_ops._safe_backup_restore,
+    "backup.check": native_ops._safe_backup_check,
+    "backup.stats": native_ops._safe_backup_stats,
+    "backup.policy.read": native_ops._safe_backup_policy_read,
+    "backup.policy.set": native_ops._safe_backup_policy_set,
+    "backup.schedule": native_ops._safe_backup_schedule,
+    "state.status": _safe_state_status,
+    "state.history": _safe_state_history,
+    "state.diff": _safe_state_diff,
+    "state.rollback.plan": _safe_state_rollback_plan,
+    "state.reconcile.plan": _safe_state_reconcile_plan,
+    "state.publish": _safe_state_publish,
     "user.list": native_ops._safe_user_list,
     "user.create": native_ops._safe_user_create,
     "user.delete": native_ops._safe_user_delete,
@@ -579,6 +596,7 @@ POSTINSTALL_UNITS = [
     "nostr-portal-api",
     "nostrhost-notify",
     "nostrhost-certd.timer",
+    "nostrhost-backup.timer",
 ]
 
 CADDY_BASE_DIR = "/etc/caddy"
@@ -1243,7 +1261,9 @@ def _write_policy_toml(operator_npub: str) -> Path:
         '\n[policy."apps.remove"]\n'
         'require_confirmation = true\nrequire_backup = true\nmax_backup_age = "24h"\n'
         '\n[policy."backups.restore"]\n'
-        "require_confirmation = true\nrequire_owner_signature = true\n"
+        "require_confirmation = true\nrequire_owner_signature = false\n"
+        '\n[policy."state.write"]\n'
+        "require_confirmation = true\nrequire_owner_signature = false\n"
         '\n[policy."system.upgrade"]\n'
         "require_confirmation = true\nrequire_owner_signature = true\n"
         '\n[policy."firewall.write"]\n'
@@ -1523,6 +1543,14 @@ def _provision_restic() -> Path:
         'binary = "restic"\n'
         f'host = "{socket.gethostname()}"\n'
         'tag = "nostrhost"\n'
+        '\n[retention]\n'
+        'keep_last = 7\n'
+        'keep_daily = 7\n'
+        'keep_weekly = 4\n'
+        'keep_monthly = 6\n'
+        '\n[schedule]\n'
+        'enabled = true\n'
+        'calendar = "daily"\n'
     )
     os.chmod(conf, 0o600)
     if not (repo / "config").exists():
@@ -2340,6 +2368,25 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             client = _restic_client()
             snapshot = client.snapshot(list(SYSTEM_BACKUP_PATHS))
             return {"snapshot": snapshot, "paths": list(SYSTEM_BACKUP_PATHS)}
+        _guard(run, output_as)
+
+    @backup.command("run")
+    def backup_run(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Scheduled backup: snapshot the configured paths, then apply the
+        retention policy and prune. Invoked by nostrhost-backup.timer."""
+        def run() -> Any:
+            from yunohost.nostr_restic import load_restic_config
+
+            conf = load_restic_config()
+            paths = list(conf.paths) if conf else []
+            if not paths:
+                raise NostrHostError("restic is not configured (missing /etc/nostrhost/restic.toml)")
+            client = _restic_client()
+            snapshot = client.snapshot(paths)
+            retention: dict[str, Any] = {}
+            if client.retention:
+                retention = client.forget(prune=True)
+            return {"snapshot": snapshot, "paths": paths, "retention": client.retention, "forget": retention}
         _guard(run, output_as)
 
     @backup.command("list")
