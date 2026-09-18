@@ -339,6 +339,8 @@ class RuntimeInstanceResource(BaseModel):
     home_env: str | None = None
     config_dir_env: str | None = None
     data_dir_env: str | None = None
+    cache_dir_env: str | None = None
+    state_dir_env: str | None = None
     state_directory: str = Field(..., min_length=1)
     socket_path_template: str = Field(..., min_length=1)
     internal_port: int = Field(..., gt=0, le=65535)
@@ -797,6 +799,8 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
             "home_env": instance.home_env,
             "config_dir_env": instance.config_dir_env,
             "data_dir_env": instance.data_dir_env,
+            "cache_dir_env": instance.cache_dir_env,
+            "state_dir_env": instance.state_dir_env,
             "state_directory": instance.state_directory,
             "socket_path_template": instance.socket_path_template,
             "idle_timeout_seconds": instance.idle_timeout_seconds,

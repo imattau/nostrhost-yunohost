@@ -534,7 +534,9 @@ def _runtime_instance_args(**overrides):
         "environment": {},
         "home_env": "HOME",
         "config_dir_env": "EXAMPLE_CONFIG_DIR",
-        "data_dir_env": None,
+        "data_dir_env": "XDG_DATA_HOME",
+        "cache_dir_env": "XDG_CACHE_HOME",
+        "state_dir_env": "XDG_STATE_HOME",
         "state_directory": "example",
         "socket_path_template": "/run/example/%i.sock",
         "internal_port": 8090,
@@ -562,6 +564,9 @@ def test_runtime_instance_template_provider_renders_templated_units_with_percent
     assert "ExecStart=/opt/example/bin/server" in service
     assert 'Environment="HOME=/var/lib/example/%i"' in service
     assert 'Environment="EXAMPLE_CONFIG_DIR=/var/lib/example/%i"' in service
+    assert 'Environment="XDG_DATA_HOME=/var/lib/example/%i"' in service
+    assert 'Environment="XDG_CACHE_HOME=/var/lib/example/%i"' in service
+    assert 'Environment="XDG_STATE_HOME=/var/lib/example/%i"' in service
     assert "CPUQuota=50%" in service
     assert "MemoryMax=512M" in service
     # The instance is isolated into its own loopback namespace so every

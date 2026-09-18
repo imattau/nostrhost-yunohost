@@ -1133,7 +1133,15 @@ class RuntimeInstanceTemplateProvider(InspectVerifiedProvider):
         state_directory = args["state_directory"]
         state_path = f"/var/lib/{state_directory}/%i"
         environment = dict(args.get("environment") or {})
-        for env_key in ("home_env", "config_dir_env", "data_dir_env"):
+        # All five map to the same state_path (mirrors a real $HOME, where
+        # .config/.local/share/.cache/.local/state all nest under one root).
+        # data_dir_env/cache_dir_env/state_dir_env matter even when the app
+        # only documents a "config dir" flag: many apps (opencode included)
+        # resolve their actual project/session storage from XDG_DATA_HOME
+        # (falling back to $HOME only if that's unset), not from a
+        # config-specific override - leaving these unset can let every
+        # instance's data silently resolve to the same shared XDG fallback.
+        for env_key in ("home_env", "config_dir_env", "data_dir_env", "cache_dir_env", "state_dir_env"):
             name = args.get(env_key)
             if name:
                 environment[name] = state_path
