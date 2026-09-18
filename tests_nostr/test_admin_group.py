@@ -159,3 +159,41 @@ def test_user_group_update_admins_remove_last_admin_still_guarded(tmp_path, monk
     with pytest.raises(YunohostValidationError):
         update(groupname="admins", remove="alice", sync_perm=False)
     assert accounts.user_is_admin("alice") is True
+
+
+# --------------------------------------------------------------------------- #
+# user.list returns the user's groups as bare names (People page Access area)
+
+def test_user_list_groups_are_bare_names_excluding_all_users_and_primary(tmp_path):
+    """The People page joins/includes groups by exact name, so the API must
+    return bare group names (not LDAP DNs) and hide ``all_users`` + the
+    user's own primary group."""
+    _write_store(
+        tmp_path,
+        users={"alice": {"fullname": "Alice"}},
+        groups={
+            "admins": {"gid": "2001", "members": ["alice"]},
+            "all_users": {"gid": "2000", "members": ["alice"]},
+            "alice": {"gid": "2100", "members": ["alice"]},
+            "visitors": {"gid": "2002", "members": ["bob"]},
+        },
+    )
+    from yunohost.user import user_list
+
+    groups = user_list(fields=["groups"])["users"]["alice"]["groups"]
+    assert groups == ["admins"]
+
+
+def test_safe_user_list_includes_groups(tmp_path):
+    """/package/user/list must ship the ``groups`` field per user (the default
+    field set omits it, which is why the UI showed 'No groups')."""
+    _write_store(
+        tmp_path,
+        users={"alice": {"fullname": "Alice"}},
+        groups={"admins": {"gid": "2001", "members": ["alice"]}},
+    )
+    from nostrhost.native_ops import _safe_user_list
+
+    rec = _safe_user_list()["users"]["alice"]
+    assert "groups" in rec
+    assert rec["groups"] == ["admins"]

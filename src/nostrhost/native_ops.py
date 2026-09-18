@@ -609,7 +609,7 @@ def _safe_user_list(**extra: Any) -> dict[str, Any]:
         raise OperationError(f"user.list does not accept extra args: {sorted(extra)}")
     from yunohost.user import user_list
 
-    return user_list()
+    return user_list(fields=["username", "fullname", "mail", "mailbox-quota", "groups"])
 
 
 def _safe_user_create(username: str = "", domain: str = "", password: str = "", fullname: str = "", mailbox_quota: str = "0", admin: bool = False, **extra: Any) -> dict[str, Any]:

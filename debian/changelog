@@ -1,3 +1,14 @@
+yunohost (12.1.41.74) stable; urgency=low
+
+  * ``user list`` returns each user's groups again, as bare group names.
+    - The ``user.list`` tool (and thus the admin People page) now requests the
+      ``groups`` field, which the default field set had omitted — the Access
+      area showed "No groups" for every user.
+    - Group values are normalized from LDAP DNs (``cn=admins,ou=groups,...``)
+      to bare names, so the UI's exact-name checks (the Admin badge) and the
+      plain-text group list work, and the ``all_users`` / per-user primary
+      group filter actually applies.
+
 yunohost (12.1.41.73) stable; urgency=low
 
   * Portal /me and the admin password profile now follow the authoritative

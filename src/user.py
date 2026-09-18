@@ -118,9 +118,11 @@ def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
             forward for forward in values if forward != user["uid"][0]
         ],
         "groups": lambda values, user: [
-            group
-            for group in values
-            if group != "all_users" and group != user["uid"][0]
+            name
+            for name in (
+                group.removeprefix("cn=").split(",", 1)[0] for group in values
+            )
+            if name != "all_users" and name != user["uid"][0]
         ],
         "shell": lambda values, _: (
             len(values) > 0 and values[0].strip() == "/bin/false"
