@@ -568,7 +568,15 @@ def _restic_client() -> Any:
     conf = load_restic_config()
     if conf is None:
         raise NostrHostError("restic is not configured (missing " + "/etc/nostrhost/restic.toml)")
-    return ResticClient(repo=conf.repo, password=conf.password, binary=conf.binary, host=conf.host, tag=conf.tag, timeout=conf.timeout)
+    return ResticClient(
+        repo=conf.repo,
+        password=conf.password,
+        binary=conf.binary,
+        host=conf.host,
+        tag=conf.tag,
+        timeout=conf.timeout,
+        retention=conf.retention,
+    )
 
 
 def _app_backup_paths(app_id: str) -> list[str]:

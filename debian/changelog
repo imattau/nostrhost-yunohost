@@ -1,3 +1,12 @@
+yunohost (12.1.41.94) stable; urgency=low
+
+  * `nostrhost backup run` (the scheduled-snapshot entry point) and the other
+    CLI backup paths now build the Restic client with the configured
+    `[retention]` policy, so the scheduled run applies `forget`/`prune` as
+    intended instead of keeping every snapshot.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 09:45:00 +0000
+
 yunohost (12.1.41.93) stable; urgency=low
 
   * Backups and recovery, Restic-only. The `backup.*` registry now wraps
