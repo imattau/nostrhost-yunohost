@@ -122,8 +122,10 @@ def build_domain_site(domain: str) -> dict[str, Any]:
     """A minimal, precise Caddy site for a domain (domain_add/create).
 
     Matches only the domain's root path, so it never shadows app routes on the
-    same host. ACME for the domain is handled by Caddy's global ``acme_ca`` /
-    automatic HTTPS (the "ACME policy"); ``certd`` exports the resulting cert.
+    same host. The root 301s to the user portal (``/nostrhost/sso/``) instead of
+    serving a placeholder, so visiting the bare domain lands on the portal.
+    ACME for the domain is handled by Caddy's global ``acme_ca`` / automatic
+    HTTPS (the "ACME policy"); ``certd`` exports the resulting cert.
 
     host + path live in a SINGLE matcher object: separate objects would be
     OR'd, letting the root route hijack every request with path ``/`` on any
@@ -132,7 +134,13 @@ def build_domain_site(domain: str) -> dict[str, Any]:
     return {
         "@id": f"nostrhost-domain:{domain}",
         "match": [{"host": [domain], "path": ["/"]}],
-        "handle": [{"handler": "static_response", "status_code": 200, "body": f"nostrhost domain {domain}"}],
+        "handle": [
+            {
+                "handler": "static_response",
+                "status_code": 301,
+                "headers": {"Location": ["/nostrhost/sso/"]},
+            }
+        ],
         "terminal": True,
     }
 

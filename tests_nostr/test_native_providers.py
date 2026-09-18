@@ -455,7 +455,10 @@ def test_build_domain_site_is_precise_and_idempotent():
     site = build_domain_site("example.test")
     assert site["@id"] == "nostrhost-domain:example.test"
     assert site["match"] == [{"host": ["example.test"], "path": ["/"]}]
-    assert site["handle"][0]["handler"] == "static_response"
+    handle = site["handle"][0]
+    assert handle["handler"] == "static_response"
+    assert handle["status_code"] == 301
+    assert handle["headers"]["Location"] == ["/nostrhost/sso/"]
     assert site["terminal"] is True
     assert build_domain_site("example.test") == site  # deterministic
 

@@ -1,3 +1,14 @@
+yunohost (12.1.41.78) stable; urgency=low
+
+  * Bare domain root now 301s to the user portal (/nostrhost/sso) instead of
+    serving a plain-text placeholder, so visiting the main domain lands on the
+    portal. Applies to the tracked Caddy per-domain snippet
+    (conf/caddy/caddy_domain.conf) and to domain_add's nostrhost-domain site
+    route (caddy_admin.build_domain_site). Unmatched non-root paths keep the
+    minimal responder.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 15:20:00 +0000
+
 yunohost (12.1.41.77) stable; urgency=low
 
   * Runtime instances: wire every XDG location to the per-instance state
