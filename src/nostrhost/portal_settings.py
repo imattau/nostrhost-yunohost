@@ -125,7 +125,7 @@ def portal_me_route():
     from nostrhost.web import HTTPResponse, request
 
     from yunohost.nostr_account import _session_username
-    from yunohost.nostrhost.accounts import user_get
+    from yunohost.nostrhost.accounts import user_get, user_is_admin
 
     username = _session_username()
     if not username:
@@ -148,7 +148,9 @@ def portal_me_route():
         "mail": (record.get("mail") or [None])[0],
         "mailalias": list(record.get("mail", []))[1:],
         "mailforward": [],
-        "admin": bool(record.get("admin", False)),
+        # The admins group is authoritative: group membership confers admin
+        # even when the account record predates the flag.
+        "admin": user_is_admin(username),
         "groups": groups,
         "apps": apps,
     }

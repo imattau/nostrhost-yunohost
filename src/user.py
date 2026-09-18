@@ -562,7 +562,9 @@ def user_update(
 
         # Ensure compatibility and sufficiently complex password
         assert_password_is_compatible(change_password)
-        is_admin = bool(user.get("admin"))
+        from .nostrhost.accounts import user_is_admin
+
+        is_admin = user_is_admin(username)
         assert_password_is_strong_enough(
             "admin" if is_admin else "user", change_password
         )
