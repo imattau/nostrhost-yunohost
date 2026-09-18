@@ -75,6 +75,10 @@ def merge_catalogue_and_installed(catalogue: dict[str, Any], installed: dict[str
             "legacy": not bool(local.get("native")),
         }
         entry["movable"] = bool(local.get("movable"))
+        # The app's served URL (domain + path), present for both native and
+        # legacy entries; the management UI uses it to default the change-url
+        # form's domain/path fields.
+        entry["domain_path"] = local.get("domain_path") or None
         names = local.get("name")
         if entry.get("catalogue") is None:
             entry["name"] = names.get("en", app_id) if isinstance(names, dict) else (names or app_id)

@@ -288,6 +288,89 @@ def test_removal_envelope_round_trips_through_validator():
     assert len(executor.applied) == len(envelope["operations"])
 
 
+def test_reconcile_refreshes_permission_projection_after_applying(monkeypatch):
+    """A reconcile that applies operations must regenerate the authd + portal
+    projections, so change-url moves tiles even when the permission resource
+    itself is unchanged and skipped by the reconciler."""
+    from yunohost.nostr_operations import _safe_package_reconcile
+
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.applied: list[str] = []
+
+        def can_execute(self, operation) -> bool:
+            return True
+
+        def execute(self, operation) -> dict:
+            self.applied.append(operation.name)
+            return {"changed": True}
+
+    import nostrhost.permissions as permissions
+
+    calls: list[str] = []
+    monkeypatch.setattr(permissions, "write_permissions_projection", lambda: calls.append("refresh"))
+
+    envelope = _envelope(example_package())
+    result = _safe_package_reconcile(plan=envelope, _executor=RecordingExecutor())
+    assert len(result["results"]) == len(envelope["operations"])
+    assert calls == ["refresh"]
+
+
+def test_reconcile_with_nothing_applied_skips_projection_refresh(monkeypatch):
+    from yunohost.nostr_operations import _safe_package_reconcile
+
+    class SatisfiedProvider:
+        def inspect(self, desired) -> dict:
+            return {
+                "permission": "nostrhost-test.main",
+                "exists": True,
+                "url": desired.get("url"),
+                "additional_urls": sorted(desired.get("additional_urls", [])),
+                "allowed": sorted(
+                    [desired["allowed"]]
+                    if isinstance(desired.get("allowed"), str)
+                    else desired.get("allowed") or []
+                ),
+                "auth_header": desired.get("auth_header", True),
+                "auth_request": desired.get("auth_request", False),
+                "show_tile": desired.get("show_tile"),
+                "protected": desired.get("protected", False),
+            }
+
+    class NoopExecutor:
+        def can_execute(self, operation) -> bool:
+            return True
+
+        def provider_for(self, operation):
+            return SatisfiedProvider()
+
+    import nostrhost.permissions as permissions
+
+    calls: list[str] = []
+    monkeypatch.setattr(permissions, "write_permissions_projection", lambda: calls.append("refresh"))
+
+    from nostrhost.package_engine import Operation
+
+    args = {
+        "app": "nostrhost-test",
+        "name": "main",
+        "url": None,
+        "allowed": None,
+        "auth_header": True,
+        "auth_request": False,
+        "show_tile": False,
+        "protected": False,
+    }
+    operation = Operation("permission.ensure", "nostrhost-test:permission:main", args, risk="medium", reverse="permission.remove")
+    envelope = _envelope(example_package())
+    envelope["operations"] = [operation.json_dict()]
+    envelope["plan_sha256"] = operation_plan_digest([operation])
+
+    result = _safe_package_reconcile(plan=envelope, _executor=NoopExecutor())
+    assert result["results"] == []
+    assert calls == []
+
+
 def test_change_url_envelope_is_single_web_route_operation():
     package = validate_package(PackageManifest.parse_obj(example_package()))
     args = package.web.dict()

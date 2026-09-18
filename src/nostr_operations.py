@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
+
+logger = logging.getLogger("nostr-operations")
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
@@ -524,6 +527,17 @@ def _safe_package_reconcile(
 
         _executor = NativeOperationExecutor(native_providers())
     results = apply_reconciled_plan(operations, _executor)
+    if results:
+        # Reconciles can move URL-affecting state (change-url, settings) while
+        # the permission resource itself is unchanged and skipped, so its
+        # provider never syncs. Refresh the authd + portal projections from the
+        # freshly-applied settings so portal tiles always track the new URL.
+        try:
+            from nostrhost.permissions import write_permissions_projection
+
+            write_permissions_projection()
+        except Exception as exc:  # noqa: BLE001 - projection refresh must not fail the reconcile
+            logger.warning("failed to regenerate permission projection after reconcile: %s", exc)
     return {"operations": len(results), "results": results, "plan_sha256": plan_digest, "legacy_plan": legacy}
 
 
@@ -549,6 +563,7 @@ def _safe_app_list(**args: Any) -> dict[str, Any]:
             if not isinstance(manifest, dict):
                 continue
             app = manifest.get("app") or {}
+            web = manifest.get("web") if isinstance(manifest.get("web"), dict) else None
             native[app_id] = {
                 "id": app_id,
                 "version": app.get("version"),
@@ -556,7 +571,14 @@ def _safe_app_list(**args: Any) -> dict[str, Any]:
                 "repository": "nostrhost",
                 "source": "nostr",
                 "native": True,
-                "movable": isinstance(manifest.get("web"), dict),
+                "movable": web is not None,
+                # Same shape as legacy app_info(): domain + path, so the
+                # management UI can default the change-url form fields.
+                "domain_path": (
+                    f"{web.get('domain', '').rstrip('/')}{web.get('path') or '/'}"
+                    if web is not None
+                    else None
+                ),
             }
     except Exception:  # noqa: BLE001 - state listing is additive
         native = {}

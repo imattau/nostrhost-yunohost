@@ -50,6 +50,21 @@ def test_catalogue_join_keeps_available_installed_and_unlisted_apps():
     assert by_id["orphan"]["installation"]["legacy"] is True
 
 
+def test_catalogue_join_forwards_domain_path_for_installed_apps():
+    rows = merge_catalogue_and_installed(
+        {"entries": []},
+        {"apps": {
+            "native": {"version": "1.0", "native": True, "domain_path": "portal.nostrhost.test/app"},
+            "legacy": {"version": "1.0", "domain_path": "portal.nostrhost.test/legacy"},
+            "no-route": {"version": "1.0", "native": True},
+        }},
+    )
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["native"]["domain_path"] == "portal.nostrhost.test/app"
+    assert by_id["legacy"]["domain_path"] == "portal.nostrhost.test/legacy"
+    assert by_id["no-route"]["domain_path"] is None
+
+
 def test_attach_app_logos_uses_catalogue_hash_and_base_id():
     entries = [
         {"id": "wordpress"},

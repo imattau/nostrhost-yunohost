@@ -1,3 +1,13 @@
+yunohost (12.1.41.71) stable; urgency=low
+
+  * Change URL now refreshes the portal tiles: a package.reconcile that
+    applies operations regenerates the authd + portal projections, so moving
+    an app to a new domain/path updates its portal tile URL immediately even
+    when the permission resource itself is unchanged and skipped.
+  * The native app inventory exposes the app's served domain+path
+    (``domain_path``) so the management UI can default the change-url form
+    to the app's current placement.
+
 yunohost (12.1.41.70) stable; urgency=low
 
   * nsite.blocklist fixes (blocks now take effect immediately, both ways):
