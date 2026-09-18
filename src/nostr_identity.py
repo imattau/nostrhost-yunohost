@@ -377,6 +377,43 @@ def resolve_pubkey(pubkey_hex: str, *, db_path: str | Path | None = None) -> Ide
     return _to_identity(rec) if rec else None
 
 
+def pubkey_is_admin(
+    pubkey_hex: str,
+    *,
+    configured_admins: tuple[str, ...] | list[str] | set[str] = (),
+    db_path: str | Path | None = None,
+    identity_resolver: Callable[..., Identity | None] | None = None,
+    user_admin_resolver: Callable[[str], bool] | None = None,
+) -> bool:
+    """Whether a pubkey has current YunoHost administrator authority.
+
+    Configured operator/admin keys remain a bootstrap and recovery fallback.
+    Every other key must resolve to an enabled identity whose linked account
+    is currently an administrator. Resolution happens on every decision so
+    group removal and identity revocation take effect without a daemon restart
+    or a second, stale pubkey allowlist.
+    """
+    if not isinstance(pubkey_hex, str):
+        return False
+    pubkey = pubkey_hex.lower()
+    if pubkey in {admin.lower() for admin in configured_admins if isinstance(admin, str)}:
+        return True
+    if not _is_hex64(pubkey):
+        return False
+    try:
+        resolve_identity = identity_resolver or resolve_pubkey
+        identity = resolve_identity(pubkey, db_path=db_path) if db_path is not None else resolve_identity(pubkey)
+        if identity is None or not identity.enabled:
+            return False
+        if user_admin_resolver is None:
+            from nostrhost.accounts import user_is_admin
+
+            user_admin_resolver = user_is_admin
+        return bool(user_admin_resolver(identity.username))
+    except Exception:  # noqa: BLE001 - authorization store failures fail closed
+        return False
+
+
 def resolve_username(username: str, *, db_path: str | Path | None = None) -> list[Identity]:
     """List the enabled identities linked to a YunoHost account."""
     return [_to_identity(r) for r in _store(db_path).list_by_username(username) if r.enabled]

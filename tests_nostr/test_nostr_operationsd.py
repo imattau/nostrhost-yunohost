@@ -48,7 +48,7 @@ class FakeBackend:
 class Harness:
     """A wired engine: real signing, captured publishes, fake backend."""
 
-    def __init__(self, policy=None, policy_owner=None):
+    def __init__(self, policy=None, policy_owner=None, admin_authorizer=None):
         self.server_sk, self.server_pk = new_key()
         self.admin_sk, self.admin_pk = new_key()
         self.agent_sk, self.agent_pk = new_key()
@@ -61,6 +61,7 @@ class Harness:
             backend=self.backend,
             policy=policy,
             policy_owner=policy_owner,
+            admin_authorizer=admin_authorizer,
         )
 
     def grant(self, scopes, subject_pk=None):
@@ -169,14 +170,10 @@ def test_policy_adapter_can_deny_before_provider_execution():
     assert _content(h.events_by_kind(2204)[0])["reason"] == "policy_denied:plan is untrusted"
 
 
-def test_owner_policy_requires_operator_approval():
+def test_owner_policy_accepts_any_admin_approval():
     h = Harness(policy=lambda _tool, _args, _actor: {"allow": True, "owner_signature_required": True})
     h.grant(["services.restart"])
     ev, _ = h.request("service.restart", {"name": "caddy"})
-    assert not h.approve(ev["id"])
-    assert h.engine.state(ev["id"]) == OpState.REQUESTED
-
-    h.engine._policy_owner = h.admin_pk
     assert h.approve(ev["id"])
     assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
 
@@ -361,9 +358,47 @@ def test_non_admin_actor_still_requires_a_separate_approval():
     assert h.backend.calls == [("service.restart", {"name": "caddy"})]
 
 
-def test_owner_signature_policy_parks_a_non_owner_admin():
-    """Owner-co-signed policies still require the configured operator: a
-    different admin's own request must not auto-approve."""
+def test_current_admin_group_member_can_approve_without_static_allowlist():
+    secondary_sk, secondary_pk = new_key()
+    current_admins = {secondary_pk}
+    h = Harness(admin_authorizer=lambda pubkey: pubkey in current_admins)
+    h.grant(["services.restart"])
+    ev, handled = h.request("service.restart", {"name": "caddy"})
+    assert handled and h.engine.state(ev["id"]) == OpState.REQUESTED
+
+    approval = build_approval(secondary_sk, secondary_pk, ev["id"])
+    assert h.engine.handle_event(approval)
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+
+
+def test_removed_admin_group_member_cannot_approve():
+    secondary_sk, secondary_pk = new_key()
+    current_admins = {secondary_pk}
+    h = Harness(admin_authorizer=lambda pubkey: pubkey in current_admins)
+    h.grant(["services.restart"])
+    ev, _ = h.request("service.restart", {"name": "caddy"})
+    current_admins.remove(secondary_pk)
+
+    approval = build_approval(secondary_sk, secondary_pk, ev["id"])
+    assert not h.engine.handle_event(approval)
+    assert h.engine.state(ev["id"]) == OpState.REQUESTED
+    assert h.backend.calls == []
+
+
+def test_current_admin_group_member_can_reject_without_static_allowlist():
+    secondary_sk, secondary_pk = new_key()
+    h = Harness(admin_authorizer=lambda pubkey: pubkey == secondary_pk)
+    h.grant(["services.restart"])
+    ev, _ = h.request("service.restart", {"name": "caddy"})
+
+    rejection = build_rejection(secondary_sk, secondary_pk, ev["id"], reason="not now")
+    assert h.engine.handle_event(rejection)
+    assert h.engine.state(ev["id"]) == OpState.REJECTED
+    assert h.backend.calls == []
+
+
+def test_owner_signature_policy_treats_all_admins_equally():
+    """Operation approval policy does not give the operator extra authority."""
     h = Harness(policy=lambda _tool, _args, _actor: {"allow": True, "owner_signature_required": True})
     other_admin_sk, other_admin_pk = new_key()
     h.engine._admins = (h.admin_pk, other_admin_pk)
@@ -373,8 +408,8 @@ def test_owner_signature_policy_parks_a_non_owner_admin():
         "service.restart", {"name": "caddy"}, requester_sk=other_admin_sk, requester_pk=other_admin_pk
     )
     assert handled
-    assert h.engine.state(ev["id"]) == OpState.REQUESTED
-    assert h.backend.calls == []
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
 
     # The operator's own request is auto-approved (actor == policy_owner).
     ev2, handled = h.request(
@@ -382,7 +417,10 @@ def test_owner_signature_policy_parks_a_non_owner_admin():
     )
     assert handled
     assert h.engine.state(ev2["id"]) == OpState.SUCCEEDED
-    assert h.backend.calls == [("service.restart", {"name": "caddy"})]
+    assert h.backend.calls == [
+        ("service.restart", {"name": "caddy"}),
+        ("service.restart", {"name": "caddy"}),
+    ]
 
 
 def test_rejection_by_admin_denies():

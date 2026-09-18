@@ -57,6 +57,7 @@ from yunohost.nostr_identity import (
     list_identities,
     list_identities_for_username,
     publish_to_relay,
+    pubkey_is_admin,
     resolve_pubkey,
     resolve_username,
 )
@@ -223,18 +224,12 @@ def _pubkey_is_admin(pubkey: str, admins: set[str]) -> bool:
     identities, so a revoked/unlinked key never grants admin. Never raises:
     an unavailable identity/account store degrades to False.
     """
-    if pubkey in admins:
-        return True
-    try:
-        identity = resolve_pubkey(pubkey)
-    except Exception:  # noqa: BLE001 - unavailable store must not break authz
-        return False
-    if identity is None:
-        return False
-    try:
-        return bool(_native_user_is_admin(identity.username))
-    except Exception:  # noqa: BLE001 - unavailable store must not break authz
-        return False
+    return pubkey_is_admin(
+        pubkey,
+        configured_admins=admins,
+        identity_resolver=resolve_pubkey,
+        user_admin_resolver=_native_user_is_admin,
+    )
 
 
 def _session_infos() -> dict[str, Any] | None:
@@ -2055,7 +2050,9 @@ def build_app(
                 control_relay=_config_control_relay(),
                 note=body.get("note"),
             )
-        return {"ok": True, "request_id": request_id, "event_id": event["id"]}
+        # Relay acknowledgement means the decision event was submitted, not
+        # that operationsd accepted the signer or advanced the operation.
+        return {"ok": True, "status": "submitted", "request_id": request_id, "event_id": event["id"]}
 
     @app.post("/package/operations/{request_id}/reject")
     def package_operations_reject(request_id: str) -> Any:
@@ -2075,7 +2072,7 @@ def build_app(
                 control_relay=_config_control_relay(),
                 reason=body.get("reason"),
             )
-        return {"ok": True, "request_id": request_id, "event_id": event["id"]}
+        return {"ok": True, "status": "submitted", "request_id": request_id, "event_id": event["id"]}
 
     return app
 
