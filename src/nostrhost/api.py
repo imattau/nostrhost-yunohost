@@ -43,6 +43,7 @@ from .cli import (
     _agent_status,
     _TOOL_HANDLERS,
     _State,
+    _lifecycle_result,
     _run_lifecycle,
 )
 from .core import NostrHostError
@@ -1270,14 +1271,16 @@ def build_app(
         needed. Admin-only, and routed through the signed operation chain so
         the toggle and its approval are audited (H5)."""
         body = _json_body()
-        return _run_lifecycle(
-            "agent.contribution.settings.set",
-            {
-                "dataset_repo": body.get("dataset_repo", ""),
-                "token": body.get("token") or None,
-                "auto_submit": bool(body.get("auto_submit", False)),
-            },
-            state=_State(),
+        return _lifecycle_result(
+            _run_lifecycle(
+                "agent.contribution.settings.set",
+                {
+                    "dataset_repo": body.get("dataset_repo", ""),
+                    "token": body.get("token") or None,
+                    "auto_submit": bool(body.get("auto_submit", False)),
+                },
+                state=_State(),
+            )
         )
 
     @app.post("/package/agent/contribution/submit")
@@ -1286,7 +1289,7 @@ def build_app(
         file the admin explicitly chose. Admin-only, approval-gated via the
         signed operation chain."""
         body = _json_body()
-        return _run_lifecycle("agent.contribution.submit", {"candidate_file_id": body.get("candidate_file_id", "")}, state=_State())
+        return _lifecycle_result(_run_lifecycle("agent.contribution.submit", {"candidate_file_id": body.get("candidate_file_id", "")}, state=_State()))
 
     @app.post("/package/agent/contribution/share")
     def agent_contribution_share() -> Any:
@@ -1297,7 +1300,7 @@ def build_app(
         are the safeguards, on this path exactly as on automatic submission.
         Approval-gated via the signed operation chain."""
         body = _json_body()
-        return _run_lifecycle("agent.contribution.share", {"cycle_id": body.get("cycle_id", "")}, state=_State())
+        return _lifecycle_result(_run_lifecycle("agent.contribution.share", {"cycle_id": body.get("cycle_id", "")}, state=_State()))
 
     # -- catalog --------------------------------------------------------------
 

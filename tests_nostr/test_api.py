@@ -2153,3 +2153,57 @@ def test_package_operations_reject_with_bunker_event(app, monkeypatch):
     status, _, body = wsgi_request(app, "POST", "/package/operations/" + "a" * 64 + "/reject", {"event": signed})
     assert status == "200"
     assert json.loads(body)["event_id"] == signed["id"]
+
+def test_contribution_settings_returns_unwrapped_result(monkeypatch):
+    """The admin client contract is the settings object, not the signed-chain
+    envelope, so a successful lifecycle write must be unwrapped."""
+    settings = {
+        "enabled": True,
+        "auto_submit": False,
+        "dataset_repo": "imattau/nostrhost-contributions",
+        "token_configured": True,
+    }
+    monkeypatch.setattr(
+        api_module,
+        "_run_lifecycle",
+        lambda tool, args, state: {"ok": True, "result": settings, "request_id": "r" * 64, "state": "succeeded"},
+    )
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, _, body = wsgi_request(
+        app,
+        "POST",
+        "/package/agent/contribution/settings",
+        {"dataset_repo": "imattau/nostrhost-contributions", "auto_submit": False},
+    )
+    assert status == "200"
+    assert json.loads(body) == settings
+
+
+def test_contribution_share_returns_unwrapped_result(monkeypatch):
+    result = {
+        "uploaded": True,
+        "repo": "imattau/nostrhost-contributions",
+        "path": "contributions.jsonl",
+        "base_revision": "main",
+        "pull_request_url": "https://github.com/imattau/nostrhost-contributions/pull/1",
+        "message": "opened a pull request",
+    }
+    monkeypatch.setattr(
+        api_module,
+        "_run_lifecycle",
+        lambda tool, args, state: {"ok": True, "result": result, "request_id": "r" * 64, "state": "succeeded"},
+    )
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, _, body = wsgi_request(app, "POST", "/package/agent/contribution/share", {"cycle_id": "c1"})
+    assert status == "200"
+    assert json.loads(body) == result
+
+
+def test_contribution_settings_keeps_envelope_on_failure(monkeypatch):
+    """A rejected or parked operation must still surface ok:false to the client."""
+    envelope = {"ok": False, "request_id": "r" * 64, "state": "rejected", "reason": "policy"}
+    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: envelope)
+    app = build_app(authorizer=lambda _rule: "admin")
+    status, _, body = wsgi_request(app, "POST", "/package/agent/contribution/settings", {"dataset_repo": "x/y"})
+    assert status == "200"
+    assert json.loads(body) == envelope

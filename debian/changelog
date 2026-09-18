@@ -1,3 +1,15 @@
+yunohost (12.1.41.85) stable; urgency=low
+
+  * Contribution write endpoints return the handler result, not the raw
+    signed-chain envelope. POST /package/agent/contribution/{settings,share}
+    now unwrap {ok,result,...} on success, so the admin UI actually reflects a
+    saved token (and its configured state) and shows the opened pull-request
+    link instead of treating the envelope as the settings object and looking
+    like nothing was saved. Failures still return the envelope (ok:false) so
+    the client raises.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 10:40:00 +0000
+
 yunohost (12.1.41.84) stable; urgency=low
 
   * Contribution sharing targets GitHub. The agent token input now stores a

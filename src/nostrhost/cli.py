@@ -419,6 +419,23 @@ def _run_lifecycle(tool: str, args: dict[str, Any], *, state: _State) -> dict[st
     )
 
 
+def _lifecycle_result(body: dict[str, Any]) -> Any:
+    """Return the handler's own result for a lifecycle write endpoint.
+
+    Lifecycle writes answer with the engine envelope (``{ok, result, policy,
+    request_id, state}``) so the generic admin client still sees ``ok: false``
+    and raises. Some endpoints' documented client contract is instead the
+    handler's return value (the contribution settings object, the submission
+    result); for those, hand that value back on success and leave the envelope
+    untouched on any non-success state so the failure still surfaces.
+    """
+    if isinstance(body, dict) and body.get("ok") is True:
+        result = body.get("result")
+        if isinstance(result, dict):
+            return result
+    return body
+
+
 def _lifecycle_report(action: str, envelope: dict[str, Any], body: dict[str, Any], *, previous: str | None = None) -> dict[str, Any]:
     result = body.get("result") or {}
     rows = (result.get("results") if isinstance(result, dict) else None) or []
