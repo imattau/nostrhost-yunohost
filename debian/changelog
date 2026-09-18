@@ -1,3 +1,14 @@
+yunohost (12.1.41.80) stable; urgency=low
+
+  * MCP endpoint configuration from the admin console: new POST
+    /package/mcp/endpoint that wires an operator-chosen registered domain
+    through to the local adapter's Caddy route (nostrhost mcp route) and
+    reports the resulting endpoint (configured/domain/port). The domain is
+    normalized (lowercased, trailing dot stripped) and rejected with 400
+    invalid_body when missing/empty/non-string.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 16:10:00 +0000
+
 yunohost (12.1.41.79) stable; urgency=low
 
   * Fix the bare-domain-root portal redirect shipped in 12.1.41.78: the

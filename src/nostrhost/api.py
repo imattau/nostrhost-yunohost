@@ -48,7 +48,7 @@ from .cli import (
 from .core import NostrHostError
 from .app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
 from .package_engine import PackageError
-from .mcp_endpoint import export_ca_bundle, read_endpoint_config
+from .mcp_endpoint import configure_route, export_ca_bundle, read_endpoint_config
 from .accounts import user_is_admin as _native_user_is_admin
 from yunohost.nostr_identity import (
     IdentityError,
@@ -1974,6 +1974,17 @@ def build_app(
 
     @app.get("/package/mcp/endpoint")
     def mcp_endpoint_info() -> Any:
+        config = read_endpoint_config()
+        return {"configured": config is not None, **(config or {})}
+
+    @app.post("/package/mcp/endpoint")
+    def mcp_endpoint_configure() -> Any:
+        body = _json_body()
+        raw_domain = body.get("domain")
+        if not isinstance(raw_domain, str) or not raw_domain.strip():
+            raise ApiError(400, "invalid_body", "domain must be a non-empty string")
+        domain = raw_domain.strip().lower().rstrip(".")
+        configure_route(domain)
         config = read_endpoint_config()
         return {"configured": config is not None, **(config or {})}
 

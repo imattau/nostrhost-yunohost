@@ -1931,6 +1931,32 @@ def test_mcp_endpoint_info_reports_configured(app, monkeypatch):
     assert json.loads(body) == {"configured": True, "domain": "mcp.example.com", "port": 8930}
 
 
+def test_mcp_endpoint_configure_sets_route_and_returns_endpoint(app, monkeypatch):
+    configured = {}
+
+    def configure(domain):
+        configured.update({"domain": domain, "port": 8930})
+
+    monkeypatch.setattr(api_module, "configure_route", configure)
+    monkeypatch.setattr(api_module, "read_endpoint_config", lambda: configured or None)
+
+    status, _, body = wsgi_request(app, "POST", "/package/mcp/endpoint", {"domain": " MCP.Example.COM. "})
+
+    assert status == "200"
+    assert configured == {"domain": "mcp.example.com", "port": 8930}
+    assert json.loads(body) == {"configured": True, "domain": "mcp.example.com", "port": 8930}
+
+
+@pytest.mark.parametrize("domain", [None, "", "   ", 123, ["mcp.example.com"]])
+def test_mcp_endpoint_configure_rejects_invalid_domain(app, monkeypatch, domain):
+    monkeypatch.setattr(api_module, "configure_route", lambda _domain: pytest.fail("must not configure"))
+
+    status, _, body = wsgi_request(app, "POST", "/package/mcp/endpoint", {"domain": domain})
+
+    assert status == "400"
+    assert json.loads(body)["code"] == "invalid_body"
+
+
 def test_mcp_ca_bundle_unavailable_when_no_internal_ca(app, monkeypatch):
     monkeypatch.setattr(api_module, "export_ca_bundle", lambda: None)
     status, _, body = wsgi_request(app, "GET", "/package/mcp/ca-bundle")
