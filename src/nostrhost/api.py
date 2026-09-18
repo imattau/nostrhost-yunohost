@@ -2077,6 +2077,32 @@ def build_app(
             )
         return {"ok": True, "status": "submitted", "request_id": request_id, "event_id": event["id"]}
 
+    @app.get("/package/notify/signers")
+    def notify_signers() -> Any:
+        """Registered remote-signer push targets (approval fan-out status).
+
+        Secrets are never returned; `this_admin` says whether the authenticated
+        admin's own identity has a signer registered, and `remote` whether the
+        node pushes parked approvals to signers at all.
+        """
+        from yunohost.nostr_signerd import load_targets
+
+        admin = _authorized_pubkey()
+        targets = load_targets()
+        return {
+            "remote": len(targets) > 0,
+            "this_admin": any(t.signer_pubkey == admin for t in targets),
+            "targets": [
+                {
+                    "signer_pubkey": t.signer_pubkey,
+                    "relays": list(t.relays),
+                    "label": t.label,
+                    "paired": t.secret is not None,
+                }
+                for t in targets
+            ],
+        }
+
     return app
 
 

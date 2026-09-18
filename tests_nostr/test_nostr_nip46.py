@@ -18,10 +18,12 @@ from yunohost.nostr_nip46 import (
     Nip46Timeout,
     _decrypt,
     _encrypt,
+    build_nostrconnect_uri,
     build_request_event,
     parse_bunker_uri,
     parse_response,
     sign_event_via_bunker,
+    validate_connect_request,
 )
 from yunohost.nostr_identity import _sign_event
 from yunohost.nostr_operations import _derive_pubkey, build_approval_template, validate_signed_approval
@@ -162,6 +164,41 @@ def test_sign_event_times_out_when_signer_silent():
             transport=lambda *_args, **_kwargs: None,
             timeout=0.01,
         )
+
+
+def _connect_event(signer_sk, signer_pk, client_pk, secret, request_id="pair-1", method="connect"):
+    body = json.dumps({"id": request_id, "method": method, "params": [signer_pk, secret, []]})
+    content = _encrypt(signer_sk, client_pk, body)
+    return _sign_event(signer_sk, signer_pk, NIP46_KIND, content, [["p", client_pk]])
+
+
+def test_build_nostrconnect_uri_names_client_relay_and_secret():
+    client_sk, client_pk = new_key()
+    uri = build_nostrconnect_uri(client_pk, ["wss://relay.example.com"], "s3cret")
+    assert uri.startswith(f"nostrconnect://{client_pk}?")
+    assert "relay=wss%3A%2F%2Frelay.example.com" in uri
+    assert "secret=s3cret" in uri
+
+
+def test_validate_connect_request_accepts_admin_with_correct_secret():
+    client_sk, client_pk = new_key()
+    signer_sk, signer_pk = new_key()
+    event = _connect_event(signer_sk, signer_pk, client_pk, "s3cret")
+    paired = validate_connect_request(
+        client_sk, event, secret="s3cret", is_admin=lambda pk: pk == signer_pk
+    )
+    assert paired == {"signer_pubkey": signer_pk, "relays": [], "request_id": "pair-1"}
+
+
+def test_validate_connect_request_rejects_wrong_secret_and_non_admin():
+    client_sk, client_pk = new_key()
+    signer_sk, signer_pk = new_key()
+    event = _connect_event(signer_sk, signer_pk, client_pk, "wrong")
+    assert validate_connect_request(client_sk, event, secret="s3cret") is None
+    good = _connect_event(signer_sk, signer_pk, client_pk, "s3cret")
+    assert validate_connect_request(client_sk, good, secret="s3cret", is_admin=lambda _pk: False) is None
+    not_connect = _connect_event(signer_sk, signer_pk, client_pk, "s3cret", method="sign_event")
+    assert validate_connect_request(client_sk, not_connect, secret="s3cret") is None
 
 
 def test_build_request_event_is_addressed_and_correlates():

@@ -1,3 +1,14 @@
+yunohost (12.1.41.92) stable; urgency=low
+
+  * Remote-signer phase 2. `nostrhost notify signer pair` runs the
+    nostrconnect flow: the node prints a `nostrconnect://` URI, the operator's
+    signer authorises the node's own client key, and no pairing secret is
+    stored (preferred over `signer add`). Adds `GET /package/notify/signers`
+    (fan-out status for the console) and live-refreshes the operations list
+    while the page is open.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 13:55:00 +0000
+
 yunohost (12.1.41.91) stable; urgency=low
 
   * Signer bridge fixes: the NIP-46 request event now carries only standard

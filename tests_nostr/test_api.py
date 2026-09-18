@@ -2160,6 +2160,29 @@ def test_package_operations_reject_with_bunker_event(app, monkeypatch):
     assert data["event_id"] == signed["id"]
 
 
+def test_notify_signers_reports_registered_targets(app, monkeypatch):
+    from yunohost.nostr_signerd import SignerTarget
+
+    monkeypatch.setattr(
+        "yunohost.nostr_signerd.load_targets",
+        lambda: [SignerTarget(signer_pubkey="admin-pubkey", relays=("wss://r.example",), secret=None, label="phone")],
+    )
+    status, _, body = wsgi_request(app, "GET", "/package/notify/signers")
+    assert status == "200"
+    data = json.loads(body)
+    assert data["remote"] is True
+    assert data["this_admin"] is True
+    assert data["targets"][0]["signer_pubkey"] == "admin-pubkey"
+    assert data["targets"][0]["paired"] is False
+
+
+def test_notify_signers_without_targets(app, monkeypatch):
+    monkeypatch.setattr("yunohost.nostr_signerd.load_targets", lambda: [])
+    status, _, body = wsgi_request(app, "GET", "/package/notify/signers")
+    assert status == "200"
+    assert json.loads(body) == {"remote": False, "this_admin": False, "targets": []}
+
+
 def test_contribution_settings_returns_unwrapped_result(monkeypatch):
     """The admin client contract is the settings object, not the signed-chain
     envelope, so a successful lifecycle write must be unwrapped."""

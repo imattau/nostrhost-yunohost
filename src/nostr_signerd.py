@@ -140,6 +140,32 @@ def add_target_from_bunker_uri(
     return targets
 
 
+def add_target(
+    signer_pubkey: str,
+    relays: list[str] | tuple[str, ...],
+    *,
+    label: str | None = None,
+    path: str | Path | None = None,
+) -> list[SignerTarget]:
+    """Register an already-paired signer (no stored secret).
+
+    Used by the ``nostrconnect://`` flow: the signer authorised the node's
+    client key during pairing, so no third-party secret is persisted.
+    """
+    target = SignerTarget(
+        signer_pubkey=str(signer_pubkey).lower(),
+        relays=tuple(str(r) for r in relays if r),
+        secret=None,
+        label=label,
+    )
+    if not target.relays:
+        raise ValueError("at least one relay is required")
+    targets = [t for t in load_targets(path) if t.signer_pubkey != target.signer_pubkey]
+    targets.append(target)
+    save_targets(targets, path)
+    return targets
+
+
 def remove_target(signer_pubkey: str, *, path: str | Path | None = None) -> bool:
     pubkey = signer_pubkey.lower()
     targets = load_targets(path)

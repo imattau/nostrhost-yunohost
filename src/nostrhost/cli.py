@@ -3674,6 +3674,56 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
         _guard(run, output_as)
 
+    @signer.command("pair")
+    def signer_pair(
+        relay: str = typer.Option(None, "--relay", help="relay for the signer to connect over (default: first publish relay)"),
+        timeout: int = typer.Option(120, "--timeout", help="seconds to wait for the signer"),
+        label: str = typer.Option(None, "--label", help="display label"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Pair a remote signer by scanning/opening a nostrconnect:// URI.
+
+        The node's own client key is authorised by the signer, so no pairing
+        secret is stored (preferred over `signer add`). Prints the URI to
+        stderr and waits for the signer to connect.
+        """
+        def run() -> dict[str, Any]:
+            import secrets as _secrets
+
+            from yunohost.nostr_identity import _derive_pubkey, _operator_config, pubkey_is_admin
+            from yunohost.nostr_nip46 import build_nostrconnect_uri, pair_via_nostrconnect
+            from yunohost.nostr_signerd import add_target, ensure_client_key
+
+            cfg = _operator_config()
+            chosen = relay or (_notify_outbound_relays() or ["wss://nos.lol"])[0]
+            client_sk = ensure_client_key()
+            client_pubkey = _derive_pubkey(client_sk)
+            secret = _secrets.token_hex(16)
+            uri = build_nostrconnect_uri(client_pubkey, [chosen], secret)
+            typer.echo("Open/scan this URI in your signer to authorize this node:", err=True)
+            typer.echo(uri, err=True)
+            paired = pair_via_nostrconnect(
+                client_sk=client_sk,
+                relays=[chosen],
+                secret=secret,
+                timeout=float(timeout),
+                is_admin=lambda pk: pubkey_is_admin(pk, configured_admins=cfg.admins),
+            )
+            targets = add_target(paired["signer_pubkey"], paired["relays"] or [chosen], label=label)
+            _systemctl("restart", "nostr-signerd")
+            return {
+                "paired": True,
+                "signer_pubkey": paired["signer_pubkey"],
+                "relays": paired["relays"] or [chosen],
+                "targets": [
+                    {"signer_pubkey": t.signer_pubkey, "relays": list(t.relays), "label": t.label, "paired": t.secret is not None}
+                    for t in targets
+                ],
+                "restarted": True,
+            }
+
+        _guard(run, output_as)
+
     @signer.command("list")
     def signer_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """List registered remote signer targets (secrets never shown)."""

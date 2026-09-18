@@ -99,6 +99,129 @@ def _decrypt(client_sk: str, signer_pubkey: str, payload: str) -> str:
     return nip44_decrypt(SecretKey.parse(client_sk), PublicKey.parse(signer_pubkey), payload)
 
 
+def build_nostrconnect_uri(
+    client_pubkey: str,
+    relays: list[str],
+    secret: str,
+    *,
+    name: str = "NostrHost",
+) -> str:
+    """Build a ``nostrconnect://`` URI for a signer to pair against.
+
+    Unlike ``bunker://`` this direction lets the *node* be the NIP-46 client
+    without ever holding the signer's secret: the operator opens/scans the
+    URI in their signer, which connects and authorises the node's client key.
+    """
+    if not _is_hex64(client_pubkey):
+        raise Nip46Error("client pubkey must be 64-hex")
+    if not relays:
+        raise Nip46Error("at least one relay is required")
+    from urllib.parse import urlencode
+
+    params: list[tuple[str, str]] = [("relay", relay) for relay in relays]
+    params.append(("secret", secret))
+    if name:
+        params.append(("name", name))
+    return f"nostrconnect://{client_pubkey}?{urlencode(params)}"
+
+
+def validate_connect_request(
+    client_sk: str,
+    event: dict[str, Any],
+    *,
+    secret: str,
+    is_admin: Callable[[str], bool] | None = None,
+) -> dict[str, Any] | None:
+    """Validate an incoming NIP-46 ``connect`` request from a signer.
+
+    Returns ``{"signer_pubkey", "relays", "request_id"}`` when the request
+    decrypts, carries the expected pairing secret, names an admin identity
+    (when ``is_admin`` is given) and asks to connect; otherwise None. Pure
+    and transport-free so the pairing decision is testable without a relay.
+    """
+    if int(event.get("kind") or 0) != NIP46_KIND:
+        return None
+    try:
+        body = parse_response(client_sk, str(event.get("pubkey") or ""), event)
+    except Nip46Error:
+        return None
+    if body.get("method") != "connect":
+        return None
+    params = body.get("params") or []
+    signer_pubkey = str(params[0]).lower() if params else str(event.get("pubkey") or "").lower()
+    supplied_secret = params[1] if len(params) > 1 else None
+    if not _is_hex64(signer_pubkey):
+        return None
+    if secret is not None and supplied_secret != secret:
+        return None
+    if is_admin is not None and not is_admin(signer_pubkey):
+        return None
+    return {
+        "signer_pubkey": signer_pubkey,
+        "relays": list(params[2]) if len(params) > 2 and isinstance(params[2], list) else [],
+        "request_id": str(body.get("id") or ""),
+    }
+
+
+def pair_via_nostrconnect(
+    *,
+    client_sk: str,
+    relays: list[str],
+    secret: str,
+    timeout: float = 120.0,
+    is_admin: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Wait for a signer to pair using a ``nostrconnect://`` URI.
+
+    Subscribes to the relays for kind-24133 events addressed to the client,
+    validates the first ``connect`` from an admin identity carrying the
+    expected secret, acknowledges it, and returns
+    ``{"signer_pubkey", "relays"}``. Raises :class:`Nip46Timeout` if no
+    signer connects in time.
+    """
+    from websockets.sync.client import connect as ws_connect
+
+    client_pubkey = _derive_pubkey(client_sk)
+    sub_id = "nostrhost-nip46-pair-" + secrets.token_hex(4)
+    deadline = time.time() + timeout
+    subscription = json.dumps(["REQ", sub_id, {"kinds": [NIP46_KIND], "#p": [client_pubkey]}])
+
+    for relay in relays:
+        if time.time() >= deadline:
+            break
+        try:
+            with ws_connect(relay, open_timeout=min(10.0, max(1.0, timeout))) as ws:
+                ws.send(subscription)
+                while time.time() < deadline:
+                    try:
+                        message = json.loads(ws.recv(timeout=0.5))
+                    except TimeoutError:
+                        continue
+                    if not isinstance(message, list) or message[0] != "EVENT":
+                        continue
+                    event = message[2]
+                    if not isinstance(event, dict):
+                        continue
+                    paired = validate_connect_request(client_sk, event, secret=secret, is_admin=is_admin)
+                    if paired is None:
+                        continue
+                    # The ack is the response to the signer's own connect id.
+                    ack_body = json.dumps({"id": paired["request_id"], "result": "ack"})
+                    ack_content = _encrypt(client_sk, paired["signer_pubkey"], ack_body)
+                    ack_event = _sign_event(
+                        client_sk,
+                        client_pubkey,
+                        NIP46_KIND,
+                        ack_content,
+                        [["p", paired["signer_pubkey"]]],
+                    )
+                    ws.send(json.dumps(["EVENT", ack_event]))
+                    return {"signer_pubkey": paired["signer_pubkey"], "relays": list(relays)}
+        except Exception:  # noqa: BLE001 - try the next relay
+            continue
+    raise Nip46Timeout("no signer paired within the timeout")
+
+
 def build_request_event(
     *,
     client_sk: str,

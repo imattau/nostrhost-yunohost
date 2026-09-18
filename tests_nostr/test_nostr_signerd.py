@@ -15,6 +15,7 @@ from yunohost.nostr_operations import _derive_pubkey, validate_signed_approval
 from yunohost.nostr_signerd import (
     SignerBridge,
     SignerTarget,
+    add_target,
     add_target_from_bunker_uri,
     ensure_client_key,
     load_targets,
@@ -145,6 +146,19 @@ def test_targets_round_trip_from_bunker_uri(tmp_path):
     assert remove_target(signer, path=path) is True
     assert load_targets(path) == []
     assert remove_target(signer, path=path) is False
+
+
+def test_add_target_registers_paired_signer_without_secret(tmp_path):
+    path = tmp_path / "targets.json"
+    signer = "ab" * 32
+    targets = add_target(signer, ["wss://relay.example"], label="phone", path=path)
+    assert [t.signer_pubkey for t in targets] == [signer]
+    loaded = load_targets(path)
+    assert loaded[0].secret is None
+    assert loaded[0].relays == ("wss://relay.example",)
+    # Re-registering the same signer refreshes rather than duplicates.
+    add_target(signer, ["wss://relay2.example"], path=path)
+    assert len(load_targets(path)) == 1
 
 
 def test_ensure_client_key_is_stable(tmp_path):
