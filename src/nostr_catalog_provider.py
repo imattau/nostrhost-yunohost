@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 DEFAULT_NATIVE_CATALOG_STATE = "/var/lib/nostrhost/catalogue.json"
 ATTESTATION_MODE_ENV = "NOSTRHOST_CATALOG_ATTESTATION_MODE"
+# sha256 of the extracted logo.png; becomes the served app-logos URL filename.
+LOGO_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def native_catalog_state_path() -> Path:
@@ -56,7 +59,7 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
         verified = _has_passing_attestation(declaration, attestations)
         if mode == "require" and not verified:
             continue
-        apps[app_id] = {
+        app_entry: dict[str, Any] = {
             "manifest": {
                 "id": app_id,
                 "version": version,
@@ -87,6 +90,13 @@ def load_native_catalog(path: str | Path | None = None) -> dict[str, dict[str, A
             },
             **({"nostr_verified": verified} if mode == "prefer" else {}),
         }
+        # The daemon extracts each app's optional logo.png and records its
+        # sha256; only a well-formed hash is accepted, since it becomes a
+        # served URL path (defends against path traversal from state).
+        logo_hash = item.get("logo_hash")
+        if isinstance(logo_hash, str) and LOGO_HASH_PATTERN.fullmatch(logo_hash):
+            app_entry["logo_hash"] = logo_hash
+        apps[app_id] = app_entry
     return apps
 
 

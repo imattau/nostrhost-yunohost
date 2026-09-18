@@ -1,3 +1,14 @@
+yunohost (12.1.41.83) stable; urgency=low
+
+  * Native app logos now reach the portal and admin UI. load_native_catalog
+    maps the catalogue daemon's per-app logo_hash into the app-catalog shape,
+    so app_catalog_logo_urls() serves /nostrhost/sso/applogos/<hash>.png for
+    catalogue, installed-apps and portal entries instead of falling back to a
+    monogram everywhere. Only a well-formed sha256 is accepted, since it
+    becomes a served URL path.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 18:30:00 +0000
+
 yunohost (12.1.41.82) stable; urgency=low
 
   * MCP endpoint survives Caddy reloads and accepts public reverse-proxy

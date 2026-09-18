@@ -34,6 +34,43 @@ def test_load_native_catalog_maps_verified_projection(tmp_path):
     assert coordinate["repository"].endswith("hello_nostr_ynh")
 
 
+def test_load_native_catalog_maps_logo_hash(tmp_path):
+    path = tmp_path / "catalogue.json"
+    logo_hash = "d" * 64
+    path.write_text(json.dumps({"entries": [{
+        "declaration": {
+            "AppID": "hello_nostr",
+            "Repository": "https://github.com/example/hello_nostr_ynh",
+            "Version": "1.0.0~ynh1",
+            "Commit": "c" * 40,
+        },
+        "event_id": "a" * 64,
+        "created_at": 1,
+        "logo_hash": logo_hash,
+    }], "attestations": []}))
+
+    result = load_native_catalog(path)
+    assert result["hello_nostr"]["logo_hash"] == logo_hash
+
+
+def test_load_native_catalog_drops_malformed_logo_hash(tmp_path):
+    path = tmp_path / "catalogue.json"
+    path.write_text(json.dumps({"entries": [{
+        "declaration": {
+            "AppID": "hello_nostr",
+            "Repository": "https://github.com/example/hello_nostr_ynh",
+            "Version": "1.0.0~ynh1",
+            "Commit": "c" * 40,
+        },
+        "event_id": "a" * 64,
+        "created_at": 1,
+        "logo_hash": "../../etc/passwd",
+    }], "attestations": []}))
+
+    result = load_native_catalog(path)
+    assert "logo_hash" not in result["hello_nostr"]
+
+
 def test_load_native_catalog_ignores_bad_state(tmp_path):
     path = tmp_path / "catalogue.json"
     path.write_text("not json")
