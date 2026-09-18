@@ -119,7 +119,24 @@ def user_is_admin(username: str) -> bool:
     record = user_get(username)
     if record is None:
         return False
-    return bool(record.get("admin", False))
+    # The ``admins`` group is authoritative (Option A): membership confers
+    # admin status even when the account record predates the flag (e.g. a
+    # user added to the group before group<->flag syncing existed), so the
+    # group read is the fallback that keeps an existing promotion effective
+    # without a backfill migration.
+    return bool(record.get("admin", False)) or username in group_members("admins")
+
+
+def set_user_admin(username: str, admin: bool) -> None:
+    """Set/clear the account ``admin`` flag (idempotent; no-op if unknown)."""
+    record = user_get(username)
+    if record is None:
+        return
+    record = dict(record)
+    record["admin"] = bool(admin)
+    _native = users()
+    _native[username] = record
+    save_users(_native)
 
 
 def groups() -> dict[str, dict[str, Any]]:
@@ -179,7 +196,8 @@ def group_members(groupname: str) -> list[str]:
 
 def admins() -> list[str]:
     """Admin usernames (native, no LDAP — replaces the ``cn=admins`` read)."""
-    return [u for u, rec in users().items() if rec.get("admin")]
+    flagged = [u for u, rec in users().items() if rec.get("admin")]
+    return sorted(set(flagged) | set(group_members("admins")))
 
 
 def real_group_exists(groupname: str) -> bool:

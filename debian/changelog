@@ -1,3 +1,19 @@
+yunohost (12.1.41.72) stable; urgency=low
+
+  * The ``admins`` group is authoritative for admin status again: adding a
+    user to the group now grants admin privileges across every surface.
+    - ``user_group_update`` keeps each account's ``admin`` flag in lock-step
+      with ``admins`` group membership (set on add, cleared on remove, the
+      existing last-admin guard untouched).
+    - ``user_is_admin`` / ``accounts.admins()`` treat ``admins`` group
+      membership as admin even when the account record predates the flag, so
+      an already-promoted user (e.g. ``lostcause``) becomes admin without a
+      backfill migration.
+    - The native API (authorizer, ``_session_admin_pubkey``,
+      ``/package/session``) now treats a linked identity of an admin-flagged
+      account as admin in addition to the configured operator/admin pubkey
+      set — so a group-promoted user can actually operate the console.
+
 yunohost (12.1.41.71) stable; urgency=low
 
   * Change URL now refreshes the portal tiles: a package.reconcile that

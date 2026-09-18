@@ -49,6 +49,7 @@ from .core import NostrHostError
 from .app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
 from .package_engine import PackageError
 from .mcp_endpoint import export_ca_bundle, read_endpoint_config
+from .accounts import user_is_admin as _native_user_is_admin
 from yunohost.nostr_identity import (
     IdentityError,
     _operator_config,
@@ -214,6 +215,28 @@ def _build_admin_set(
     return admins
 
 
+def _pubkey_is_admin(pubkey: str, admins: set[str]) -> bool:
+    """Whether ``pubkey`` is a native admin: in the configured operator/admin
+    pubkey set, or the linked identity of an account whose ``admin`` flag or
+    ``admins``-group membership makes it an admin (Option A — the ``admins``
+    group is authoritative). ``resolve_pubkey`` only returns enabled
+    identities, so a revoked/unlinked key never grants admin. Never raises:
+    an unavailable identity/account store degrades to False.
+    """
+    if pubkey in admins:
+        return True
+    try:
+        identity = resolve_pubkey(pubkey)
+    except Exception:  # noqa: BLE001 - unavailable store must not break authz
+        return False
+    if identity is None:
+        return False
+    try:
+        return bool(_native_user_is_admin(identity.username))
+    except Exception:  # noqa: BLE001 - unavailable store must not break authz
+        return False
+
+
 def _session_infos() -> dict[str, Any] | None:
     """The current portal session payload (admin credential), or None.
 
@@ -278,7 +301,7 @@ def _session_admin_pubkey(admins: set[str]) -> str | None:
     except Exception:  # pragma: no cover - identity store unavailable
         identities = []
     for identity in identities:
-        if identity.pubkey in admins:
+        if _pubkey_is_admin(identity.pubkey, admins):
             return identity.pubkey
     return None
 
@@ -442,8 +465,8 @@ def default_authorizer(
     def authorize(rule: str = "") -> str:
         callers = resolve_callers()
         required = scoped_routes.get(str(rule))
-        if required is None or any(caller in admins for caller in callers):
-            admin = next((caller for caller in callers if caller in admins), None)
+        if required is None or any(_pubkey_is_admin(caller, admins) for caller in callers):
+            admin = next((caller for caller in callers if _pubkey_is_admin(caller, admins)), None)
             if admin is None:
                 raise ApiError(403, "not_authorized", "pubkey is not an admin")
             return admin
@@ -587,7 +610,7 @@ def build_app(
             for identity in identities:
                 if pubkey is None:
                     pubkey = identity.pubkey
-                if identity.pubkey in admins:
+                if _pubkey_is_admin(identity.pubkey, admins):
                     admin_pubkey = identity.pubkey
                     break
         return {

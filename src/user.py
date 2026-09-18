@@ -1325,6 +1325,7 @@ def user_group_update(
         groups as native_groups,
         remove_real_user_from_group,
         save_groups,
+        set_user_admin,
     )
     from .permission import _sync_permissions_with_ldap
 
@@ -1478,6 +1479,17 @@ def user_group_update(
             save_groups(_native)
         except Exception as e:
             raise YunohostError("group_update_failed", group=groupname, error=e)
+
+    # The ``admins`` group is authoritative for admin status: keep the account
+    # ``admin`` flag in lock-step so every admin surface (portal /me, user
+    # lists, accounts.admins()) agrees with group membership.
+    if groupname == "admins":
+        if add:
+            for user in users_to_add:
+                set_user_admin(user, True)
+        if remove:
+            for user in users_to_remove:
+                set_user_admin(user, False)
 
     if groupname == "admins" and remove:
         from .authenticators.ldap_admin import Authenticator as AdminAuth

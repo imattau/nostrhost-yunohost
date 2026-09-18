@@ -432,12 +432,13 @@ def test_valid_signed_event_but_not_linked_403():
     assert json.loads(body)["code"] == "identity_not_linked"
 
 
-def _fake_identity(pubkey_hex: str):
+def _fake_identity(pubkey_hex: str, username: str = "admin"):
     return types.SimpleNamespace(
         pubkey=pubkey_hex,
-        ynh_username="admin",
+        username=username,
+        ynh_username=username,
         signer_type="nip07",
-        label="admin",
+        label=username,
         enabled=True,
         created_at=0,
         last_used=0,
@@ -589,6 +590,91 @@ def test_session_auth_non_admin_403(monkeypatch):
     status, _, body = wsgi_request(app, "GET", "/package/system/version", headers=headers)
     assert status == "403"
     assert json.loads(body)["code"] == "not_authorized"
+
+
+def test_session_endpoint_admin_via_account_flag(monkeypatch):
+    """Option A: a linked identity of an account whose admin flag / admins-
+    group membership marks it admin is reported as an admin even when the
+    pubkey is absent from the static operator set (the 'added to the admins
+    group but no privileges' regression)."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    infos = _fake_session_infos("lostcause")
+    _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
+    monkeypatch.setattr(
+        api_module,
+        "resolve_username",
+        lambda username: [_fake_identity(pubkey, username="lostcause")],
+    )
+    monkeypatch.setattr(
+        api_module,
+        "resolve_pubkey",
+        lambda p: _fake_identity(p, username="lostcause"),
+    )
+    monkeypatch.setattr(
+        api_module, "_native_user_is_admin", lambda username: username == "lostcause"
+    )
+    app = build_app(admin_pubkeys=())  # not in the static set
+    status, _, body = wsgi_request(app, "GET", "/package/session")
+    assert status == "200"
+    out = json.loads(body)
+    assert out["authenticated"] is True
+    assert out["admin"] is True
+    assert out["pubkey"] == pubkey
+
+
+def test_session_auth_admin_via_account_flag_ok(monkeypatch):
+    """The same account-admin session authorizes a real admin route."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    infos = _fake_session_infos("lostcause")
+    headers = _session_headers(monkeypatch, infos)
+    monkeypatch.setattr(api_module, "_session_infos", lambda: infos)
+    monkeypatch.setattr(
+        api_module,
+        "resolve_username",
+        lambda username: [_fake_identity(pubkey, username="lostcause")],
+    )
+    monkeypatch.setattr(
+        api_module,
+        "resolve_pubkey",
+        lambda p: _fake_identity(p, username="lostcause"),
+    )
+    monkeypatch.setattr(
+        api_module, "_native_user_is_admin", lambda username: username == "lostcause"
+    )
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=())
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers=headers)
+    assert status == "200"
+    assert json.loads(body)["version"] == "1"
+
+
+def test_nip98_auth_admin_via_account_flag_ok(monkeypatch):
+    """NIP-98 path: a signed request by an account-admin linked key is admin."""
+    from yunohost.nostr_operations import _derive_pubkey
+
+    sk = secrets.token_hex(32)
+    pubkey = _derive_pubkey(sk)
+    monkeypatch.setattr(
+        api_module,
+        "resolve_pubkey",
+        lambda p: _fake_identity(p, username="lostcause"),
+    )
+    monkeypatch.setattr(
+        api_module, "_native_user_is_admin", lambda username: username == "lostcause"
+    )
+    monkeypatch.setitem(api_module._TOOL_HANDLERS, "system.version", lambda **k: {"version": "1"})
+    app = build_app(admin_pubkeys=())
+    headers = {"Authorization": _signed_header(sk, pubkey, "GET", "/package/system/version")}
+    status, _, body = wsgi_request(app, "GET", "/package/system/version", headers=headers)
+    assert status == "200"
+    assert json.loads(body)["version"] == "1"
 
 
 # --------------------------------------------------------------------------- #
