@@ -403,8 +403,8 @@ class AgentExportRunArgs(_Strict):
 
 
 class AgentContributionSettingsSetArgs(_Strict):
-    dataset_repo: str = Field(description="the Hugging Face dataset repo")
-    token: str | None = Field(default=None, description="Hugging Face token (stored, never returned)")
+    dataset_repo: str = Field(description="the GitHub repository (owner/name) contributions are opened as PRs against")
+    token: str | None = Field(default=None, description="GitHub token (stored, never returned)")
     auto_submit: bool = Field(default=False, description="submit every completed cycle automatically")
 
 
@@ -1386,7 +1386,7 @@ TOOLS: dict[str, ToolSpec] = {
         handler=_safe_agent_contribution_settings_set,
         scope=SCOPE_AGENT_WRITE,
         input_model=AgentContributionSettingsSetArgs,
-        description="set contribution settings (dataset repo, HF token, auto-submit)",
+        description="set contribution settings (GitHub repo, token, auto-submit)",
     ),
     "agent.contribution.submit": ToolSpec(
         name="agent.contribution.submit",

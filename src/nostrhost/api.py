@@ -1265,7 +1265,7 @@ def build_app(
 
     @app.post("/package/agent/contribution/settings")
     def agent_contribution_settings_set() -> Any:
-        """Touches Hugging Face credentials and, via auto_submit, can flip on
+        """Touches contribution credentials and, via auto_submit, can flip on
         the resident daemon submitting every completed cycle with no click
         needed. Admin-only, and routed through the signed operation chain so
         the toggle and its approval are audited (H5)."""

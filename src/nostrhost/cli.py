@@ -586,7 +586,7 @@ AGENT_LLM_ENV = "/etc/nostrhost-agent/llm.env"
 AGENT_LLM_SERVICE = "nostrhost-agent-llm.service"
 AGENT_INFERENCE_HOST = "127.0.0.1"
 AGENT_INFERENCE_PORT = 18080
-AGENT_HF_TOKEN_PATH = "/etc/nostrhost-agent/hf_token"
+AGENT_GITHUB_TOKEN_PATH = "/etc/nostrhost-agent/github_token"
 # Shared with the resident daemon's own auto-submitter (agent/contribution_auto.go,
 # same default path) so a cycle submitted either manually or automatically is never
 # offered again through the other path.
@@ -1102,7 +1102,7 @@ def _agent_contribution_settings_get() -> dict[str, Any]:
         auto_submit = bool(contribution.get("enabled", False))
     except NostrHostError:
         pass
-    token_configured = Path(AGENT_HF_TOKEN_PATH).is_file()
+    token_configured = Path(AGENT_GITHUB_TOKEN_PATH).is_file()
     return {
         "enabled": bool(dataset_repo) and token_configured,
         "auto_submit": auto_submit,
@@ -1112,7 +1112,7 @@ def _agent_contribution_settings_get() -> dict[str, Any]:
 
 
 def _agent_contribution_settings_set(dataset_repo: str, token: str | None, auto_submit: bool) -> dict[str, Any]:
-    """Update the agent's Hugging Face contribution settings.
+    """Update the agent's GitHub contribution settings.
 
     ``dataset_repo``/``token`` control whether an operator can share a
     cycle themselves, one click at a time (the "enabled" field in the
@@ -1127,9 +1127,9 @@ def _agent_contribution_settings_set(dataset_repo: str, token: str | None, auto_
     """
     if os.geteuid() != 0:
         raise NostrHostError("contribution settings must be set as root")
-    token_will_exist = bool(token) or Path(AGENT_HF_TOKEN_PATH).is_file()
+    token_will_exist = bool(token) or Path(AGENT_GITHUB_TOKEN_PATH).is_file()
     if auto_submit and not (dataset_repo and token_will_exist):
-        raise NostrHostError("dataset_repo and a saved Hugging Face token are both required before enabling automatic submission")
+        raise NostrHostError("dataset_repo and a saved GitHub token are both required before enabling automatic submission")
     if token:
         # The resident daemon (an unprivileged account) must be able to read
         # this directly for automatic submission -- root can always read it
@@ -1137,7 +1137,7 @@ def _agent_contribution_settings_set(dataset_repo: str, token: str | None, auto_
         import pwd
 
         agent_user = pwd.getpwnam("nostrhost-agent")
-        token_path = Path(AGENT_HF_TOKEN_PATH)
+        token_path = Path(AGENT_GITHUB_TOKEN_PATH)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_temp = token_path.with_name(token_path.name + f".{os.getpid()}.tmp")
         fd = os.open(token_temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1165,9 +1165,9 @@ def _agent_contribution_submit(candidate_file_id: str) -> Any:
         raise NostrHostError("contribution submit must be run as root")
     settings = _agent_contribution_settings_get()
     if not settings["enabled"]:
-        raise NostrHostError("Hugging Face sharing is not enabled; turn it on in agent settings first")
+        raise NostrHostError("contribution sharing is not enabled; turn it on in agent settings first")
     if not settings["token_configured"]:
-        raise NostrHostError("no Hugging Face token is configured")
+        raise NostrHostError("no GitHub token is configured")
     if not _CANDIDATE_ID_PATTERN.match(candidate_file_id or ""):
         raise NostrHostError("invalid candidate id")
     candidate_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.json"
@@ -1175,7 +1175,7 @@ def _agent_contribution_submit(candidate_file_id: str) -> Any:
         raise NostrHostError("no prepared candidate with that id")
     result = _run_agent_tool(AGENT_CONTRIBUTE_BINARY, [
         "--candidate", str(candidate_path),
-        "--token-file", AGENT_HF_TOKEN_PATH,
+        "--token-file", AGENT_GITHUB_TOKEN_PATH,
         "--repo", settings["dataset_repo"],
     ])
     cycle_ref_path = Path(AGENT_EXPORTS_DIR) / f"{candidate_file_id}.cycle_id"

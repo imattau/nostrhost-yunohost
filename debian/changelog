@@ -1,3 +1,15 @@
+yunohost (12.1.41.84) stable; urgency=low
+
+  * Contribution sharing targets GitHub. The agent token input now stores a
+    GitHub token at /etc/nostrhost-agent/github_token and the shared
+    submission path opens pull requests against the configured GitHub
+    repository (imattau/nostrhost-contributions) so its validate + auto-merge
+    pipeline runs, instead of committing directly to the Hugging Face dataset
+    where pull requests never merge. Settings, MCP tool descriptions and the
+    admin "GitHub token" input are updated to match.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 10:05:00 +0000
+
 yunohost (12.1.41.83) stable; urgency=low
 
   * Native app logos now reach the portal and admin UI. load_native_catalog
