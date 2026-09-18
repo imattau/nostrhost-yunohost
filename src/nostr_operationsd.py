@@ -299,7 +299,11 @@ class OperationEngine:
         if request_id is None:
             return False
         if record is None:
-            logger.warning("approval for %s ignored: request not in executor state", request_id[:16])
+            # A request that already reached a terminal result is deliberately
+            # not rebuilt into a record on replay, so its approval is a no-op
+            # rather than a gap; only warn for a genuinely unknown request.
+            if request_id not in self.executed:
+                logger.warning("approval for %s ignored: request not in executor state", request_id[:16])
             return False
         if not self._is_approver(event.get("pubkey")):
             logger.warning("approval for %s by non-admin ignored", request_id[:16])
@@ -323,7 +327,8 @@ class OperationEngine:
         if request_id is None:
             return False
         if record is None:
-            logger.warning("rejection for %s ignored: request not in executor state", request_id[:16])
+            if request_id not in self.executed:
+                logger.warning("rejection for %s ignored: request not in executor state", request_id[:16])
             return False
         if not self._is_approver(event.get("pubkey")):
             logger.warning("rejection for %s by non-admin ignored", request_id[:16])

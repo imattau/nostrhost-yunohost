@@ -1,3 +1,13 @@
+yunohost (12.1.41.89) stable; urgency=low
+
+  * Quieter executor replay: an approval/rejection for a request that already
+    reached a terminal result is an expected no-op (terminal requests are not
+    rebuilt into records on replay), so it is no longer logged as "request not
+    in executor state". The warning is kept for a genuinely unknown request,
+    where it indicates a real replay gap.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 12:35:00 +0000
+
 yunohost (12.1.41.88) stable; urgency=low
 
   * Report an immediately rejected operation as FAILED in the console. The
