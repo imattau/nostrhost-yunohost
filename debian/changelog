@@ -1,3 +1,18 @@
+yunohost (12.1.41.86) stable; urgency=low
+
+  * Authorize operation approvals from current YunoHost admins. operationsd
+    resolves approval/rejection authority at decision time from the signer's
+    enabled identity and current membership of the native admins group, so
+    group removal and identity revocation take effect immediately without a
+    daemon restart or a second stale pubkey allowlist. Configured operator
+    keys remain a bootstrap fallback, and the store fails closed. The
+    owner-co-signature special case is removed: any current admin's signed
+    decision is the approval. The control relay defers 2201/2202 writer policy
+    to the executor, and the API reports a submitted decision as
+    status:"submitted" (relay acknowledgement only, not executor acceptance).
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 10:45:00 +0000
+
 yunohost (12.1.41.85) stable; urgency=low
 
   * Contribution write endpoints return the handler result, not the raw
