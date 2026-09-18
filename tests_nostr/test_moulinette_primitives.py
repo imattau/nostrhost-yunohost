@@ -177,10 +177,18 @@ def test_tty_handler_colors_when_tty(monkeypatch, capsys):
 def test_logging_init_uses_native_tty_handler(tmp_path):
     from yunohost.utils.logging import init_logging
 
-    init_logging(interface="cli", debug=False, quiet=True, logdir=str(tmp_path))
-    logger = logging.getLogger("yunohost.stage2test")
-    logger.info("ok")  # exercises the nostrhost.logging.TTYHandler in the config
-    assert True
+    # init_logging() runs dictConfig(disable_existing_loggers=True) and installs
+    # its own root handlers, which mutates global logging for the rest of the
+    # session (silently breaking caplog in later tests). Re-enable the loggers
+    # it disabled once we are done.
+    try:
+        init_logging(interface="cli", debug=False, quiet=True, logdir=str(tmp_path))
+        logger = logging.getLogger("yunohost.stage2test")
+        logger.info("ok")  # exercises the nostrhost.logging.TTYHandler in the config
+    finally:
+        for existing in logging.root.manager.loggerDict.values():
+            if isinstance(existing, logging.Logger):
+                existing.disabled = False
 
 
 # --------------------------------------------------------------------------- #

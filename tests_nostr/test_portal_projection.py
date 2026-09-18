@@ -9,6 +9,8 @@ build/write/read round-trip without touching real YunoHost state.
 from __future__ import annotations
 
 import json
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -62,6 +64,10 @@ def _fake_permissions() -> dict:
 
 def _install_yunohost_fakes(monkeypatch) -> None:
     """Wire the lazy yunohost imports used by the projection builders."""
+    # yunohost.settings -> yunohost.firewall imports the optional miniupnpc
+    # binding at module scope; stub it so the projection tests run without it.
+    monkeypatch.setitem(sys.modules, "miniupnpc", ModuleType("miniupnpc"))
+
     import yunohost.app as app_mod
     import yunohost.domain as domain_mod
     import yunohost.permission as perm_mod

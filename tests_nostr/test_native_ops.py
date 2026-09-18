@@ -15,6 +15,7 @@ import pytest
 
 from yunohost.nostr_operations import (
     OperationError,
+    _EmptyArgs,
     tool_spec,
 )
 from yunohost.nostrhost import native_ops
@@ -101,7 +102,7 @@ def test_validate_args_coerces_types():
 
 def test_validate_args_plain_tool():
     spec = tool_spec("system.version")
-    assert spec.input_model is None
+    assert spec.input_model is _EmptyArgs
     assert spec.validate_args({}) == {}
     with pytest.raises(OperationError):
         spec.validate_args(None)

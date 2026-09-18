@@ -49,6 +49,7 @@ def test_agent_init_creates_private_observe_config_without_enable_or_grant(monke
         {"operation": "service.status"},
         {"operation": "nsite.gateway.status"},
         {"operation": "nsite.list"},
+        {"operation": "nsite.discover"},
     ]
 
 
