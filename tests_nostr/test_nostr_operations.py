@@ -701,6 +701,46 @@ def test_list_operations_marks_failed_result(monkeypatch):
     assert entry["state"] == "FAILED"
 
 
+def test_list_operations_marks_immediate_rejection_without_execution(monkeypatch):
+    """The executor's immediate policy rejection is a 2204 with no 2203: the
+    chain must read FAILED, not stay APPROVED once the admin later approves."""
+    sk, pk = new_key()
+    admin_sk, admin_pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    rejection = build_execution_result(
+        sk, pk, request["id"], ok=False, reason="catalog_digest_mismatch"
+    )
+    approval = build_approval(admin_sk, admin_pk, request["id"])
+
+    monkeypatch.setattr(
+        "yunohost.nostr_operations.fetch_chain_events",
+        lambda relay, **kw: [request, rejection, approval],
+    )
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "FAILED"
+
+
+def test_list_operations_orders_same_second_events_by_chain_position(monkeypatch):
+    """A 2203 and its 2204 usually share a created_at second; the reduction must
+    still apply execution-started before the result."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    started = build_execution_started(sk, pk, request["id"])
+    result = build_execution_result(sk, pk, request["id"], ok=True, result={})
+
+    # Deliberately hand the snapshot back in the wrong order (result first).
+    monkeypatch.setattr(
+        "yunohost.nostr_operations.fetch_chain_events",
+        lambda relay, **kw: [result, started, request],
+    )
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "SUCCEEDED"
+
+
 def test_list_operations_ignores_orphaned_followon(monkeypatch):
     """A 2201 whose 2200 isn't in this relay snapshot is skipped, not crashed on."""
     admin_sk, admin_pk = new_key()

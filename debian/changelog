@@ -1,3 +1,16 @@
+yunohost (12.1.41.88) stable; urgency=low
+
+  * Report an immediately rejected operation as FAILED in the console. The
+    executor's request-phase rejection (unknown tool, catalog_digest_mismatch,
+    unauthorized actor, policy denial) publishes a 2204 result without a
+    preceding 2203, which the strict state machine cannot express; the
+    chain reduction now treats a result in a non-executing state as terminal
+    failure instead of leaving the request to later read as APPROVED. Same
+    created_at second events are also ordered by chain position so a 2203/2204
+    pair sharing a second is reduced correctly.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 12:25:00 +0000
+
 yunohost (12.1.41.87) stable; urgency=low
 
   * Make the operation chain replay complete. fetch_chain_events (used by

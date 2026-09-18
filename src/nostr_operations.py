@@ -2042,7 +2042,7 @@ def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
     2201-2204 follow-ons have landed) to a single summary entry, replaying
     the state machine in event order. Returns None for an orphaned follow-on
     event whose request isn't in this relay snapshot."""
-    from .nostr_operations_state import InvalidTransition, next_state
+    from .nostr_operations_state import TERMINAL, InvalidTransition, next_state
 
     request_event = next((e for e in chain if e.get("kind") == KIND_OPERATION_REQUEST), None)
     if request_event is None:
@@ -2052,8 +2052,18 @@ def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         content = {}
 
+    # Order within the same created_at second by chain position, so a 2203 that
+    # shares a second with its 2204 is never reduced out of order (the relay's
+    # cross-kind order is not guaranteed).
+    priority = {
+        KIND_OPERATION_REQUEST: 0,
+        KIND_OPERATION_APPROVAL: 1,
+        KIND_OPERATION_REJECTION: 2,
+        KIND_EXECUTION_STARTED: 3,
+        KIND_EXECUTION_RESULT: 4,
+    }
     state = OpState.REQUESTED
-    for event in sorted(chain, key=lambda e: e["created_at"]):
+    for event in sorted(chain, key=lambda e: (e["created_at"], priority.get(int(e.get("kind") or 0), 99))):
         if event["id"] == request_event["id"]:
             continue
         ok = True
@@ -2065,6 +2075,12 @@ def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
         try:
             state = next_state(state, event["kind"], ok=ok)
         except InvalidTransition:
+            # the executor's immediate rejection publishes a 2204 result
+            # without a preceding 2203, which the strict machine can't express:
+            # a result in a non-terminal, non-executing state is a terminal
+            # failure, not a request to keep showing as pending/approved.
+            if event.get("kind") == KIND_EXECUTION_RESULT and state not in TERMINAL:
+                state = OpState.FAILED
             continue  # ignore out-of-order/duplicate/invalid chain events
 
     return {
