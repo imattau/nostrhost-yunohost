@@ -1013,6 +1013,324 @@ class TimerProvider(InspectVerifiedProvider):
         return [Operation("timer.remove", name, {"name": name}, risk="medium", reverse="timer.ensure", summary="remove systemd timer")]
 
 
+class RuntimeInstanceTemplateProvider(InspectVerifiedProvider):
+    """Render the ``<app>@.service``/``<app>@.socket`` unit *templates* for a
+    ``multi-tenant-runtime`` package (design plan WP3).
+
+    Unlike ``ServiceProvider``, these are never concrete per-user files: the
+    literal ``%i`` specifier stays in the rendered unit text, and systemd
+    resolves it per instantiated unit (e.g. ``myapp@alice.service``) only at
+    activation time. ``DynamicUser=yes`` is the load-bearing simplification:
+    systemd allocates and isolates a per-instantiated-unit uid automatically
+    and auto-creates the 0700 ``StateDirectory`` - no bespoke uid-provisioning
+    code is needed here.
+
+    Handles both ``runtime_instance.template.*`` (render/remove the unit
+    files) and ``runtime_instance.socket.*`` (enable/disable the socket
+    template) operations - registered under both provider keys in
+    ``native_providers()`` since ``NativeOperationExecutor`` dispatches on the
+    operation name's ``rsplit(".", 1)[0]`` prefix.
+    """
+
+    resource_type = "runtime_instance"
+
+    def __init__(self, *, unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> None:
+        self.unit_dir = unit_dir
+        self.command = command or subprocess.run
+
+    @staticmethod
+    def _names(app: str) -> tuple[str, str, str]:
+        app = _safe_name(app)
+        return f"{app}@.service", f"{app}@.socket", f"{app}-bridge@.service"
+
+    def _app_of(self, args: dict[str, Any], operation: Operation) -> str:
+        return _safe_name(str(args.get("app") or operation.resource.split(":", 1)[0]))
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        service_name, socket_name, bridge_name = self._names(desired["app"])
+        service_unit = self.unit_dir / service_name
+        socket_unit = self.unit_dir / socket_name
+        bridge_unit = self.unit_dir / bridge_name
+        result = {
+            "service_unit": str(service_unit),
+            "socket_unit": str(socket_unit),
+            "bridge_unit": str(bridge_unit),
+            "exists": service_unit.is_file() and socket_unit.is_file() and bridge_unit.is_file(),
+        }
+        if result["exists"] and desired.get("exec"):
+            rendered = (
+                self.render_service(desired["app"], desired)
+                + self.render_socket(desired["app"], desired)
+                + self.render_bridge(desired["app"], desired)
+            )
+            result["sha256"] = hashlib.sha256(
+                service_unit.read_bytes() + socket_unit.read_bytes() + bridge_unit.read_bytes()
+            ).hexdigest()
+            result["desired_sha256"] = hashlib.sha256(rendered.encode()).hexdigest()
+        return result
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation(
+            "runtime_instance.template.ensure", desired["app"], desired, risk="medium",
+            reverse="runtime_instance.template.remove",
+            summary=f"render runtime instance templates for {desired['app']}",
+        )]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        app = self._app_of(args, operation)
+        service_name, socket_name, bridge_name = self._names(app)
+        action = operation.name.rsplit(".", 1)[-1]
+        if action == "enable":
+            self.command(["systemctl", "enable", "--now", socket_name], check=True)
+            return {"socket": socket_name, "action": "enable", "changed": True}
+        if action == "disable":
+            self.command(["systemctl", "disable", "--now", socket_name], check=True)
+            return {"socket": socket_name, "action": "disable", "changed": True}
+        if action == "remove":
+            for name in (service_name, socket_name, bridge_name):
+                (self.unit_dir / name).unlink(missing_ok=True)
+            self.command(["systemctl", "daemon-reload"], check=True)
+            return {
+                "service_unit": str(self.unit_dir / service_name),
+                "socket_unit": str(self.unit_dir / socket_name),
+                "bridge_unit": str(self.unit_dir / bridge_name),
+                "changed": True,
+            }
+        self.unit_dir.mkdir(parents=True, exist_ok=True)
+        service_path = self.unit_dir / service_name
+        socket_path = self.unit_dir / socket_name
+        bridge_path = self.unit_dir / bridge_name
+        service_temporary = service_path.with_suffix(".service.tmp")
+        socket_temporary = socket_path.with_suffix(".socket.tmp")
+        bridge_temporary = bridge_path.with_suffix(".service.tmp")
+        service_temporary.write_text(self.render_service(app, args), encoding="utf-8")
+        socket_temporary.write_text(self.render_socket(app, args), encoding="utf-8")
+        bridge_temporary.write_text(self.render_bridge(app, args), encoding="utf-8")
+        os.chmod(service_temporary, 0o644)
+        os.chmod(socket_temporary, 0o644)
+        os.chmod(bridge_temporary, 0o644)
+        service_temporary.replace(service_path)
+        socket_temporary.replace(socket_path)
+        bridge_temporary.replace(bridge_path)
+        self.command(["systemctl", "daemon-reload"], check=True)
+        return {
+            "service_unit": str(service_path),
+            "socket_unit": str(socket_path),
+            "bridge_unit": str(bridge_path),
+            "changed": True,
+        }
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation(
+            "runtime_instance.template.remove", desired["app"], {"app": desired["app"]},
+            reverse="runtime_instance.template.ensure", summary="remove runtime instance templates",
+        )]
+
+    @staticmethod
+    def render_service(app: str, args: dict[str, Any]) -> str:
+        security = args.get("security") or {}
+        state_directory = args["state_directory"]
+        state_path = f"/var/lib/{state_directory}/%i"
+        environment = dict(args.get("environment") or {})
+        for env_key in ("home_env", "config_dir_env", "data_dir_env"):
+            name = args.get(env_key)
+            if name:
+                environment[name] = state_path
+        environment_line = "\n".join(f'Environment="{key}={value}"' for key, value in sorted(environment.items()))
+        lines = [
+            "[Unit]",
+            f"Description=NostrHost runtime instance {app} (%i)",
+            "After=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"ExecStart={args['exec']}",
+            "DynamicUser=yes",
+            f"StateDirectory={state_directory}/%i",
+            f"WorkingDirectory={args['working_directory'] if args.get('working_directory') else state_path}",
+            "Restart=on-failure",
+            # Isolated per-instance loopback namespace: every instance can bind
+            # the same fixed internal_port with no cross-instance collision,
+            # since no two instances share a namespace. The paired
+            # <app>-bridge@.service (render_bridge) joins this namespace to
+            # reach it - see RuntimeInstanceResource's docstring.
+            "PrivateNetwork=yes",
+            f"PrivateTmp={'yes' if security.get('private_tmp', True) else 'no'}",
+            f"ProtectSystem={security.get('protect_system', 'strict')}",
+            f"ProtectHome={'yes' if security.get('protect_home', True) else 'no'}",
+            f"NoNewPrivileges={'yes' if security.get('no_new_privileges', True) else 'no'}",
+        ]
+        read_write_paths = security.get("read_write_paths") or []
+        if read_write_paths:
+            lines.append(f"ReadWritePaths={' '.join(read_write_paths)}")
+        cpu_quota = args.get("cpu_quota_percent") or security.get("cpu_quota_percent")
+        if cpu_quota:
+            lines.append(f"CPUQuota={cpu_quota}%")
+        memory_max = args.get("memory_max_mb") or security.get("memory_max_mb")
+        if memory_max:
+            lines.append(f"MemoryMax={memory_max}M")
+        if environment_line:
+            lines.append(environment_line)
+        lines.extend(["", "[Install]", "WantedBy=multi-user.target", ""])
+        return "\n".join(lines)
+
+    @staticmethod
+    def render_socket(app: str, args: dict[str, Any]) -> str:
+        return "\n".join([
+            "[Unit]",
+            f"Description=NostrHost runtime instance socket {app} (%i)",
+            "",
+            "[Socket]",
+            f"ListenStream={args['socket_path_template']}",
+            "SocketMode=0600",
+            # This socket's name (<app>@.socket) doesn't match the backend
+            # instance's own service name (<app>@.service) it should NOT
+            # start directly - opencode-style apps can't bind a Unix socket
+            # (see runtime_instances.py module docstring), so the socket
+            # instead activates the systemd-socket-proxyd bridge, which is
+            # what actually accepts the Caddy connection.
+            f"Service={app}-bridge@%i.service",
+            "",
+            "[Install]",
+            "WantedBy=sockets.target",
+            "",
+        ])
+
+    @staticmethod
+    def render_bridge(app: str, args: dict[str, Any]) -> str:
+        # systemd-socket-proxyd ships with the systemd package on every
+        # Debian/YunoHost host - no new dependency. It accepts the Caddy
+        # connection on the Unix socket (via <app>@.socket's Service=
+        # override) and forwards it to the paired instance's loopback port
+        # inside that instance's own PrivateNetwork=yes namespace.
+        # BindsTo+After ensures starting/stopping this bridge starts/stops
+        # the backend instance atomically - the reaper only needs to stop
+        # this unit, not both.
+        internal_port = args["internal_port"]
+        return "\n".join([
+            "[Unit]",
+            f"Description=NostrHost runtime instance socket bridge {app} (%i)",
+            f"BindsTo={app}@%i.service",
+            f"After={app}@%i.service",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:" + str(internal_port),
+            "DynamicUser=yes",
+            f"JoinsNamespaceOf={app}@%i.service",
+            "PrivateNetwork=yes",
+            "PrivateTmp=yes",
+            "ProtectSystem=strict",
+            "NoNewPrivileges=yes",
+            "Restart=on-failure",
+            "",
+        ])
+
+
+class RuntimeInstanceReaperProvider(InspectVerifiedProvider):
+    """Render and activate the idle-instance reaper timer (mirrors ``TimerProvider``).
+
+    Each tick, ``reap_idle_instances`` (``runtime_instances.py``) lists the
+    app's currently-running ``<app>@*.service`` instances, checks each one's
+    socket for open connections via ``/proc/net/unix`` (app-agnostic - no
+    cooperation needed from the packaged app), and ``systemctl stop``s any
+    instance found idle. The socket unit stays enabled throughout, so the next
+    connection re-spawns the service - "spawn on demand, reap when idle".
+    """
+
+    resource_type = "runtime_instance.reaper"
+
+    def __init__(self, *, unit_dir: Path = Path("/etc/systemd/system"), command: Callable[..., Any] | None = None) -> None:
+        self.unit_dir = unit_dir
+        self.command = command or subprocess.run
+
+    @staticmethod
+    def _names(app: str) -> tuple[str, str]:
+        app = _safe_name(app)
+        return f"{app}-runtime-reaper.service", f"{app}-runtime-reaper.timer"
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        _service_name, timer_name = self._names(desired["app"])
+        timer = self.unit_dir / timer_name
+        return {"timer": str(timer), "exists": timer.is_file()}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation(
+            "runtime_instance.reaper.ensure", desired["app"], desired, risk="medium",
+            reverse="runtime_instance.reaper.remove", summary="install idle runtime-instance reaper timer",
+        )]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        app = _safe_name(str(args.get("app") or operation.resource.split(":", 1)[0]))
+        service_name, timer_name = self._names(app)
+        if operation.name == "runtime_instance.reaper.remove":
+            self.command(["systemctl", "disable", "--now", timer_name], check=True)
+            for name in (service_name, timer_name):
+                (self.unit_dir / name).unlink(missing_ok=True)
+            return {"timer": str(self.unit_dir / timer_name), "changed": True}
+        self.unit_dir.mkdir(parents=True, exist_ok=True)
+        idle_timeout = int(args.get("idle_timeout_seconds", 600))
+        socket_template = args["socket_path_template"]
+        exec_start = (
+            "/usr/bin/python3 -c \"from nostrhost.runtime_instances import reap_idle_instances; "
+            f"reap_idle_instances({app!r}, {socket_template!r})\""
+        )
+        (self.unit_dir / service_name).write_text(
+            f"[Unit]\nDescription=NostrHost runtime instance reaper for {app}\n\n"
+            f"[Service]\nType=oneshot\nExecStart={exec_start}\n",
+            encoding="utf-8",
+        )
+        timer_path = self.unit_dir / timer_name
+        timer_path.write_text(
+            f"[Unit]\nDescription=NostrHost runtime instance reaper timer for {app}\n\n"
+            f"[Timer]\nOnBootSec={idle_timeout}s\nOnUnitActiveSec={idle_timeout}s\nUnit={service_name}\n\n"
+            f"[Install]\nWantedBy=timers.target\n",
+            encoding="utf-8",
+        )
+        self.command(["systemctl", "enable", "--now", timer_name], check=True)
+        return {"timer": str(timer_path), "changed": True}
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation(
+            "runtime_instance.reaper.remove", desired["app"], desired, risk="medium",
+            reverse="runtime_instance.reaper.ensure", summary="remove idle runtime-instance reaper timer",
+        )]
+
+
+class UnitHealthProvider(InspectVerifiedProvider):
+    """Socket-liveness health check: ``systemctl is-active <unit>``.
+
+    For a ``multi-tenant-runtime`` package there is no single fixed backend to
+    GET (see ``HealthProvider``): the socket template being enabled and
+    listening is the app-agnostic liveness signal instead.
+    """
+
+    resource_type = "health.socket"
+
+    def __init__(self, *, command: Callable[..., Any] | None = None) -> None:
+        self.command = command or subprocess.run
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        unit = _safe_name(desired["unit"])
+        result = self.command(["systemctl", "is-active", unit], capture_output=True, text=True)
+        status = (getattr(result, "stdout", "") or "").strip()
+        return {"unit": unit, "status": status, "healthy": status == "active"}
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("health.socket.check", desired["unit"], desired, reversible=False, summary="check runtime instance socket liveness")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        result = self.inspect(operation.args)
+        if not result["healthy"]:
+            raise ProviderError(f"runtime instance socket is not active: {result['unit']} ({result['status'] or 'unknown'})")
+        return result
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return []
+
+
 class HealthProvider(InspectVerifiedProvider):
     resource_type = "health"
 
@@ -1760,12 +2078,17 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "port": PortProvider(),
         "timer": TimerProvider(unit_dir=unit_dir, command=command),
         "health": HealthProvider(client=health_client),
+        "health.socket": UnitHealthProvider(command=command),
         "policy": PolicyProvider(root=root, command=command, state_dir=(root / "var/lib/nostrhost/state") if root != Path("/") else Path("/var/lib/nostrhost/state")),
         "settings": NativeSettingsProvider(state_dir=(root / "var/lib/nostrhost/state/settings") if root != Path("/") else Path("/var/lib/nostrhost/state/settings"), apps_dir=(root / "etc/yunohost/apps") if root != Path("/") else Path("/etc/yunohost/apps")),
         "backup": BackupProvider(state_dir=(root / "var/lib/nostrhost/state/backups") if root != Path("/") else Path("/var/lib/nostrhost/state/backups")),
         "hook.python": HookProvider(state_dir=(root / "var/lib/nostrhost/state/hooks") if root != Path("/") else Path("/var/lib/nostrhost/state/hooks")),
         "dns.records": DnsRecordsProvider(),
     }
+    _runtime_instance_template_provider = RuntimeInstanceTemplateProvider(unit_dir=unit_dir, command=command)
+    providers["runtime_instance.template"] = _runtime_instance_template_provider
+    providers["runtime_instance.socket"] = _runtime_instance_template_provider
+    providers["runtime_instance.reaper"] = RuntimeInstanceReaperProvider(unit_dir=unit_dir, command=command)
     if caddy_client is None and root == Path("/"):
         # Real host: talk to the local Caddy admin API with @id-tagged routes.
         from .caddy_admin import CaddyAdminClient, build_web_route

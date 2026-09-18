@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PackageProvider, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PackageProvider, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeInstanceReaperProvider, RuntimeInstanceTemplateProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, UnitHealthProvider, native_providers
 from nostrhost.package_engine import Operation
 
 
@@ -524,6 +524,170 @@ def test_timer_provider_disables_and_removes_units(tmp_path: Path):
     assert not (tmp_path / "example.timer").exists()
     assert not (tmp_path / "example.service").exists()
     assert calls[-1] == (["systemctl", "disable", "--now", "example.timer"], {"check": True})
+
+
+def _runtime_instance_args(**overrides):
+    args = {
+        "app": "example",
+        "exec": "/opt/example/bin/server",
+        "working_directory": None,
+        "environment": {},
+        "home_env": "HOME",
+        "config_dir_env": "EXAMPLE_CONFIG_DIR",
+        "data_dir_env": None,
+        "state_directory": "example",
+        "socket_path_template": "/run/example/%i.sock",
+        "internal_port": 8090,
+        "idle_timeout_seconds": 600,
+        "cpu_quota_percent": 50,
+        "memory_max_mb": 512,
+        "security": {},
+    }
+    args.update(overrides)
+    return args
+
+
+def test_runtime_instance_template_provider_renders_templated_units_with_percent_i(tmp_path: Path):
+    provider = RuntimeInstanceTemplateProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
+    operation = provider.plan(_runtime_instance_args())[0]
+    provider.apply(operation)
+    service = (tmp_path / "example@.service").read_text()
+    socket = (tmp_path / "example@.socket").read_text()
+    bridge = (tmp_path / "example-bridge@.service").read_text()
+    # The rendered units are literal *templates* - `%i` must survive rendering
+    # unresolved; only systemd substitutes it per instantiated unit.
+    assert "DynamicUser=yes" in service
+    assert "StateDirectory=example/%i" in service
+    assert "WorkingDirectory=/var/lib/example/%i" in service
+    assert "ExecStart=/opt/example/bin/server" in service
+    assert 'Environment="HOME=/var/lib/example/%i"' in service
+    assert 'Environment="EXAMPLE_CONFIG_DIR=/var/lib/example/%i"' in service
+    assert "CPUQuota=50%" in service
+    assert "MemoryMax=512M" in service
+    # The instance is isolated into its own loopback namespace so every
+    # instance can safely reuse the same internal_port with no collision.
+    assert "PrivateNetwork=yes" in service
+    assert "ListenStream=/run/example/%i.sock" in socket
+    assert "SocketMode=0600" in socket
+    # The socket doesn't activate example@.service directly (opencode-style
+    # apps can't bind a Unix socket) - it activates the systemd-socket-proxyd
+    # bridge instead.
+    assert "Service=example-bridge@%i.service" in socket
+    assert "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8090" in bridge
+    assert "BindsTo=example@%i.service" in bridge
+    assert "JoinsNamespaceOf=example@%i.service" in bridge
+
+
+def test_runtime_instance_template_provider_omits_unset_resource_caps(tmp_path: Path):
+    provider = RuntimeInstanceTemplateProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
+    args = _runtime_instance_args(cpu_quota_percent=None, memory_max_mb=None)
+    provider.apply(provider.plan(args)[0])
+    service = (tmp_path / "example@.service").read_text()
+    assert "CPUQuota=" not in service
+    assert "MemoryMax=" not in service
+
+
+def test_runtime_instance_template_provider_enables_and_disables_socket_template(tmp_path: Path):
+    calls = []
+    provider = RuntimeInstanceTemplateProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    enable = Operation("runtime_instance.socket.enable", "example:runtime_instance:socket", {"app": "example"})
+    result = provider.apply(enable)
+    assert result["action"] == "enable"
+    assert calls[-1] == (["systemctl", "enable", "--now", "example@.socket"], {"check": True})
+    disable = Operation("runtime_instance.socket.disable", "example:runtime_instance:socket", {"app": "example"})
+    provider.apply(disable)
+    assert calls[-1] == (["systemctl", "disable", "--now", "example@.socket"], {"check": True})
+
+
+def test_runtime_instance_template_provider_removes_all_units_and_reloads(tmp_path: Path):
+    provider = RuntimeInstanceTemplateProvider(unit_dir=tmp_path, command=lambda *_args, **_kwargs: None)
+    provider.apply(provider.plan(_runtime_instance_args())[0])
+    remove = provider.remove({"app": "example"})[0]
+    provider.apply(remove)
+    assert not (tmp_path / "example@.service").exists()
+    assert not (tmp_path / "example@.socket").exists()
+    assert not (tmp_path / "example-bridge@.service").exists()
+
+
+def test_runtime_instance_reaper_provider_renders_periodic_timer(tmp_path: Path):
+    calls = []
+    provider = RuntimeInstanceReaperProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    operation = provider.plan({"app": "example", "idle_timeout_seconds": 900, "socket_path_template": "/run/example/%i.sock"})[0]
+    provider.apply(operation)
+    timer = (tmp_path / "example-runtime-reaper.timer").read_text()
+    service = (tmp_path / "example-runtime-reaper.service").read_text()
+    assert "OnUnitActiveSec=900s" in timer
+    assert "Unit=example-runtime-reaper.service" in timer
+    assert "reap_idle_instances" in service
+    assert calls[-1] == (["systemctl", "enable", "--now", "example-runtime-reaper.timer"], {"check": True})
+
+
+def test_runtime_instance_reaper_provider_disables_and_removes_units(tmp_path: Path):
+    calls = []
+    provider = RuntimeInstanceReaperProvider(unit_dir=tmp_path, command=lambda args, **kwargs: calls.append((args, kwargs)))
+    provider.apply(provider.plan({"app": "example", "idle_timeout_seconds": 60, "socket_path_template": "/run/example/%i.sock"})[0])
+    remove = provider.remove({"app": "example"})[0]
+    provider.apply(remove)
+    assert not (tmp_path / "example-runtime-reaper.timer").exists()
+    assert not (tmp_path / "example-runtime-reaper.service").exists()
+    assert calls[-1] == (["systemctl", "disable", "--now", "example-runtime-reaper.timer"], {"check": True})
+
+
+def test_unit_health_provider_checks_socket_liveness():
+    provider = UnitHealthProvider(command=lambda *_args, **_kwargs: type("Result", (), {"stdout": "active\n"})())
+    result = provider.apply(provider.plan({"unit": "example@.socket"})[0])
+    assert result == {"unit": "example@.socket", "status": "active", "healthy": True}
+
+
+def test_unit_health_provider_raises_when_not_active():
+    provider = UnitHealthProvider(command=lambda *_args, **_kwargs: type("Result", (), {"stdout": "inactive\n"})())
+    with pytest.raises(ProviderError, match="not active"):
+        provider.apply(provider.plan({"unit": "example@.socket"})[0])
+
+
+def test_native_provider_factory_registers_runtime_instance_and_health_socket_providers(tmp_path: Path):
+    providers = native_providers(root=tmp_path, unit_dir=tmp_path)
+    assert isinstance(providers["runtime_instance.template"], RuntimeInstanceTemplateProvider)
+    assert providers["runtime_instance.socket"] is providers["runtime_instance.template"]
+    assert isinstance(providers["runtime_instance.reaper"], RuntimeInstanceReaperProvider)
+    assert isinstance(providers["health.socket"], UnitHealthProvider)
+
+
+def test_build_web_route_per_user_socket_dial_and_header_guard():
+    from nostrhost.caddy_admin import build_web_route
+
+    route = build_web_route({
+        "app": "opencode-web_nh",
+        "domain": "opencode.nostrhost.test",
+        "path": "/",
+        "auth": "nostrhost",
+        "route_mode": "per-user-socket",
+        "socket_path_template": "/run/opencode-web/%i.sock",
+        "full_domain": True,
+    })
+    matcher = route["match"][0]
+    assert matcher["header_regexp"] == {
+        "nostrhost_socket_user": {"field": "X-Remote-User", "pattern": "^[a-z_][a-z0-9_-]*$"}
+    }
+    proxy_handler = route["handle"][-1]
+    assert proxy_handler == {
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": "unix//run/opencode-web/{http.request.header.X-Remote-User}.sock"}],
+    }
+    # forward_auth is still prepended unchanged - anti-spoofing gates the
+    # route and sets the trusted header before it is ever dialed.
+    assert route["handle"][0]["handler"] == "reverse_proxy"
+    assert route["handle"][0]["rewrite"]["uri"] == "/nostr/auth-request"
+
+
+def test_build_web_route_per_user_socket_requires_percent_i_template():
+    from nostrhost.caddy_admin import CaddyError, build_web_route
+
+    with pytest.raises(CaddyError, match="socket_path_template"):
+        build_web_route({
+            "app": "demo", "domain": "example.test", "path": "/",
+            "route_mode": "per-user-socket", "socket_path_template": "/run/demo/fixed.sock",
+        })
 
 
 def test_json_state_provider_unregisters_state_atomically(tmp_path: Path):

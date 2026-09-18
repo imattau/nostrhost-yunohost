@@ -285,6 +285,12 @@ class ServiceSecurity(BaseModel):
     protect_home: bool = True
     no_new_privileges: bool = True
     read_write_paths: list[str] = Field(default_factory=list)
+    # Resource caps shared by ServiceProvider and RuntimeInstanceTemplateProvider
+    # so a single-process service and a per-user runtime-instance template use
+    # one code path for CPUQuota/MemoryMax. Both optional: omitted means no
+    # cap, matching every existing package's unbounded behavior.
+    cpu_quota_percent: int | None = Field(None, gt=0, le=10000)
+    memory_max_mb: int | None = Field(None, gt=0)
 
 
 class ServiceResource(BaseModel):
@@ -304,6 +310,66 @@ class ServiceResource(BaseModel):
         return value
 
 
+class RuntimeInstanceResource(BaseModel):
+    """A per-user runtime instance template (``multi-tenant-runtime`` class).
+
+    Unlike ``ServiceResource``, this never describes one concrete process: it
+    describes the ``<app>@.service``/``<app>@.socket`` *templates* systemd
+    instantiates once per connecting user (``%i``). ``exec``/``environment``
+    may reference the literal ``%i`` specifier so the rendered unit resolves
+    it per instance; ``security`` reuses ``ServiceSecurity`` rather than a
+    parallel model so both process kinds share one hardening/caps surface.
+
+    Most apps (opencode included) only know how to bind a TCP port, not a
+    Unix socket, so the instance itself gets ``PrivateNetwork=yes`` and binds
+    ``127.0.0.1:internal_port`` inside its own isolated network namespace -
+    every instance can safely reuse the same fixed port since no two
+    instances share a namespace. A paired ``<app>-bridge@.service`` running
+    the standard ``systemd-socket-proxyd`` (shipped with systemd) is what
+    Caddy's ``socket_path_template`` actually connects to; it joins the
+    instance's namespace (``JoinsNamespaceOf=``) and forwards to
+    ``internal_port``. This is the standard systemd idiom for giving socket
+    activation to a daemon that only speaks TCP - see native_providers.py's
+    ``RuntimeInstanceTemplateProvider`` for the rendered units.
+    """
+
+    exec: str = Field(..., min_length=1)
+    working_directory: Path | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    home_env: str | None = None
+    config_dir_env: str | None = None
+    data_dir_env: str | None = None
+    state_directory: str = Field(..., min_length=1)
+    socket_path_template: str = Field(..., min_length=1)
+    internal_port: int = Field(..., gt=0, le=65535)
+    idle_timeout_seconds: int = Field(600, gt=0)
+    cpu_quota_percent: int | None = Field(None, gt=0, le=10000)
+    memory_max_mb: int | None = Field(None, gt=0)
+    security: ServiceSecurity = Field(default_factory=ServiceSecurity)
+
+    @validator("working_directory")
+    def absolute_working_directory(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("runtime_instance.working_directory must be absolute")
+        return value
+
+    @validator("state_directory")
+    def safe_state_directory(cls, value: str) -> str:
+        # Rendered as `StateDirectory=<state_directory>/%i` (relative to
+        # /var/lib), mirroring systemd.exec's own StateDirectory= semantics.
+        if value.startswith("/") or ".." in PurePosixPath(value).parts:
+            raise ValueError("runtime_instance.state_directory must be relative and cannot contain '..'")
+        return value
+
+    @validator("socket_path_template")
+    def templated_socket_path(cls, value: str) -> str:
+        if not value.startswith("/") or ".." in PurePosixPath(value.replace("%i", "placeholder")).parts:
+            raise ValueError("runtime_instance.socket_path_template must be an absolute path without '..'")
+        if "%i" not in value:
+            raise ValueError("runtime_instance.socket_path_template must contain the '%i' instance specifier")
+        return value
+
+
 class WebResource(BaseModel):
     domain: str | None = None
     path: str = "/"
@@ -317,6 +383,11 @@ class WebResource(BaseModel):
     # Declaring this lets install/change-url reject a subpath placement with
     # a clear error instead of the app silently breaking.
     full_domain: bool = False
+    # "static" (default): one fixed `upstream`/`file_root`, today's only real
+    # behavior. "per-user-socket": the dial target is derived per-request from
+    # the trusted identity header against a `multi-tenant-runtime` package's
+    # `runtime_instance.socket_path_template` - see build_web_route().
+    route_mode: Literal["static", "per-user-socket"] = "static"
 
     @validator("path")
     def path_starts_with_slash(cls, value: str) -> str:
@@ -362,7 +433,11 @@ class DnsRecordResource(BaseModel):
 
 
 class HealthResource(BaseModel):
-    type: Literal["http"] = "http"
+    # "http": GET a URL and expect a 2xx (today's only real behavior).
+    # "socket": `systemctl is-active <app>@.socket` - for multi-tenant-runtime
+    # packages, no single fixed backend exists to GET; the socket template
+    # being active/listening is the app-agnostic liveness signal instead.
+    type: Literal["http", "socket"] = "http"
     path: str = "/health"
     timeout: int = Field(10, gt=0, le=300)
     retries: int = Field(0, ge=0, le=5)
@@ -463,6 +538,10 @@ class HookResource(BaseModel):
 
 class PackageManifest(BaseModel):
     app: AppResource
+    # "shared": today's only real behavior - one install serves everyone.
+    # "multi-tenant-runtime": one shared install, N per-user runtime
+    # instances (separate identity/state/process) - see RuntimeInstanceResource.
+    installation_class: Literal["shared", "multi-tenant-runtime"] = "shared"
     sources: dict[str, SourceResource] = Field(default_factory=dict, alias="source")
     runtime: RuntimeResource | None = None
     fpm: PhpFpmResource | None = None
@@ -475,6 +554,7 @@ class PackageManifest(BaseModel):
     config: dict[str, ConfigFileResource] = Field(default_factory=dict)
     database: DatabaseResource | None = None
     service: ServiceResource | None = None
+    runtime_instance: RuntimeInstanceResource | None = None
     web: WebResource | None = None
     dns: dict[str, DnsRecordResource] = Field(default_factory=dict)
     health: HealthResource | None = None
@@ -511,6 +591,21 @@ class PackageManifest(BaseModel):
         if value and value.user and values.get("user") and value.user != values["user"].name:
             raise ValueError("service.user must match the declared system user")
         return value
+
+    @root_validator
+    def installation_class_shape(cls, values: dict[str, Any]) -> dict[str, Any]:
+        installation_class = values.get("installation_class", "shared")
+        runtime_instance = values.get("runtime_instance")
+        if installation_class == "multi-tenant-runtime":
+            if runtime_instance is None:
+                raise ValueError("installation_class 'multi-tenant-runtime' requires a [runtime_instance] resource")
+            if values.get("service") is not None:
+                raise ValueError("installation_class 'multi-tenant-runtime' cannot declare [service] (use [runtime_instance])")
+            if values.get("user") is not None:
+                raise ValueError("installation_class 'multi-tenant-runtime' cannot declare [user] (each instance's identity is systemd-managed)")
+        elif runtime_instance is not None:
+            raise ValueError("[runtime_instance] requires installation_class = 'multi-tenant-runtime'")
+        return values
 
     class Config:
         extra = "forbid"
@@ -684,9 +779,57 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         plan.append(_op("service.ensure", f"{app}:service", service, deps=deps, risk="medium", reverse="service.remove", summary=f"render service {package.service.name or app}"))
         plan.append(_op("service.enable", f"{app}:service:enable", {"name": package.service.name or app}, deps=(f"{app}:service",), reverse="service.disable", summary="enable service"))
         plan.append(_op("service.start", f"{app}:service:start", {"name": package.service.name or app}, deps=(f"{app}:service:enable",), risk="medium", reverse="service.stop", summary="start service"))
+    elif package.runtime_instance:
+        # multi-tenant-runtime: template-level operations only. Install time
+        # never enumerates the app's current members (membership changes
+        # after install) - so unlike `service`, there is no per-user unit
+        # here, only the `<app>@.service`/`<app>@.socket` *templates* plus the
+        # idle-reap timer that stops instances between connections.
+        deps = tuple(op.resource for op in plan if op.resource.startswith((f"{app}:directory:", f"{app}:source:", f"{app}:config:")))
+        deps += tuple(resource for resource in (f"{app}:runtime", f"{app}:database") if any(op.resource == resource for op in plan))
+        deps = deps or (package_op.resource,)
+        instance = package.runtime_instance
+        template_args = {
+            "app": app,
+            "exec": instance.exec,
+            "working_directory": str(instance.working_directory) if instance.working_directory else None,
+            "environment": instance.environment,
+            "home_env": instance.home_env,
+            "config_dir_env": instance.config_dir_env,
+            "data_dir_env": instance.data_dir_env,
+            "state_directory": instance.state_directory,
+            "socket_path_template": instance.socket_path_template,
+            "idle_timeout_seconds": instance.idle_timeout_seconds,
+            "cpu_quota_percent": instance.cpu_quota_percent,
+            "memory_max_mb": instance.memory_max_mb,
+            "security": instance.security.dict(),
+        }
+        plan.append(_op(
+            "runtime_instance.template.ensure", f"{app}:runtime_instance", template_args, deps=deps,
+            risk="medium", reverse="runtime_instance.template.remove",
+            summary=f"render per-user runtime instance templates for {app}",
+        ))
+        plan.append(_op(
+            "runtime_instance.socket.enable", f"{app}:runtime_instance:socket", {"app": app},
+            deps=(f"{app}:runtime_instance",), reverse="runtime_instance.socket.disable",
+            summary="enable per-user runtime instance socket template",
+        ))
+        plan.append(_op(
+            "runtime_instance.reaper.ensure", f"{app}:runtime_instance:reaper",
+            {"app": app, "idle_timeout_seconds": instance.idle_timeout_seconds, "socket_path_template": instance.socket_path_template},
+            deps=(f"{app}:runtime_instance:socket",), risk="medium", reverse="runtime_instance.reaper.remove",
+            summary="install idle runtime-instance reaper timer",
+        ))
     if package.web:
-        deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
+        if package.service:
+            deps = (f"{app}:service:start",)
+        elif package.web.route_mode == "per-user-socket":
+            deps = (f"{app}:runtime_instance:socket",)
+        else:
+            deps = (package_op.resource,)
         web_args = {**package.web.dict(), "app": app}
+        if package.web.route_mode == "per-user-socket" and package.runtime_instance:
+            web_args["socket_path_template"] = package.runtime_instance.socket_path_template
         plan.append(_op("web.route.ensure", f"{app}:web", web_args, deps=deps, risk="medium", reverse="web.route.remove", summary="ensure web route"))
     if package.dns:
         web_domain = (package.web.domain if package.web else None) or ""
@@ -706,12 +849,18 @@ def plan_package(package: PackageManifest, *, template_root: Path | None = None)
         permission_args = {**permission.dict(), "app": app, "name": name}
         plan.append(_op("permission.ensure", f"{app}:permission:{name}", permission_args, deps=deps, risk="medium", reverse="permission.remove", summary=f"ensure Portal permission {app}.{name}"))
     if package.health:
-        deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else (package_op.resource,))
+        deps = (f"{app}:web",) if package.web else ((f"{app}:service:start",) if package.service else ((f"{app}:runtime_instance:socket",) if package.runtime_instance else (package_op.resource,)))
         health_args = package.health.dict()
-        if package.web and package.web.domain:
-            # Check the served URL (domain + path), not a bare path.
-            health_args["url"] = f"https://{package.web.domain.rstrip('/')}{package.web.path or '/'}"
-        plan.append(_op("health.http.check", f"{app}:health", health_args, deps=deps, risk="low", reversible=False, summary="check application health"))
+        if package.health.type == "socket":
+            # No single fixed backend to GET - liveness is the socket
+            # template being enabled and listening, checked app-agnostically.
+            health_args["unit"] = f"{app}@.socket"
+            plan.append(_op("health.socket.check", f"{app}:health", health_args, deps=deps, risk="low", reversible=False, summary="check runtime instance socket liveness"))
+        else:
+            if package.web and package.web.domain:
+                # Check the served URL (domain + path), not a bare path.
+                health_args["url"] = f"https://{package.web.domain.rstrip('/')}{package.web.path or '/'}"
+            plan.append(_op("health.http.check", f"{app}:health", health_args, deps=deps, risk="low", reversible=False, summary="check application health"))
     if package.timer:
         deps = (f"{app}:service:start",) if package.service else (package_op.resource,)
         plan.append(_op("timer.ensure", f"{app}:timer", package.timer.dict(), deps=deps, risk="medium", reverse="timer.remove", summary="render and enable systemd timer"))
@@ -781,7 +930,12 @@ def validate_package(package: PackageManifest) -> PackageManifest:
         if package.service.working_directory and not package.service.working_directory.is_absolute():
             raise PackageError("service.working_directory must be absolute")
     if package.web:
-        if not package.web.upstream and not package.web.file_root:
+        if package.web.route_mode == "per-user-socket":
+            if package.installation_class != "multi-tenant-runtime" or not package.runtime_instance:
+                raise PackageError("web.route_mode 'per-user-socket' requires installation_class 'multi-tenant-runtime' and a [runtime_instance] resource")
+            if package.web.upstream:
+                raise PackageError("web.route_mode 'per-user-socket' cannot declare a static web.upstream")
+        elif not package.web.upstream and not package.web.file_root:
             raise PackageError("web resource needs upstream host:port or file_root")
         if package.web.upstream:
             host, separator, port = package.web.upstream.rpartition(":")
@@ -793,7 +947,7 @@ def validate_package(package: PackageManifest) -> PackageManifest:
                 except OSError:
                     if not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
                         raise PackageError("web.upstream host is invalid")
-    if package.health and not package.health.path.startswith("/"):
+    if package.health and package.health.type == "http" and not package.health.path.startswith("/"):
         raise PackageError("health.path must be absolute")
     if package.backup:
         if any(not path.is_absolute() or ".." in PurePosixPath(path).parts for path in package.backup.paths):

@@ -373,3 +373,121 @@ def test_package_plan_carries_explicit_template_root(tmp_path: Path):
     raw = {"app": {"id": "example", "version": "1"}, "config": {"main": {"destination": "/etc/example.conf", "template": "templates/app.j2"}}}
     operation = next(operation for operation in plan_package(PackageManifest.parse_obj(raw), template_root=tmp_path) if operation.name == "config.ensure")
     assert operation.args["_template_root"] == str(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# multi-tenant-runtime installation class
+
+
+def runtime_instance_example() -> dict:
+    return {
+        "app": {"id": "example", "version": "1"},
+        "installation_class": "multi-tenant-runtime",
+        "runtime_instance": {
+            "exec": "/opt/example/bin/server",
+            "state_directory": "example",
+            "socket_path_template": "/run/example/%i.sock",
+            "internal_port": 8090,
+        },
+        "web": {"domain": "example.test", "route_mode": "per-user-socket", "auth": "nostrhost"},
+    }
+
+
+def test_installation_class_defaults_to_shared():
+    package = PackageManifest.parse_obj(example())
+    assert package.installation_class == "shared"
+    assert package.runtime_instance is None
+    assert package.web.route_mode == "static"
+
+
+def test_multi_tenant_runtime_requires_runtime_instance_resource():
+    invalid = {"app": {"id": "example", "version": "1"}, "installation_class": "multi-tenant-runtime"}
+    with pytest.raises(ValueError, match="requires a \\[runtime_instance\\] resource"):
+        PackageManifest.parse_obj(invalid)
+
+
+def test_multi_tenant_runtime_forbids_service_and_user():
+    base = runtime_instance_example()
+    with pytest.raises(ValueError, match="cannot declare \\[service\\]"):
+        PackageManifest.parse_obj(base | {"service": {"exec": "/opt/example/bin/server"}})
+    with pytest.raises(ValueError, match="cannot declare \\[user\\]"):
+        PackageManifest.parse_obj(base | {"user": {"name": "example"}})
+
+
+def test_runtime_instance_requires_multi_tenant_runtime_class():
+    invalid = {
+        "app": {"id": "example", "version": "1"},
+        "runtime_instance": {
+            "exec": "/opt/example/bin/server",
+            "state_directory": "example",
+            "socket_path_template": "/run/example/%i.sock",
+            "internal_port": 8090,
+        },
+    }
+    with pytest.raises(ValueError, match="requires installation_class"):
+        PackageManifest.parse_obj(invalid)
+
+
+def test_runtime_instance_socket_path_template_requires_percent_i():
+    invalid = runtime_instance_example()
+    invalid["runtime_instance"]["socket_path_template"] = "/run/example/fixed.sock"
+    with pytest.raises(ValueError, match="'%i' instance specifier"):
+        PackageManifest.parse_obj(invalid)
+
+
+def test_runtime_instance_state_directory_must_be_relative():
+    invalid = runtime_instance_example()
+    invalid["runtime_instance"]["state_directory"] = "/var/lib/example"
+    with pytest.raises(ValueError, match="must be relative"):
+        PackageManifest.parse_obj(invalid)
+
+
+def test_web_route_mode_per_user_socket_requires_runtime_instance():
+    invalid = example() | {"web": {**example()["web"], "route_mode": "per-user-socket"}}
+    with pytest.raises(PackageError, match="requires installation_class"):
+        validate_package(PackageManifest.parse_obj(invalid))
+
+
+def test_web_route_mode_per_user_socket_forbids_static_upstream():
+    invalid = runtime_instance_example()
+    invalid["web"]["upstream"] = "127.0.0.1:8090"
+    with pytest.raises(PackageError, match="cannot declare a static web.upstream"):
+        validate_package(PackageManifest.parse_obj(invalid))
+
+
+def test_multi_tenant_runtime_plans_template_level_operations_only():
+    package = validate_package(PackageManifest.parse_obj(runtime_instance_example()))
+    plan = plan_package(package)
+    names = [operation.name for operation in plan]
+    assert names == [
+        "package.ensure", "package.manifest.ensure",
+        "runtime_instance.template.ensure", "runtime_instance.socket.enable",
+        "runtime_instance.reaper.ensure", "web.route.ensure",
+    ]
+    # Template-level only: no operation resource is keyed by a concrete
+    # username - install time never enumerates the app's current members.
+    assert all("@" not in operation.resource for operation in plan)
+    template = next(operation for operation in plan if operation.name == "runtime_instance.template.ensure")
+    assert template.args["socket_path_template"] == "/run/example/%i.sock"
+    socket_enable = next(operation for operation in plan if operation.name == "runtime_instance.socket.enable")
+    assert socket_enable.depends_on == ("example:runtime_instance",)
+    reaper = next(operation for operation in plan if operation.name == "runtime_instance.reaper.ensure")
+    assert reaper.depends_on == ("example:runtime_instance:socket",)
+    web = next(operation for operation in plan if operation.name == "web.route.ensure")
+    assert web.depends_on == ("example:runtime_instance:socket",)
+    assert web.args["socket_path_template"] == "/run/example/%i.sock"
+
+
+def test_health_socket_check_targets_the_socket_template_unit():
+    raw = runtime_instance_example() | {"health": {"type": "socket"}}
+    package = validate_package(PackageManifest.parse_obj(raw))
+    plan = plan_package(package)
+    health = next(operation for operation in plan if operation.name == "health.socket.check")
+    assert health.args["unit"] == "example@.socket"
+    assert health.depends_on == ("example:web",)
+
+
+def test_health_path_validation_is_skipped_for_socket_type():
+    raw = runtime_instance_example() | {"health": {"type": "socket", "path": "not-absolute"}}
+    # Must not raise: health.path is only meaningful for type "http".
+    validate_package(PackageManifest.parse_obj(raw))

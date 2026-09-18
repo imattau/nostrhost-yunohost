@@ -56,6 +56,14 @@ IDENTITY_HEADERS = (
     "X-Nostr-Npub",
 )
 
+# Same shape SysusersProvider._name() (native_providers.py) enforces for
+# system usernames. build_web_route()'s per-user-socket branch re-checks the
+# *forwarded* X-Remote-User header against this pattern as a second,
+# independent guard beyond _forward_auth_handler()'s anti-spoofing rewrite -
+# defense in depth, since the dial string below interpolates that header
+# value directly into a filesystem path.
+SAFE_SYSTEM_USERNAME_PATTERN = r"[a-z_][a-z0-9_-]*"
+
 
 class CaddyError(RuntimeError):
     """The Caddy admin API call failed (unreachable, rejected, …)."""
@@ -376,6 +384,18 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 - a broken sibling manifest must not block this app's own route
             pass
         matcher["not"] = [{"path": exclude_paths}]
+    per_user_socket = desired.get("route_mode") == "per-user-socket"
+    if per_user_socket:
+        # Second, independent guard beyond _forward_auth_handler()'s
+        # anti-spoofing rewrite: the dial string below interpolates this
+        # header value directly into a filesystem path, so a malformed or
+        # unexpected value must never even reach the reverse_proxy handler.
+        matcher["header_regexp"] = {
+            "nostrhost_socket_user": {
+                "field": "X-Remote-User",
+                "pattern": f"^{SAFE_SYSTEM_USERNAME_PATTERN}$",
+            }
+        }
     if matcher:
         match.append(matcher)
     if match:
@@ -385,10 +405,29 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
     if desired.get("auth") == "nostrhost":
         # forward_auth first: its X-Forwarded-Uri reflects the original path
         # (with the app prefix) so the authd can match the app's permission.
+        # Unchanged for per-user-socket routes - anti-spoofing must still gate
+        # the route and set the trusted X-Remote-User before it is dialed.
         handle.append(_forward_auth_handler())
     if path:
         # Then strip the app prefix for the backend, like Caddyfile handle_path.
         handle.append({"handler": "rewrite", "strip_path_prefix": path})
+
+    if per_user_socket:
+        socket_template = desired.get("socket_path_template")
+        if not isinstance(socket_template, str) or "%i" not in socket_template:
+            raise CaddyError("web.route_mode 'per-user-socket' requires a socket_path_template containing '%i'")
+        # UNVERIFIED (design plan Open Questions 2-3): whether Caddy expands a
+        # {http.request.header...} placeholder inside a `unix/`-prefixed dial
+        # string per-request, and whether a Unix-socket reverse_proxy dial
+        # needs an explicit `transport: {protocol: http}` block or infers HTTP
+        # the way a TCP dial does. No code in this repo exercises a
+        # placeholder-driven or Unix-socket dial today; confirm with a live
+        # spike against a real Caddy instance before relying on this in
+        # production.
+        dial = "unix/" + socket_template.replace("%i", "{http.request.header.X-Remote-User}")
+        handle.append({"handler": "reverse_proxy", "upstreams": [{"dial": dial}]})
+        route["handle"] = handle
+        return route
 
     file_root = desired.get("file_root")
     if file_root:
