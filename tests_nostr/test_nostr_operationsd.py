@@ -144,6 +144,40 @@ def test_e2e_request_approval_execute_result():
     assert body["result"] == {"ok": "service.restart"}
 
 
+def test_parked_request_publishes_approval_notice():
+    """A request that parks for approval emits a structured kind-2210 notice
+    (class `approval`, with the request id) so notification/signer consumers
+    never have to guess from the bare 2200 whether it executed."""
+    h = Harness()
+    h.grant(["services.restart"])
+
+    ev, handled = h.request("service.restart", {"name": "caddy"})
+    request_id = ev["id"]
+    assert handled
+    assert h.engine.state(request_id) == OpState.REQUESTED
+
+    notices = h.events_by_kind(2210)
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["pubkey"] == h.server_pk
+    body = _content(notice)
+    assert body["class"] == "approval"
+    assert body["severity"] == "warning"
+    assert body["request_id"] == request_id
+    assert body["tool"] == "service.restart"
+    assert body["actor"] == h.agent_pk
+
+
+def test_auto_approved_request_publishes_no_approval_notice():
+    """An admin's own request is its own approval, so it executes immediately
+    and must not emit a parked-approval notice."""
+    h = Harness()
+    ev = build_operation_request(h.admin_sk, h.admin_pk, "service.restart", {"name": "caddy"})
+    assert h.engine.handle_event(ev)
+    assert h.engine.state(ev["id"]) == OpState.SUCCEEDED
+    assert h.events_by_kind(2210) == []
+
+
 def test_policy_adapter_receives_actor_and_is_published_in_result():
     decisions = []
 

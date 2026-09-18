@@ -9,6 +9,7 @@ bin/nostr-identityd /usr/bin/
 bin/nostr-permissiond /usr/bin/
 bin/nostr-opctl /usr/bin/
 bin/nostr-operationsd /usr/bin/
+bin/nostr-signerd /usr/bin/
 bin/nostr-portal-api /usr/bin/
 bin/nostr-securityd /usr/bin/
 bin/nostr-ddnswatchd /usr/bin/
@@ -27,6 +28,7 @@ conf/* /usr/share/yunohost/conf/
 conf/yunohost/nostr-identityd.service /lib/systemd/system/
 conf/yunohost/nostr-permissiond.service /lib/systemd/system/
 conf/yunohost/nostr-operationsd.service /lib/systemd/system/
+conf/yunohost/nostr-signerd.service /lib/systemd/system/
 conf/yunohost/nostr-securityd.service /lib/systemd/system/
 conf/yunohost/nostr-ddnswatchd.service /lib/systemd/system/
 conf/yunohost/nostr-api.service /lib/systemd/system/

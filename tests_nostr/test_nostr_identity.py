@@ -16,6 +16,7 @@ from yunohost.nostr_identity import (
     _parse_pubkey,
     _pubkey,
     _store,
+    admin_npubs,
     is_admin_user,
     link_identity,
     pubkey_is_admin,
@@ -142,6 +143,49 @@ def test_dynamic_admin_resolution_fails_closed():
         raise OSError("identity store unavailable")
 
     assert not pubkey_is_admin(linked_pk, identity_resolver=unavailable)
+
+
+def test_admin_npubs_unions_configured_and_linked_admin_identities():
+    _, configured = new_key()
+    _, linked = new_key()
+    identity = type("LinkedIdentity", (), {"pubkey": linked, "enabled": True})()
+    consulted = []
+
+    def list_users():
+        return ["matt"]
+
+    def list_identities(username):
+        consulted.append(username)
+        return [identity]
+
+    pubs = admin_npubs(
+        configured_admins=[configured],
+        users_resolver=list_users,
+        identity_lister=list_identities,
+    )
+    assert pubs == [configured, linked]
+    assert consulted == ["matt"]
+
+
+def test_admin_npubs_dedupes_and_normalizes_case():
+    _, configured = new_key()
+    identity = type("LinkedIdentity", (), {"pubkey": configured.upper(), "enabled": True})()
+    pubs = admin_npubs(
+        configured_admins=[configured.upper()],
+        users_resolver=lambda: ["matt"],
+        identity_lister=lambda _username: [identity],
+    )
+    assert pubs == [configured]
+
+
+def test_admin_npubs_fails_closed_to_configured_keys():
+    _, configured = new_key()
+
+    def broken():
+        raise OSError("accounts backend unavailable")
+
+    pubs = admin_npubs(configured_admins=[configured], users_resolver=broken)
+    assert pubs == [configured]
 
 
 def test_projector_materializes_and_creates_account(tmp_path):

@@ -18,13 +18,17 @@ import pytest
 
 from nostrhost import cli as cli_module
 from nostrhost.cli import (
+    POSTINSTALL_UNITS,
     _load_keys_file,
     _normalize_sk,
     _recovery_bundle,
     _render_catalogue_env,
     _render_keys_recovery,
     _render_notify_config,
+    _render_notify_state,
 )
+from conftest import new_key
+from yunohost.nostr_identity import _npub
 
 NODE_KEYS = ("operator_sk", "server_sk", "notice_sk", "publisher_sk", "notifier_sk")
 NODE_PUBKEYS = ("operator_pubkey", "server_pubkey", "notice_pubkey", "publisher_pubkey", "notifier_pubkey")
@@ -108,6 +112,65 @@ def test_notify_config_holds_only_notifier_key(tmp_path: Path, monkeypatch, boot
     text = path.read_text()
     for k in ("operator_sk", "server_sk", "notice_sk", "publisher_sk"):
         assert boot[k] not in text, f"{k} leaked into the notify config"
+
+
+def test_notify_config_names_outbound_relays(tmp_path: Path, monkeypatch, boot):
+    _set_render_paths(tmp_path, monkeypatch)
+    path = _render_notify_config(boot["notifier_sk"], "ws://127.0.0.1:4848")
+    data = tomllib.loads(path.read_text())
+    # The sender refuses to start without at least one outbound relay.
+    assert data["outbound_relays"], "notify config must name outbound relays"
+    assert data["digest_interval"] == "1h"
+
+
+def test_notify_state_seeds_recipients_and_policy(tmp_path: Path, monkeypatch):
+    state_dir = tmp_path / "state/notifications"
+    monkeypatch.setenv("NOSTRHOST_NOTIFY_STATE_DIR", str(state_dir))
+    _, admin_pk = new_key()
+
+    result = _render_notify_state([admin_pk])
+    assert result["admins"] == 1 and result["written"] is True
+
+    recipients_path = state_dir / "recipients.toml"
+    policy_path = state_dir / "policy.toml"
+    assert stat.S_IMODE(os.stat(recipients_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(policy_path).st_mode) == 0o600
+
+    recipients = tomllib.loads(recipients_path.read_text())
+    policy = tomllib.loads(policy_path.read_text())
+    npub = _npub(admin_pk)
+    assert recipients["recipient"][0]["npub"] == npub
+    rule = policy["rule"][0]
+    assert rule["recipient"] == npub
+    assert "approval" in rule["classes"]
+
+
+def test_notify_state_preserves_operator_edits_unless_forced(tmp_path: Path, monkeypatch):
+    state_dir = tmp_path / "state/notifications"
+    monkeypatch.setenv("NOSTRHOST_NOTIFY_STATE_DIR", str(state_dir))
+    state_dir.mkdir(parents=True)
+    (state_dir / "recipients.toml").write_text("# hand edited\n")
+    (state_dir / "policy.toml").write_text("# hand edited\n")
+    _, admin_pk = new_key()
+
+    assert _render_notify_state([admin_pk])["written"] is False
+    assert (state_dir / "recipients.toml").read_text() == "# hand edited\n"
+
+    assert _render_notify_state([admin_pk], force=True)["written"] is True
+    assert "# hand edited" not in (state_dir / "recipients.toml").read_text()
+
+
+def test_notify_state_with_no_admins_still_writes_loadable_files(tmp_path: Path, monkeypatch):
+    state_dir = tmp_path / "state/notifications"
+    monkeypatch.setenv("NOSTRHOST_NOTIFY_STATE_DIR", str(state_dir))
+    result = _render_notify_state([])
+    assert result["admins"] == 0
+    assert tomllib.loads((state_dir / "recipients.toml").read_text()) == {}
+    assert tomllib.loads((state_dir / "policy.toml").read_text()) == {}
+
+
+def test_postinstall_units_include_notify():
+    assert "nostrhost-notify" in POSTINSTALL_UNITS
 
 
 def test_catalogue_env_lists_publisher(tmp_path: Path, monkeypatch, boot):

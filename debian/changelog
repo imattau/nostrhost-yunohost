@@ -1,3 +1,21 @@
+yunohost (12.1.41.90) stable; urgency=low
+
+  * Push parked approvals to admins' remote signers. The executor now
+    publishes an explicit kind-2210 notice (class "approval", with the
+    request id) only when it actually parks a request; a new signer bridge
+    (nostr-signerd) consumes that notice and, for every registered admin
+    remote signer, sends a NIP-46 sign_event request for the unsigned 2201
+    approval to the signer's own relays, validates the returned event and
+    publishes it. Pairings are registered with `nostrhost notify signer
+    add <bunker://...>` (root-only), and the bridge holds only its own
+    NIP-46 client key.
+  * Seed notification recipients/policy from the current administrators
+    (`admin_npubs`), enabled by postinstall and resyncable with `nostrhost
+    notify sync`; render the notify service's outbound relays so NIP-17
+    delivery works.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 13:05:00 +0000
+
 yunohost (12.1.41.89) stable; urgency=low
 
   * Quieter executor replay: an approval/rejection for a request that already

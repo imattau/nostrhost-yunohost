@@ -572,10 +572,12 @@ POSTINSTALL_UNITS = [
     "nostr-identityd",
     "nostr-permissiond",
     "nostr-operationsd",
+    "nostr-signerd",
     "nostr-securityd",
     "nostr-ddnswatchd",
     "nostr-api",
     "nostr-portal-api",
+    "nostrhost-notify",
     "nostrhost-certd.timer",
 ]
 
@@ -1316,12 +1318,30 @@ def _normalize_sk(value: str) -> str:
     raise NostrHostError("secret key must be 64-hex or an nsec1... key")
 
 
+def _notify_outbound_relays() -> list[str]:
+    """Public relays the notification service delivers its DMs through.
+
+    A sender needs at least one outbound relay (the control relay is
+    loopback-only); the connectivity ``publish`` set is the operator's chosen
+    public destinations, with the built-in defaults as a fallback so the
+    unit can always start.
+    """
+    try:
+        from .connectivity import DEFAULT_RELAYS, effective
+
+        relays = [url for url in (effective()["relays"].get("publish") or []) if url]
+        return relays or list(DEFAULT_RELAYS)
+    except Exception:  # noqa: BLE001 - config must never block postinstall
+        return []
+
+
 def _render_notify_config(notifier_sk: str, relay: str) -> Path:
     """Render the nostrhost-notify service config from the generated key."""
     state_dir = Path(os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", NOTIFY_STATE_DIR))
     state_dir.mkdir(parents=True, exist_ok=True)
     path = Path(os.environ.get("NOSTRHOST_NOTIFY_CONFIG", NOTIFY_CONFIG))
     path.parent.mkdir(parents=True, exist_ok=True)
+    outbound = _notify_outbound_relays()
     path.write_text(
         "# nostrhost-notify native notification service (rendered by postinstall).\n"
         f'relay_url = "{relay}"\n'
@@ -1329,9 +1349,78 @@ def _render_notify_config(notifier_sk: str, relay: str) -> Path:
         f'recipients_path = "{state_dir}/recipients.toml"\n'
         f'policy_path = "{state_dir}/policy.toml"\n'
         f'state_path = "{state_dir}/state.json"\n'
+        'digest_interval = "1h"\n'
+        "outbound_relays = [" + ", ".join(f'"{url}"' for url in outbound) + "]\n"
     )
     os.chmod(path, 0o600)
     return path
+
+
+def _render_notify_state(admin_pubkeys: list[str], *, force: bool = False) -> dict[str, Any]:
+    """Seed notification recipients/policy from the current administrators.
+
+    Each admin gets a recipient (npub) and a rule that delivers approval,
+    operation, security and backup notices immediately to the relays their
+    own NIP-65 list names (falling back to the configured outbound set).
+    Existing files are preserved unless ``force`` is set, so operator edits
+    survive a postinstall re-run; `nostrhost notify sync` re-renders on
+    demand.
+    """
+    state_dir = Path(os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", NOTIFY_STATE_DIR))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    recipients_path = state_dir / "recipients.toml"
+    policy_path = state_dir / "policy.toml"
+
+    npubs: list[str] = []
+    seen: set[str] = set()
+    for pubkey in admin_pubkeys:
+        try:
+            npub = _npub(pubkey)
+        except Exception:  # noqa: BLE001 - a malformed key just isn't a recipient
+            continue
+        if npub and npub not in seen:
+            seen.add(npub)
+            npubs.append(npub)
+
+    written = force or not recipients_path.exists() or not policy_path.exists()
+    if written:
+        recipients = ["# notification recipients (rendered from the YunoHost admins group)\n"]
+        policy = ["# notification policy (rendered from the YunoHost admins group)\n"]
+        for npub in npubs:
+            recipients.append("\n[[recipient]]\n")
+            recipients.append(f'npub = "{npub}"\n')
+            recipients.append('role = "admin"\n')
+            policy.append("\n[[rule]]\n")
+            policy.append(f'recipient = "{npub}"\n')
+            policy.append('classes = ["approval", "operation", "security", "backup"]\n')
+            policy.append('severity_min = "warning"\n')
+            policy.append('delivery = "immediate"\n')
+            policy.append('scope = "external"\n')
+        recipients_path.write_text("".join(recipients))
+        policy_path.write_text("".join(policy))
+        for rendered in (recipients_path, policy_path):
+            os.chmod(rendered, 0o600)
+    return {
+        "recipients": str(recipients_path),
+        "policy": str(policy_path),
+        "admins": len(npubs),
+        "written": written,
+    }
+
+
+def _resync_notify_state(*, force: bool = True) -> dict[str, Any]:
+    """Recompute notification recipients/policy from the current admins.
+
+    Never raises: notification state can always be resynced with
+    `nostrhost notify sync`.
+    """
+    try:
+        from yunohost.nostr_identity import _operator_config, admin_npubs
+
+        cfg = _operator_config()
+        return _render_notify_state(admin_npubs(configured_admins=cfg.admins), force=force)
+    except Exception as exc:  # noqa: BLE001 - non-fatal; resyncable later
+        return {"error": str(exc)}
 
 
 def _render_catalogue_env(publisher_pubkey: str) -> Path:
@@ -1618,10 +1707,14 @@ def _postinstall_new(domain: str | None, admin_npub: str | None, force: bool) ->
     else:
         restic_error = ""
 
+    _render_notify_state(boot["admins"])
     failed = _enable_postinstall_daemons()
     _trust_caddy_internal_ca()
     grant = _publish_initial_capability(boot["operator_pubkey"])
     operator_account = _bootstrap_operator_account(domain, boot["operator_pubkey"])
+    # The operator account now has a linked identity; resync recipients so the
+    # notification service and signer bridge address every current admin.
+    _resync_notify_state()
 
     repo = StateRepo(state_dir_from_env(), boot["server_pubkey"])
     tree = export_state(YunohostBackend())
@@ -1784,9 +1877,11 @@ def _postinstall_restore(
             data_restore["status"] = "failed"
             data_restore["error"] = str(exc)
 
+    _render_notify_state(boot["admins"])
     failed = _enable_postinstall_daemons()
     _trust_caddy_internal_ca()
     grant = _publish_initial_capability(boot["operator_pubkey"])
+    _resync_notify_state()
 
     # reconcile: converge live state to the restored desired state (bounded)
     reconcile: dict[str, Any] = {"target": target[:16]}
@@ -3519,7 +3614,90 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """Show bootstrap / postinstall state."""
         _guard(_postinstall_status, output_as)
 
-    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, mcp, op_group, postinstall, backup, domain, dns, nsite, catalog, updates, logs, user, audit, network, credential):
+    notify = typer.Typer(name="notify", help="notification recipients/policy", no_args_is_help=True)
+
+    @notify.command("sync")
+    def notify_sync(
+        restart: bool = typer.Option(True, "--restart/--no-restart", help="restart nostrhost-notify after syncing"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Recompute notification recipients/policy from the current admins.
+
+        Run after adding/removing an admin or linking/unlinking an admin's
+        nostr identity so the notification service addresses every current
+        administrator.
+        """
+        def run() -> dict[str, Any]:
+            result = _resync_notify_state(force=True)
+            if restart and "error" not in result:
+                _systemctl("restart", "nostrhost-notify")
+                result["restarted"] = True
+            return result
+
+        _guard(run, output_as)
+
+    signer = typer.Typer(name="signer", help="remote signer targets", no_args_is_help=True)
+    notify.add_typer(signer, name="signer")
+
+    @signer.command("add")
+    def signer_add(
+        bunker_uri: str = typer.Argument(..., help="bunker:// URI of the administrator's signer"),
+        label: str = typer.Option(None, "--label", help="display label"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Register a remote signer to receive parked approval requests.
+
+        The signer's key must be an admin identity. Stored root-only (the URI
+        carries the pairing secret); the signer still prompts its owner for
+        every signature.
+        """
+        def run() -> dict[str, Any]:
+            from yunohost.nostr_signerd import add_target_from_bunker_uri
+
+            targets = add_target_from_bunker_uri(bunker_uri, label=label)
+            _systemctl("restart", "nostr-signerd")
+            return {"targets": [t.to_json() for t in targets], "restarted": True}
+
+        _guard(run, output_as)
+
+    @signer.command("list")
+    def signer_list(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """List registered remote signer targets (secrets never shown)."""
+        def run() -> dict[str, Any]:
+            from yunohost.nostr_signerd import load_targets
+
+            return {
+                "targets": [
+                    {
+                        "signer_pubkey": t.signer_pubkey,
+                        "relays": list(t.relays),
+                        "label": t.label,
+                        "paired": t.secret is not None,
+                    }
+                    for t in load_targets()
+                ]
+            }
+
+        _guard(run, output_as)
+
+    @signer.command("remove")
+    def signer_remove(
+        signer_pubkey: str = typer.Argument(..., help="signer pubkey (hex or npub)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Remove a registered remote signer target."""
+        def run() -> dict[str, Any]:
+            from yunohost.nostr_identity import _parse_pubkey
+            from yunohost.nostr_signerd import remove_target
+
+            removed = remove_target(_parse_pubkey(signer_pubkey))
+            if removed:
+                _systemctl("restart", "nostr-signerd")
+            return {"removed": removed}
+
+        _guard(run, output_as)
+
+    for group in (system, service, app_group, package, rollback, state_group, identity, capability, agent, mcp, op_group, postinstall, backup, domain, dns, nsite, catalog, updates, logs, user, audit, network, credential, notify):
         app.add_typer(group, name=group.info.name)
 
     return app

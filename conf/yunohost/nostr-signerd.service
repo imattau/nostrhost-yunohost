@@ -1,0 +1,21 @@
+[Unit]
+Description=NostrHost signer bridge (NIP-46 approval push to remote signers)
+After=network-online.target nostrhost-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-signerd
+Restart=on-failure
+RestartSec=5s
+User=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# Reads the registered signer targets + the bridge's own client key under
+# /etc/nostrhost and persists its handled-request cursor under
+# /var/lib/nostrhost. Delivery happens outbound to the signers' own relays.
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+
+[Install]
+WantedBy=multi-user.target

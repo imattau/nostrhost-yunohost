@@ -40,12 +40,14 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _is_hex64,
     _operator_config,
+    _sign_event,
     pubkey_is_admin,
     _require_bootstrapped,
     _sign_auth_event,
     _wait_auth_ok_async,
     default_auth,
 )
+from .nostr_notify import KIND_SYSTEM_EVENT
 from .nostr_operations import (
     KIND_CAPABILITY,
     KIND_DELEGATION,
@@ -258,7 +260,39 @@ class OperationEngine:
             self._execute(record)  # auto path: REQUESTED -> EXECUTING
         else:
             logger.info("request %s: %s by %s awaiting approval", request_id[:16], tool, requester[:16])
+            self._publish_approval_required(record)
         return True
+
+    def _publish_approval_required(self, record: OperationRecord) -> None:
+        """Announce that a request is parked for approval.
+
+        This structured notice (kind 2210, class ``approval``) is the
+        authoritative signal that the executor parked the request: unlike the
+        raw kind-2200 request it is impossible to confuse with a request that
+        auto-executed because the actor already held approval authority. The
+        notification service and the signer bridge consume this notice rather
+        than guessing from the bare request.
+        """
+        content = {
+            "class": "approval",
+            "severity": "warning",
+            "summary": f"approval required: {record.tool}",
+            "request_id": record.request_id,
+            "tool": record.tool,
+            "actor": record.actor,
+            "requester": record.requester,
+        }
+        try:
+            event = _sign_event(
+                self._server_sk,
+                self._server_pubkey,
+                KIND_SYSTEM_EVENT,
+                json.dumps(content),
+                [],
+            )
+            self._publish(event)
+        except Exception:  # noqa: BLE001 - a notice failure must never block the operation
+            logger.exception("failed to publish approval notice for %s", record.request_id[:16])
 
     def _actor_approves(self, record: OperationRecord) -> bool:
         """Whether the requesting actor's own authority satisfies the approval

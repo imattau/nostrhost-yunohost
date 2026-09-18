@@ -414,6 +414,58 @@ def pubkey_is_admin(
         return False
 
 
+def admin_npubs(
+    *,
+    configured_admins: tuple[str, ...] | list[str] | set[str] = (),
+    db_path: str | Path | None = None,
+    users_resolver: Callable[[], list[str]] | None = None,
+    identity_lister: Callable[..., list[Identity]] | None = None,
+) -> list[str]:
+    """Every current admin's nostr pubkey, for fan-out and notification.
+
+    Unions the configured bootstrap/recovery keys (operator + ``admins`` in
+    operator.toml) with the enabled identities linked to every account that
+    is currently a YunoHost administrator. Unlike :func:`pubkey_is_admin`
+    (a single-key predicate) this is the enumerator callers need to address
+    *all* admins — e.g. seeding notification recipients or pushing an
+    approval to each admin's remote signer.
+
+    Never raises: an unavailable identity store or account backend degrades
+    to the configured key set.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in configured_admins:
+        if isinstance(key, str) and _is_hex64(key):
+            lowered = key.lower()
+            if lowered not in seen:
+                seen.add(lowered)
+                out.append(lowered)
+    try:
+        list_users = users_resolver
+        if list_users is None:
+            from nostrhost.accounts import admins as list_users  # lazy: avoid import cycle
+
+        list_identities_for_user = identity_lister or resolve_username
+        for username in list_users():
+            identities = (
+                list_identities_for_user(username, db_path=db_path)
+                if db_path is not None
+                else list_identities_for_user(username)
+            )
+            for identity in identities:
+                pubkey = getattr(identity, "pubkey", None)
+                if not isinstance(pubkey, str) or not _is_hex64(pubkey):
+                    continue
+                lowered = pubkey.lower()
+                if lowered not in seen:
+                    seen.add(lowered)
+                    out.append(lowered)
+    except Exception:  # noqa: BLE001 - authz/identity backends must fail closed
+        pass
+    return out
+
+
 def resolve_username(username: str, *, db_path: str | Path | None = None) -> list[Identity]:
     """List the enabled identities linked to a YunoHost account."""
     return [_to_identity(r) for r in _store(db_path).list_by_username(username) if r.enabled]
