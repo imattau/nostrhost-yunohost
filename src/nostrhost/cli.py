@@ -1409,15 +1409,18 @@ def _render_notify_state(admin_pubkeys: list[str], *, force: bool = False) -> di
 
 
 def _resync_notify_state(*, force: bool = True) -> dict[str, Any]:
-    """Recompute notification recipients/policy from the current admins.
+    """Recompute notification config + recipients from the current admins.
 
-    Never raises: notification state can always be resynced with
-    `nostrhost notify sync`.
+    Re-renders notify.toml as well as the state files, so an upgraded node
+    whose config predates a new field (e.g. outbound_relays) is repaired by
+    `nostrhost notify sync`. Never raises: notification state can always be
+    resynced with `nostrhost notify sync`.
     """
     try:
         from yunohost.nostr_identity import _operator_config, admin_npubs
 
         cfg = _operator_config()
+        _render_notify_config(cfg.notifier_sk, cfg.control_relay)
         return _render_notify_state(admin_npubs(configured_admins=cfg.admins), force=force)
     except Exception as exc:  # noqa: BLE001 - non-fatal; resyncable later
         return {"error": str(exc)}
@@ -3656,7 +3659,18 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
             targets = add_target_from_bunker_uri(bunker_uri, label=label)
             _systemctl("restart", "nostr-signerd")
-            return {"targets": [t.to_json() for t in targets], "restarted": True}
+            return {
+                "targets": [
+                    {
+                        "signer_pubkey": t.signer_pubkey,
+                        "relays": list(t.relays),
+                        "label": t.label,
+                        "paired": t.secret is not None,
+                    }
+                    for t in targets
+                ],
+                "restarted": True,
+            }
 
         _guard(run, output_as)
 

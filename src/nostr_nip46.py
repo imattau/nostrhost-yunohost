@@ -117,7 +117,9 @@ def build_request_event(
     payload = json.dumps({"id": request_id, "method": method, "params": params})
     content = _encrypt(client_sk, signer_pubkey, payload)
     client_pubkey = _derive_pubkey(client_sk)
-    event = _sign_event(
+    # Only standard NIP-01 fields: the relay's envelope parser rejects extra
+    # keys, and correlation lives inside the encrypted JSON-RPC body.
+    return _sign_event(
         client_sk,
         client_pubkey,
         NIP46_KIND,
@@ -125,8 +127,6 @@ def build_request_event(
         [["p", signer_pubkey]],
         created_at=created_at,
     )
-    event["_request_id"] = request_id  # internal correlation hint (never published)
-    return event
 
 
 def parse_response(client_sk: str, signer_pubkey: str, event: dict[str, Any]) -> dict[str, Any]:

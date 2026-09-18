@@ -177,6 +177,8 @@ def test_build_request_event_is_addressed_and_correlates():
     assert event["kind"] == NIP46_KIND
     assert event["pubkey"] == client_pk
     assert ["p", signer_pk] in event["tags"]
+    # Only standard NIP-01 fields: the relay envelope parser rejects extras.
+    assert set(event) == {"id", "pubkey", "created_at", "kind", "tags", "content", "sig"}
 
     # Response parsing rejects a response from the wrong author.
     response = {**event, "pubkey": "ff" * 32}

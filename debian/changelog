@@ -1,3 +1,14 @@
+yunohost (12.1.41.91) stable; urgency=low
+
+  * Signer bridge fixes: the NIP-46 request event now carries only standard
+    NIP-01 fields (an internal correlation key leaked into the published
+    event and the relay rejected the envelope), and `nostrhost notify sync`
+    re-renders notify.toml as well as the recipients/policy, so an upgraded
+    node whose config predates outbound_relays is repaired. `notify signer
+    add` no longer echoes the pairing secret.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 18 Sep 2026 13:30:00 +0000
+
 yunohost (12.1.41.90) stable; urgency=low
 
   * Push parked approvals to admins' remote signers. The executor now
