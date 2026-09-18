@@ -1,3 +1,16 @@
+yunohost (12.1.41.75) stable; urgency=low
+
+  * Add a ``multi-tenant-runtime`` installation class between "shared" and
+    "personal": one shared install (binary/package dir) can serve N per-user
+    runtime instances instead of everyone sharing one backend process.
+    - Each instance gets its own DynamicUser identity, StateDirectory, and a
+      PrivateNetwork=yes loopback namespace; a systemd-socket-proxyd bridge
+      gives socket-activation to TCP-only apps (like opencode), and Caddy
+      dials the per-user socket keyed by the already-forwarded, anti-spoofed
+      X-Remote-User header.
+    - Package engine and native provider plumbing (instance spawn/reap,
+      permissions mapping, caddy_admin routing) included, with unit coverage.
+
 yunohost (12.1.41.74) stable; urgency=low
 
   * ``user list`` returns each user's groups again, as bare group names.
