@@ -28,7 +28,7 @@ from yunohost.nostr_operations import (
 from yunohost.nostr_operations_state import OpState
 from conftest import new_key
 from yunohost.nostr_identity import _sign_event
-from yunohost.nostr_operationsd import OperationEngine, _sorted_replay
+from yunohost.nostr_operationsd import OperationEngine, _mark_terminal_results, _sorted_replay
 
 
 class FakeBackend:
@@ -113,6 +113,32 @@ def test_restart_replay_does_not_reexecute_terminal_request():
 
     assert h.backend.calls == [("service.restart", {"name": "caddy"})]
     assert h.engine.state(request_id) is None or h.engine.state(request_id) != OpState.EXECUTING
+
+
+def test_restart_replay_does_not_reexecute_midflight_request():
+    """A restart that interrupted an in-flight op (2203 published, no 2204)
+    must NOT re-run it on replay: for a self-restart op that is an infinite
+    restart loop. `_mark_terminal_results` marks any request that already
+    published execution_started as executed before the sorted chain is fed."""
+    h = Harness()
+    h.grant(["services.restart"])
+
+    # Chain state left by a daemon that died mid-execution: request +
+    # approval + execution_started, and no execution_result.
+    req = build_operation_request(h.agent_sk, h.agent_pk, "service.restart", {"name": "nostr-operationsd"})
+    request_id = req["id"]
+    approval = build_approval(h.admin_sk, h.admin_pk, request_id)
+    started = build_execution_started(h.server_sk, h.server_pk, request_id)
+
+    # Fresh daemon rebuilds from the replay: the started-but-unfinished op
+    # must be marked non-rerunnable BEFORE the sorted chain is re-fed.
+    _mark_terminal_results(h.engine, [req, approval, started])
+
+    for ev in (req, approval, started):
+        h.engine.handle_event(ev)
+
+    assert h.backend.calls == []
+    assert h.engine.state(request_id) is None
 
 
 def _content(ev):

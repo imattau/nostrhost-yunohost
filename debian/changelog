@@ -1,3 +1,19 @@
+yunohost (12.1.41.104) stable; urgency=low
+
+  * fix: replay guard now treats a request that already published
+    execution_started (2203) as non-rerunnable on a fresh-connect replay.
+    Previously only requests with a terminal 2204 result were marked
+    executed, so an op that was interrupted mid-execution by an executor
+    restart (e.g. an approved `service.restart nostr-operationsd` kills the
+    daemon before it publishes its own result) was re-run on every replay —
+    for a self-restart op that is an infinite restart loop. `_mark_terminal_results`
+    now marks every id that published 2203, so the replayed request and its
+    approval are no-ops and the daemon stays up (the interrupted op is left
+    without a terminal result and must be re-submitted). Regression test:
+    test_restart_replay_does_not_reexecute_midflight_request.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 11:40:00 +0000
+
 yunohost (12.1.41.103) stable; urgency=low
 
   * fix: nostr-operationsd.service ReadWritePaths now grants the native

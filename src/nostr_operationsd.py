@@ -712,12 +712,31 @@ def _sorted_replay(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _mark_terminal_results(engine: OperationEngine, replay: list[dict[str, Any]]) -> None:
-    """Rebuild already-executed request ids from a replay's terminal results.
+    """Rebuild already-executed request ids from a replay's terminal results,
+    and treat any request that already *began* execution as non-rerunnable.
 
     Must run BEFORE the sorted chain is fed, so a daemon restart can never
     re-run an approved write (the replayed 2200/2201 would otherwise execute
     again before the replayed 2203/2204 arrive).
+
+    A request that published 2203 (execution_started) but never reached 2204
+    (execution_result) was interrupted mid-execution — the executor was
+    restarted while it was the one running the op (e.g. an approved
+    ``service.restart nostr-operationsd`` kills the daemon before it can
+    publish its own result). Re-running such a request on replay is unsafe:
+    its own 2203 proves it began, and for a self-restart op that is an
+    infinite restart loop. Every id that published a 2203 is therefore marked
+    executed, so both the replayed request and its replayed approval are
+    no-ops (the interrupted op is left without a terminal result and must be
+    re-submitted by the operator; the daemon itself stays up).
     """
+    started = {
+        eid
+        for ev in replay
+        if int(ev.get("kind") or 0) == KIND_EXECUTION_STARTED
+        for eid in [_e_tag(ev)]
+        if eid
+    }
     terminal = {
         eid
         for ev in replay
@@ -725,8 +744,8 @@ def _mark_terminal_results(engine: OperationEngine, replay: list[dict[str, Any]]
         for eid in [_e_tag(ev)]
         if eid
     }
-    if terminal:
-        engine.mark_executed(terminal)
+    if started or terminal:
+        engine.mark_executed(started | terminal)
 
 
 async def subscribe_loop(
