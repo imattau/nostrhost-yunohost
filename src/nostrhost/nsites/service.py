@@ -736,6 +736,25 @@ def _default_state_dir() -> Path:
         return Path(os.environ.get("NOSTRHOST_STATE_DIR", "/var/lib/nostrhost/state"))
 
 
+def _ngit_revision(state_dir: Path | None = None) -> str:
+    """The ngit desired-state revision nsite.toml is rendered from (WP7).
+
+    Best-effort: when the state repository is unavailable (tests, fresh
+    bootstrap) the provenance falls back to a stable local label so the
+    sidecar is still written and drift detection works.
+    """
+    try:
+        from yunohost.nostr_state import StateRepo, state_dir_from_env
+
+        repo = StateRepo(state_dir or state_dir_from_env(), server_pubkey="")
+        revision = repo.revision()
+        if revision:
+            return revision
+    except Exception:  # noqa: BLE001 - provenance must never break rendering
+        pass
+    return "local:state/nsites"
+
+
 def _live_caddy() -> Any:
     try:
         from ..caddy_admin import CaddyAdminClient
@@ -815,6 +834,11 @@ class NsiteService:
 
         The ``[[sites]]`` allowlist is rendered from ``state/nsites/sites/*``
         (Phase 3a), so registration and publish both re-render + SIGHUP.
+
+        WP7: the render is provenance-tracked and validated with the
+        gateway's own native checker (``nostrhost-nsite -check-config``)
+        before the atomic replace; the source revision is the ngit
+        desired-state revision the sites/domains were read from.
         """
         text = config.to_toml()
         sites = _sites(self.state_dir)
@@ -836,19 +860,21 @@ class NsiteService:
                     f'pubkey = "{cd.get("pubkey", "")}"\n'
                     f'd = "{cd.get("d", "")}"\n'
                 )
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(text, encoding="utf-8")
-        try:
-            import grp
+        from dataclasses import replace
 
-            gid = grp.getgrnam("nostrhost-nsite").gr_gid
-            os.chown(self.config_path, 0, gid)
-        except (KeyError, OSError):
-            pass
-        try:
-            os.chmod(self.config_path, 0o640)
-        except OSError:
-            pass
+        from ..service_projection import render_managed
+        from ..service_specs import spec_for_name
+
+        spec = replace(spec_for_name("nsite"), path=str(self.config_path))
+        render_managed(
+            spec,
+            text,
+            source_revision=_ngit_revision(self.state_dir),
+            renderer="nsites.service.render_config",
+            validate=True,
+            reload=False,
+            chown_group="nostrhost-nsite",
+        )
         return self.config_path
 
     # -- systemd ----------------------------------------------------------

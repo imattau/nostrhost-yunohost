@@ -86,6 +86,10 @@ class ProjectionStatusArgs(_Strict):
     name: str | None = None
 
 
+class ServiceStatusArgs(_Strict):
+    pass
+
+
 class ListReadArgs(_Strict):
     family: str
 
@@ -539,6 +543,20 @@ def _safe_projection_status(**args: Any) -> dict[str, Any]:
     if name is not None:
         rows = [row for row in rows if row["name"] == name]
     return {"projections": rows}
+
+
+def _safe_service_config_status(**args: Any) -> dict[str, Any]:
+    """Read-only WP7 service-config provenance + drift for every generated file.
+
+    Compares each rendered service config against its ``.source.json`` sidecar
+    so manual edits are detected without touching the daemons.
+    """
+    if args:
+        raise OperationError(f"service.config.status does not accept extra args: {sorted(args)}")
+    from yunohost.nostrhost.service_projection import check_all_drift
+
+    files = check_all_drift()
+    return {"service_configs": files, "drifted": [row["name"] for row in files if row["drifted"]]}
 
 
 _LIST_FAMILIES = {
@@ -2664,6 +2682,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="projection.status", handler=_safe_projection_status, scope=SCOPE_SERVER_READ,
         require_approval=False, input_model=ProjectionStatusArgs,
         description="projection health: applied revision, freshness, quarantine (WP2)",
+    ),
+    "service.config.status": ToolSpec(
+        name="service.config.status", handler=_safe_service_config_status, scope=SCOPE_SERVER_READ,
+        require_approval=False, input_model=ServiceStatusArgs,
+        description="generated service-config provenance + drift vs the rendered digest (WP7)",
     ),
     "list.read": ToolSpec(
         name="list.read", handler=_safe_list_read, scope=SCOPE_SERVER_READ,

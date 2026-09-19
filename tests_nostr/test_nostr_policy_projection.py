@@ -56,7 +56,7 @@ def _projector(tmp_path, admin_pk):
 
 
 def test_families_are_addressable_and_operator_authored():
-    assert set(SPECS) == {"notification-rules", "restic-policy", "host-policy"}
+    assert set(SPECS) == {"notification-rules", "restic-policy", "host-policy", "oidc-clients"}
     for name, spec in SPECS.items():
         assert spec.d == f"{HOST_NAMESPACE}:{name}"
         assert spec.kind == SPEC_KIND == KIND_TRUST_POLICY

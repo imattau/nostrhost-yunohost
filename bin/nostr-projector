@@ -7,11 +7,15 @@ and status for the host's projections without touching a running daemon.
     nostr-projector status [--json]
     nostr-projector rebuild <name> [--json]
     nostr-projector verify <name> [--json]
+    nostr-projector verify service [--json]
+    nostr-projector reconcile service [--json]
     nostr-projector shadow <name> --to <path> [--json]
 
 Projections: permissions (NIP-51 kind 30000), identity (kind 31102),
 capabilities (kinds 31100/27236/27237), lists (NIP-51/NIP-65/NIP-78),
-policy (kind 31101).
+policy (kind 31101). ``verify service`` / ``reconcile service`` check and
+re-render the WP7 generated service-config files (nsite.toml, notify.toml,
+oidc.toml) against their provenance sidecars.
 """
 
 from __future__ import annotations
@@ -120,6 +124,93 @@ def _policy_adapter(cfg: Any) -> _Adapter:
     )
 
 
+def _service_verify(as_json: bool) -> int:
+    """Drift check for the WP7 rendered service-config files.
+
+    Unlike the event projections, service configs have no cursor: their
+    authority is the event/ngit/derived source recorded in each file's
+    ``.source.json`` sidecar. ``verify service`` compares the on-disk bytes
+    to the recorded digest and reports every drifted file.
+    """
+    from yunohost.nostrhost.service_projection import check_all_drift
+
+    report = check_all_drift()
+    if as_json:
+        print(json.dumps({"name": "service", "files": report}, indent=2, sort_keys=True))
+    else:
+        for row in report:
+            mark = "OK" if not row["drifted"] else "DRIFT"
+            print(f"{row['name']}\t{mark}\t{row.get('reason', '')}")
+    return 1 if any(row["drifted"] for row in report) else 0
+
+
+def _service_reconcile(as_json: bool) -> int:
+    """Re-render every managed service config from its authority."""
+    from yunohost.nostrhost.nsites.service import _ngit_revision
+    from yunohost.nostrhost.policy_projection import render_oidc_clients
+    from yunohost.nostrhost.service_projection import reconcile
+    from yunohost.nostrhost.service_specs import SERVICE_SPECS
+
+    cfg = nostr_identity._operator_config()
+    results: list[dict[str, Any]] = []
+    for name, spec in SERVICE_SPECS.items():
+        try:
+            if name == "nsite":
+                from yunohost.nostrhost.nsites.service import NsiteService, load_gateway
+
+                state = load_gateway()
+                config = (state or {}).get("config")
+                if not config:
+                    results.append({"name": name, "skipped": "gateway not configured"})
+                    continue
+                results.append(
+                    reconcile(
+                        spec,
+                        lambda c=config: NsiteService().render_config(
+                            __import__("yunohost.nostrhost.nsites.models", fromlist=["GatewayConfig"]).GatewayConfig(**c)
+                        )
+                        and "",
+                        source_revision=_ngit_revision(),
+                        renderer="nostr-projector reconcile",
+                        reload=False,
+                    )
+                )
+            elif name == "notify":
+                results.append(
+                    reconcile(
+                        spec,
+                        lambda: __import__("yunohost.nostrhost.cli", fromlist=["_render_notify_config"])._render_notify_config(
+                            cfg.notifier_sk, cfg.control_relay
+                        )
+                        and "",
+                        source_revision="local:operator+connectivity",
+                        renderer="nostr-projector reconcile",
+                        reload=False,
+                    )
+                )
+            elif name == "oidc":
+                from yunohost.nostrhost.policy_projection import PolicyStore
+
+                store = PolicyStore()
+                spec_entry = __import__("yunohost.nostrhost.policy_specs", fromlist=["spec_for_name"]).spec_for_name("oidc-clients")
+                entry = store.get(spec_entry.event_key(spec_entry.d))
+                if entry is None:
+                    results.append({"name": name, "skipped": "no oidc-clients document folded"})
+                    continue
+                render_oidc_clients(entry)
+                results.append({"name": name, "reconciled": True})
+            else:
+                results.append({"name": name, "skipped": "no reconcile hook"})
+        except Exception as exc:  # noqa: BLE001 - one failure must not block the rest
+            results.append({"name": name, "error": str(exc)})
+    if as_json:
+        print(json.dumps({"name": "service", "reconciled": results}, indent=2, sort_keys=True))
+    else:
+        for row in results:
+            print(f"{row['name']}\t{row.get('error') or row.get('skipped') or 'ok'}")
+    return 0
+
+
 _ADAPTERS = {
     nostr_permissiond.PROJECTION_NAME: _permission_adapter,
     "identity": _identity_adapter,
@@ -207,7 +298,10 @@ def _shadow(name: str, to: str, as_json: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("status", "rebuild", "verify", "shadow"))
+    parser.add_argument(
+        "command",
+        choices=("status", "rebuild", "verify", "shadow", "reconcile"),
+    )
     parser.add_argument("name", nargs="?")
     parser.add_argument("--to", default="/tmp/nostrhost-projection.shadow")
     parser.add_argument("--cursor-dir", default=DEFAULT_CURSOR_DIR)
@@ -216,6 +310,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return _status(args.json)
+    if args.command == "verify" and args.name == "service":
+        return _service_verify(args.json)
+    if args.command == "reconcile":
+        if args.name not in (None, "service"):
+            parser.error("reconcile currently supports only 'service'")
+        return _service_reconcile(args.json)
     if not args.name:
         parser.error(f"{args.command} requires a projection name")
     if args.command == "rebuild":

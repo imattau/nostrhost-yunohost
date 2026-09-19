@@ -186,6 +186,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "credential.list": _safe_credential_list,
     "system.status": native_ops._safe_system_status,
     "projection.status": native_ops._safe_projection_status,
+    "service.config.status": native_ops._safe_service_config_status,
     "list.read": native_ops._safe_list_read,
     "list.publish": native_ops._safe_list_publish,
     "app.install": native_ops._safe_app_install,
@@ -1358,14 +1359,20 @@ def _notify_outbound_relays() -> list[str]:
 
 
 def _render_notify_config(notifier_sk: str, relay: str) -> Path:
-    """Render the nostrhost-notify service config from the generated key."""
+    """Render the nostrhost-notify service config from the generated key.
+
+    WP7: the render is provenance-tracked and validated with the shared
+    service-config framework before an atomic replace. The notifier private
+    key is resolved here from the operator secret store at render time — it is
+    never part of any desired-state document or provenance record.
+    """
     state_dir = Path(os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", NOTIFY_STATE_DIR))
     state_dir.mkdir(parents=True, exist_ok=True)
     path = Path(os.environ.get("NOSTRHOST_NOTIFY_CONFIG", NOTIFY_CONFIG))
     path.parent.mkdir(parents=True, exist_ok=True)
     outbound = _notify_outbound_relays()
-    path.write_text(
-        "# nostrhost-notify native notification service (rendered by postinstall).\n"
+    content = (
+        "# nostrhost-notify native notification service (rendered from operator config).\n"
         f'relay_url = "{relay}"\n'
         f'notifier_private_key = "{notifier_sk}"\n'
         f'recipients_path = "{state_dir}/recipients.toml"\n'
@@ -1374,7 +1381,20 @@ def _render_notify_config(notifier_sk: str, relay: str) -> Path:
         'digest_interval = "1h"\n'
         "outbound_relays = [" + ", ".join(f'"{url}"' for url in outbound) + "]\n"
     )
-    os.chmod(path, 0o600)
+    from dataclasses import replace
+
+    from .service_projection import render_managed
+    from .service_specs import spec_for_name
+
+    spec = replace(spec_for_name("notify"), path=str(path))
+    render_managed(
+        spec,
+        content,
+        source_revision="local:operator+connectivity",
+        renderer="cli._render_notify_config",
+        validate=True,
+        reload=False,
+    )
     return path
 
 

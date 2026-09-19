@@ -158,6 +158,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/system/status", "system.status", {}),
     # Projection health (WP2): applied revision, freshness, quarantine.
     ("/package/projections", "projection.status", {}),
+    # WP7: generated service-config provenance + drift vs the rendered digest.
+    ("/package/service/configs", "service.config.status", {}),
     # Cached apt/app updates + pending-migrations flag (no network refresh).
     ("/package/system/updates", "updates.check", {}),
     ("/package/domain/list", "domain.list", {}),

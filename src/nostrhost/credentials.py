@@ -1,12 +1,16 @@
-"""DNS credential broker (W4 Phase B).
+"""Secret credential broker (W4 Phase B + WP7).
 
 Provider tokens live in root-owned mode-600 files under
-``/var/lib/nostrhost/credentials``, namespaced ``dns/<provider>/<name>``.
-Provider resources reference them as ``secret:dns/<provider>/<name>`` and
-resolve the file themselves (see :func:`resolve` / :func:`read_secret`) so
-operators and agents never see the token. The directory layout reuses the
-existing systemd-credential store from :class:`SecretProvider` (same
-``credentials`` dir, ``dns/`` namespace).
+``/var/lib/nostrhost/credentials``, namespaced ``dns/<provider>/<name>`` and
+``oidc/<client_id>``. Provider resources reference them as
+``secret:dns/<provider>/<name>`` and resolve the file themselves (see
+:func:`resolve` / :func:`read_secret`) so operators and agents never see the
+token. The directory layout reuses the existing systemd-credential store from
+:class:`SecretProvider` (same ``credentials`` dir).
+
+WP7: OIDC client secrets use the ``secret:oidc/<client_id>`` namespace (same
+root-only store, no provider restriction) and are generated on first render —
+they are resolved at render time and never appear in a desired-state document.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from typing import Any
 
 from .dns.models import PROVIDER_TYPES
 
-_REF_RE = re.compile(r"^secret:dns/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_.-]+)$")
+_REF_RE = re.compile(r"^secret:(dns/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+|[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)$")
 _SAFE_PART = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 
@@ -39,22 +43,40 @@ def credentials_dir(state_dir: Path | None = None) -> Path:
 
 
 def parse_ref(ref: str) -> tuple[str, str]:
-    """Split a ``secret:dns/<provider>/<name>`` ref into (provider, name)."""
+    """Split a ``secret:<namespace>/<name>`` ref into (namespace, name).
+
+    DNS refs keep their two-segment form (``secret:dns/<provider>/<name>``);
+    other namespaces (e.g. ``secret:oidc/<client_id>``) have one segment.
+    """
     match = _REF_RE.match(ref)
     if not match:
-        raise CredentialError(f"malformed DNS credential reference {ref!r} (expected secret:dns/<provider>/<name>)")
-    provider, name = match.groups()
-    if provider not in PROVIDER_TYPES:
-        raise CredentialError(f"unknown DNS provider {provider!r} in credential reference")
-    return provider, name
+        raise CredentialError(
+            f"malformed credential reference {ref!r} (expected secret:<namespace>/<name>)"
+        )
+    full = match.group(1)
+    if full.startswith("dns/"):
+        provider, name = full[4:].split("/", 1)
+        if provider not in PROVIDER_TYPES:
+            raise CredentialError(f"unknown DNS provider {provider!r} in credential reference")
+        return "dns", f"{provider}/{name}"
+    namespace, name = full.split("/", 1)
+    return namespace, name
 
 
 def credential_path(ref: str, *, state_dir: Path | None = None, dir: Path | None = None) -> Path:
     """Absolute path behind ``ref``; validates the reference and traversal."""
-    provider, name = parse_ref(ref)
+    namespace, name = parse_ref(ref)
     base = dir or credentials_dir(state_dir)
-    path = base / "dns" / provider / name
-    if ".." in path.parts or not _SAFE_PART.fullmatch(provider) or not _SAFE_PART.fullmatch(name):
+    if namespace == "dns":
+        provider, _ = name.split("/", 1)
+        path = base / "dns" / provider / name.split("/", 1)[1]
+        if not _SAFE_PART.fullmatch(provider) or not _SAFE_PART.fullmatch(name.split("/", 1)[1]):
+            raise CredentialError(f"unsafe credential path for {ref!r}")
+    else:
+        path = base / namespace / name
+        if not _SAFE_PART.fullmatch(namespace) or not _SAFE_PART.fullmatch(name):
+            raise CredentialError(f"unsafe credential path for {ref!r}")
+    if ".." in path.parts:
         raise CredentialError(f"unsafe credential path for {ref!r}")
     return path
 
@@ -77,7 +99,7 @@ def read_secret(ref: str, *, state_dir: Path | None = None, dir: Path | None = N
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:  # pragma: no cover - defensive
-        raise CredentialError(f"cannot read DNS credential {ref!r}: {exc}") from exc
+        raise CredentialError(f"cannot read credential {ref!r}: {exc}") from exc
 
 
 def set_secret(ref: str, value: str, *, state_dir: Path | None = None, dir: Path | None = None) -> dict[str, Any]:
@@ -123,7 +145,7 @@ def _harden(directory: Path) -> None:
     """Lock the namespace directories down to root (0755/0700 chain)."""
     directory.chmod(0o700)
     parent = directory.parent
-    if parent.name == "dns":
+    if parent.name in ("dns", "oidc"):
         parent.chmod(0o700)
     grandparent = parent.parent
     if grandparent.name == "credentials":

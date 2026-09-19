@@ -79,6 +79,11 @@ RESTIC_POLICY = "restic-policy"
 #: (free-space / recent-backup requirements, confirmation and owner-signature
 #: flags) — the non-secret rules the policy adapter evaluates.
 HOST_POLICY = "host-policy"
+#: Non-secret OIDC client registrations (client ids + redirect URIs). Rendered
+#: into ``/etc/nostrhost/oidc.toml`` by the WP7 service projector; each
+#: ``client_secret`` is resolved from the local credential store at render
+#: time and is never part of this document.
+OIDC_CLIENTS = "oidc-clients"
 
 SPECS: dict[str, PolicySpec] = {
     NOTIFICATION_RULES: PolicySpec(
@@ -101,6 +106,13 @@ SPECS: dict[str, PolicySpec] = {
         authors=("server-admin",),
         renderer="host-policy",
         description="Host operation safeguards (free-space/backup requirements, confirmation flags) rendered into /etc/nostrhost/policy.toml.",
+    ),
+    OIDC_CLIENTS: PolicySpec(
+        name=OIDC_CLIENTS,
+        d=_d(OIDC_CLIENTS),
+        authors=("server-admin",),
+        renderer="oidc",
+        description="Non-secret OIDC client registrations (client ids + redirect URIs) rendered into /etc/nostrhost/oidc.toml; client secrets are resolved from the local credential store at render time and never appear in the document.",
     ),
 }
 

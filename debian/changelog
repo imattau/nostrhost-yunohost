@@ -1,3 +1,29 @@
+yunohost (12.1.41.102) stable; urgency=low
+
+  * WP7: generated service configuration is now a provenance-tracked
+    projection. nsite.toml, notify.toml and oidc.toml are rendered through the
+    shared service-config framework (service_specs.py / service_projection.py):
+    each render is validated with the service's native checker before an atomic
+    replace, a <target>.source.json sidecar records the source revision and the
+    sha256 of the exact bytes written, and drift vs that digest is surfaced by
+    `nostr-projector verify service` and the new service.config.status tool.
+  * nsite.toml: validated with the gateway's own Go checker (new
+    `nostrhost-nsite -check-config` subcommand running config.Load+Validate),
+    then SIGHUP-reloaded; a config the gateway would refuse is never installed.
+  * notify.toml: non-secret fields are rendered provenance-tracked; the
+    notifier_private_key is resolved from the operator secret store at render
+    time and never appears in desired state or the sidecar.
+  * OIDC: new operator-authored kind-31101 oidc-clients document folded by
+    nostr-policyd into /etc/nostrhost/oidc.toml. Client registrations are
+    non-secret (id + redirect_uris); each client_secret is resolved from the
+    root-only credential store (secret:oidc/<client_id>, generated on first
+    render) and never appears in the event document. The credential broker
+    gained a generic namespace alongside secret:dns/....
+  * `nostr-projector reconcile service` re-renders every managed config from
+    its authority; the API exposes /package/service/configs.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 20:00:00 +0000
+
 yunohost (12.1.41.101) stable; urgency=low
 
   * Quarantine undecodable npubs in notification-rules documents: a bad

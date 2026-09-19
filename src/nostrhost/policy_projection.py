@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ from nostrhost.policy_specs import (
     HOST_POLICY,
     KIND_TRUST_POLICY,
     NOTIFICATION_RULES,
+    OIDC_CLIENTS,
     RESTIC_POLICY,
     PolicySpec,
     spec_for_coordinate,
@@ -221,6 +223,8 @@ class PolicyProjector(StoreProjector):
             value, schema, revision, enabled = _parse_body(event)
             if spec.name == NOTIFICATION_RULES:
                 _validate_notify(value)
+            elif spec.name == OIDC_CLIENTS:
+                _validate_oidc(value)
         except ValueError as exc:
             self.quarantine(event, str(exc))
             return ProjectionResult(accepted=False, reason="invalid")
@@ -341,6 +345,111 @@ def _is_valid_npub(value: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------- #
+# WP7: oidc-clients — non-secret client registrations rendered to oidc.toml
+
+OIDC_CLIENTS_PATH = os.environ.get("NOSTRHOST_OIDC_CONFIG", "/etc/nostrhost/oidc.toml")
+
+
+def _oidc_secret_ref(client_id: str) -> str:
+    """Credential-broker ref for an OIDC client secret (root-only store)."""
+    return f"secret:oidc/{client_id}"
+
+
+def _oidc_client_secret(client_id: str, *, state_dir: str | None = None) -> str:
+    """Resolve an OIDC client secret locally; generate + persist if missing.
+
+    WP7 deliverable: desired state carries client ids + redirect URIs only;
+    the secret is resolved at render time from the root-only credential
+    store (``secret:oidc/<client_id>``), generated on first render. The secret
+    never leaves the process and never appears in an event document.
+    """
+    import secrets as _secrets
+
+    from .credentials import read_secret, set_secret
+
+    state_dir = state_dir or os.environ.get("NOSTRHOST_STATE_DIR")
+    state_dir_path = Path(state_dir) if state_dir else None
+    ref = _oidc_secret_ref(client_id)
+    try:
+        return read_secret(ref, state_dir=state_dir_path)
+    except Exception:  # noqa: BLE001 - credential missing => generate one
+        pass
+    value = _secrets.token_urlsafe(32)
+    set_secret(ref, value, state_dir=state_dir_path)
+    return value
+
+
+def _validate_oidc(value: dict[str, Any]) -> None:
+    """Reject oidc-clients documents that would render an unusable file."""
+    clients = value.get("clients")
+    if clients is None:
+        raise ValueError("oidc-clients: missing 'clients' list")
+    if not isinstance(clients, list):
+        raise ValueError("oidc-clients: 'clients' must be a list")
+    seen: set[str] = set()
+    for client in clients:
+        if not isinstance(client, dict):
+            raise ValueError("oidc-clients: each client must be an object")
+        client_id = str(client.get("id") or "")
+        if not client_id or not _SAFE_ID_RE.fullmatch(client_id):
+            raise ValueError(f"oidc-clients: invalid client id {client_id!r}")
+        if client_id in seen:
+            raise ValueError(f"oidc-clients: duplicate client id {client_id!r}")
+        seen.add(client_id)
+        uris = client.get("redirect_uris")
+        if not isinstance(uris, list) or not uris or not all(
+            isinstance(u, str) and u.startswith(("http://", "https://")) for u in uris
+        ):
+            raise ValueError(f"oidc-clients: client {client_id!r} needs valid https/http redirect_uris")
+
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+
+
+def render_oidc_clients(entry: PolicyEntry) -> dict[str, Any]:
+    """Write /etc/nostrhost/oidc.toml from the folded non-secret clients.
+
+    Each client's secret is resolved from the credential store at render
+    time; the rendered file carries the full ``[clients.<id>]`` table the
+    portal reader expects, but no secret ever appears in the event document
+    or the provenance record.
+    """
+    value = entry.value or {}
+    _validate_oidc(value)
+    table: dict[str, dict[str, Any]] = {}
+    for client in value.get("clients") or []:
+        if not isinstance(client, dict):
+            continue
+        client_id = str(client["id"])
+        table[client_id] = {
+            "redirect_uris": [str(u) for u in (client.get("redirect_uris") or [])],
+            "client_secret": _oidc_client_secret(client_id),
+        }
+    content = (
+        "# OIDC client registrations (rendered from kind-31101 oidc-clients)\n"
+        + (f"\n{tomli_w.dumps({'clients': table})}" if table else "")
+    )
+    from dataclasses import replace
+
+    from .service_projection import render_managed
+    from .service_specs import spec_for_name
+
+    spec = spec_for_name("oidc")
+    override = os.environ.get("NOSTRHOST_OIDC_CONFIG")
+    if override:
+        spec = replace(spec, path=override)
+    render_managed(
+        spec,
+        content,
+        source_revision=f"rev:{entry.revision}",
+        renderer="policy_projection.render_oidc_clients",
+        validate=True,
+        reload=False,
+    )
+    return {"written": True, "clients": sorted(table)}
+
+
 def render_notification_files(entry: PolicyEntry) -> dict[str, Any]:
     """Write recipients.toml + policy.toml for the Go notify daemon."""
     value = entry.value or {}
@@ -439,6 +548,7 @@ _RENDERERS: dict[str, Callable[[PolicyEntry], dict[str, Any] | None]] = {
     "notify": render_notification_files,
     "restic": render_restic_desired,
     "host-policy": render_host_policy,
+    "oidc": render_oidc_clients,
 }
 
 
@@ -523,6 +633,26 @@ def import_host_policy(
     return publish_policy_document(
         spec_for_name(HOST_POLICY),
         {"policy": overrides},
+        control_relay=control_relay,
+        transport=transport,
+    )
+
+
+def import_oidc_clients(
+    clients: list[dict[str, Any]],
+    *,
+    control_relay: str | None = None,
+    transport: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Publish non-secret OIDC client registrations as a signed document.
+
+    Each entry carries only ``id`` + ``redirect_uris``; client secrets are
+    resolved from the local credential store at render time and are never part
+    of the event (WP7).
+    """
+    return publish_policy_document(
+        spec_for_name(OIDC_CLIENTS),
+        {"clients": clients},
         control_relay=control_relay,
         transport=transport,
     )
