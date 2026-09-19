@@ -1,3 +1,13 @@
+yunohost (12.1.41.101) stable; urgency=low
+
+  * Quarantine undecodable npubs in notification-rules documents: a bad
+    document with an invalid recipient npub rendered a recipients.toml the Go
+    notify daemon refuses to load, taking the service down on restart. The
+    policy projection now decodes every recipient npub at fold time so such a
+    document is quarantined instead.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 15:00:00 +0000
+
 yunohost (12.1.41.100) stable; urgency=low
 
   * WP6 follow-up cleanup: render the notify recipients/policy and host-policy
