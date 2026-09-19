@@ -1046,7 +1046,11 @@ def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str
     cfg = _operator_config()
     tags = [
         ["d", app_id],
-        ["platform", "native"],
+        # Native NostrHost packages are generic Linux packages, not YunoHost
+        # apps; the catalogue protocol only accepts "yunohost" or "linux"
+        # (libs/nostrhost-catalog/internal/protocol/types.go ParseAppDeclaration),
+        # so declaring "native" made every native declaration fail to ingest.
+        ["platform", "linux"],
         ["repository", repository],
         ["version", version],
         ["commit", manifest_hash],

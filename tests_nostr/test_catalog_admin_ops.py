@@ -127,7 +127,7 @@ def test_declare_signs_new_declaration_from_manifest(boot, cli_fake):
     assert event["kind"] == 32267
     tags = dict((t[0], t[1]) for t in event["tags"])
     assert tags["d"] == "my-native-app"
-    assert tags["platform"] == "native"
+    assert tags["platform"] == "linux"
     assert tags["repository"] == "https://git.example.com/my-native-app.git"
     assert tags["version"] == "0.2.0"
     assert tags["commit"] == tags["manifest"].split(":", 1)[1]
