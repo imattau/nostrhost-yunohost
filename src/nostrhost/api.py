@@ -1969,7 +1969,15 @@ def build_app(
     @app.post("/package/plan")
     def package_plan() -> Any:
         body = _json_body()
-        return _run_tool("package.plan", {"package": body.get("package"), "catalogue": body.get("catalogue")})
+        return _run_tool(
+            "package.plan",
+            {
+                "package": body.get("package"),
+                "catalogue": body.get("catalogue"),
+                "domain": body.get("domain"),
+                "path": body.get("path"),
+            },
+        )
 
     @app.post("/package/authoring/fetch_manifest")
     def package_fetch_manifest() -> Any:

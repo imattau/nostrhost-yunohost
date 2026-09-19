@@ -344,6 +344,25 @@ class AppRemoveArgs(_Strict):
     purge: bool = False
 
 
+class PackagePlanArgs(_Strict):
+    package: dict[str, Any] = Field(description="a native package manifest, the same object sent to package.reconcile after planning")
+    catalogue: dict[str, Any] | None = Field(
+        default=None, description="optional catalogue provenance to bind into the plan envelope"
+    )
+    domain: str | None = Field(
+        default=None, description="install-time override for [web].domain; the package must declare a [web] resource"
+    )
+    path: str | None = Field(default=None, description="install-time override for [web].path")
+
+
+class PackageFetchManifestArgs(_Strict):
+    repository: str = Field(description="https URL of the git repository holding the package manifest")
+    revision: str = Field(
+        default="", description="git revision (branch/tag/commit); defaults to the repository's default branch"
+    )
+    package_path: str = Field(default="", description="subdirectory of the repository containing the package manifest")
+
+
 class PackageReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the signed native package plan envelope (from package.plan)")
 
@@ -506,12 +525,19 @@ REVERSIBLE_WITH_PLAN = "partial"
 IRREVERSIBLE = "irreversible"
 
 
-def _safe_package_plan(package: dict[str, Any] | None = None, catalogue: dict[str, Any] | None = None, **args: Any) -> dict[str, Any]:
+def _safe_package_plan(
+    package: dict[str, Any] | None = None,
+    catalogue: dict[str, Any] | None = None,
+    domain: str | None = None,
+    path: str | None = None,
+    **args: Any,
+) -> dict[str, Any]:
     if args or not isinstance(package, dict):
         raise OperationError("package.plan requires a package object and optional catalogue provenance")
-    from nostrhost.package_engine import package_plan_envelope
+    from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
 
     try:
+        package = apply_web_overrides(package, domain=domain, path=path)
         return package_plan_envelope(package, catalogue=catalogue)
     except (TypeError, ValueError) as exc:
         raise OperationError(f"invalid native package: {exc}") from exc
@@ -1053,10 +1079,12 @@ TOOLS: dict[str, ToolSpec] = {
     "package.plan": ToolSpec(
         name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
         require_approval=False, description="validate and plan a native package",
+        input_model=PackagePlanArgs,
     ),
     "package.fetch_manifest": ToolSpec(
         name="package.fetch_manifest", handler=_safe_package_fetch_manifest, scope=SCOPE_APPS_READ,
         require_approval=False, description="shallow-clone a package.toml manifest from its repository",
+        input_model=PackageFetchManifestArgs,
     ),
     "package.reconcile": ToolSpec(
         name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,

@@ -65,6 +65,51 @@ def test_plan_envelope_binds_catalogue_provenance():
         package_plan_envelope(example(), catalogue={**provenance, "app_id": "other"})
 
 
+def test_apply_web_overrides_sets_domain_path_and_syncs_health():
+    from nostrhost.package_engine import apply_web_overrides
+
+    data = example()
+    data["web"]["path"] = "/"
+    data["health"]["path"] = "/"
+    overridden = apply_web_overrides(data, domain="ditto.example", path="/app")
+    assert overridden["web"]["domain"] == "ditto.example"
+    assert overridden["web"]["path"] == "/app"
+    assert overridden["health"]["path"] == "/app"
+    # operates on a copy - the signed manifest itself is never mutated
+    assert "domain" not in data["web"]
+    assert data["web"]["path"] == "/"
+    assert data["health"]["path"] == "/"
+
+
+def test_apply_web_overrides_noop_and_requires_web_resource():
+    from nostrhost.package_engine import apply_web_overrides
+
+    data = example()
+    assert apply_web_overrides(data, domain=None, path=None) is data
+    without_web = {key: value for key, value in data.items() if key != "web"}
+    with pytest.raises(PackageError, match=r"\[web\]"):
+        apply_web_overrides(without_web, domain="example.org", path=None)
+
+
+def test_safe_package_plan_applies_install_time_web_override():
+    """package.plan must accept the install-time domain/path (ditto's manifest
+    ships without [web].domain), matching the CLI's own override path."""
+    from yunohost.nostr_operations import OperationError, _safe_package_plan
+
+    from nostrhost.package_engine import apply_web_overrides
+
+    data = example()
+    data["web"]["path"] = "/"
+    data["health"]["path"] = "/"
+    envelope = _safe_package_plan(package=data, domain="ditto.example", path="/")
+    expected = package_plan_envelope(apply_web_overrides(data, domain="ditto.example", path="/"))
+    assert envelope["plan_sha256"] == expected["plan_sha256"]
+
+    without_web = {key: value for key, value in data.items() if key != "web"}
+    with pytest.raises(OperationError, match=r"\[web\]"):
+        _safe_package_plan(package=without_web, domain="ditto.example")
+
+
 def test_removal_plan_reverses_only_owned_resources():
     package = PackageManifest.parse_obj(example() | {
         "settings": {"values": {"mode": "safe"}},

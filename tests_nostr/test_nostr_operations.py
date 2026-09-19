@@ -371,6 +371,38 @@ def test_every_write_tool_carries_an_input_model():
             assert schema.get("additionalProperties") is False, f"write tool {name} schema must forbid extra args"
 
 
+def test_package_authoring_read_tools_expose_input_schemas():
+    """The package authoring/planning reads must advertise their real
+    arguments so an MCP client can send the manifest/repository at all
+    (both were _EmptyArgs, which made native install unreachable over MCP)."""
+    from yunohost.nostr_operations import operation_catalog
+
+    catalog = {entry["name"]: entry for entry in operation_catalog()["operations"]}
+    plan = catalog["package.plan"]["input_schema"]
+    assert plan["required"] == ["package"]
+    assert plan["additionalProperties"] is False
+    assert plan["properties"]["package"]["additionalProperties"] is True
+    assert set(plan["properties"]) == {"package", "catalogue", "domain", "path"}
+
+    fetch = catalog["package.fetch_manifest"]["input_schema"]
+    assert fetch["required"] == ["repository"]
+    assert fetch["additionalProperties"] is False
+    assert set(fetch["properties"]) == {"repository", "revision", "package_path"}
+
+
+def test_package_plan_args_validation_and_unknown_arg_rejection():
+    spec = tool_spec("package.plan")
+    validated = spec.validate_args({"package": {"app": {"id": "x", "version": "0"}}, "domain": "example.org"})
+    assert validated["domain"] == "example.org"
+    with pytest.raises(OperationError, match="invalid arguments"):
+        spec.validate_args({"package": {"app": {"id": "x", "version": "0"}}, "bogus": 1})
+
+    fetch = tool_spec("package.fetch_manifest")
+    assert fetch.validate_args({"repository": "https://github.com/example/app"})["repository"] == "https://github.com/example/app"
+    with pytest.raises(OperationError, match="invalid arguments"):
+        fetch.validate_args({"repository": "https://github.com/example/app", "unexpected": True})
+
+
 def test_service_status_accepts_the_planner_name_argument(monkeypatch):
     import sys
     from types import ModuleType

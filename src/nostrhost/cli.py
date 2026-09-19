@@ -400,23 +400,12 @@ def _apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, pa
     (see nh-package-template's docs/new-package.md); keep it in sync so the
     health check still targets the right route after a ``--path`` override.
     """
-    if domain is None and path is None:
-        return package_data
-    import copy
+    from nostrhost.package_engine import PackageError, apply_web_overrides
 
-    package_data = copy.deepcopy(package_data)
-    web = package_data.get("web")
-    if not isinstance(web, dict):
-        raise NostrHostError("--domain/--path given but the package declares no [web] resource")
-    old_path = web.get("path")
-    if domain is not None:
-        web["domain"] = domain
-    if path is not None:
-        web["path"] = path
-        health = package_data.get("health")
-        if isinstance(health, dict) and health.get("path") == old_path:
-            health["path"] = path
-    return package_data
+    try:
+        return apply_web_overrides(package_data, domain=domain, path=path)
+    except PackageError as exc:
+        raise NostrHostError(str(exc)) from exc
 
 
 def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None) -> dict[str, Any]:

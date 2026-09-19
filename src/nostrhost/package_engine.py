@@ -643,6 +643,37 @@ def operation_plan_digest(plan: list[Operation]) -> str:
     return hashlib.sha256(_canonical_json([operation.json_dict() for operation in plan])).hexdigest()
 
 
+def apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, path: str | None) -> dict[str, Any]:
+    """Apply install-time ``[web].domain``/``[web].path`` overrides.
+
+    Domain and path are install-time parameters (which host, which URL mount
+    point) rather than part of the package's own signed content, so this
+    operates on a copy and must run only *after* the original manifest has
+    been checked against a catalogue's ``manifest_sha256``. Overriding before
+    verification would let an override silently forge what the catalogue
+    actually signed. ``health.path`` conventionally mirrors ``web.path`` (see
+    nh-package-template's docs/new-package.md); keep it in sync so the health
+    check still targets the right route after a ``path`` override.
+    """
+    if domain is None and path is None:
+        return package_data
+    import copy
+
+    package_data = copy.deepcopy(package_data)
+    web = package_data.get("web")
+    if not isinstance(web, dict):
+        raise PackageError("install-time domain/path given but the package declares no [web] resource")
+    old_path = web.get("path")
+    if domain is not None:
+        web["domain"] = domain
+    if path is not None:
+        web["path"] = path
+        health = package_data.get("health")
+        if isinstance(health, dict) and health.get("path") == old_path:
+            health["path"] = path
+    return package_data
+
+
 def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the control-plane envelope for one validated native package."""
     if not isinstance(package_data, dict):
