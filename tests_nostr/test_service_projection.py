@@ -1,8 +1,10 @@
 """WP7 tests: generated service configuration as a provenance-tracked projection.
 
 Covers the service-spec registry, the shared render/provenance/drift/reconcile
-plumbing, the nsite/notify/oidc render paths, the OIDC credential-store secret
-resolution (secrets never in the document), and the native validators.
+plumbing (including post-reload health-check rollback and reload-result
+recording), the nsite/notify/oidc/security/ddns render paths, the OIDC
+credential-store secret resolution (secrets never in the document), and the
+native validators.
 """
 
 from __future__ import annotations
@@ -16,10 +18,13 @@ import pytest
 
 from yunohost.nostr_identity import _sign_event
 from yunohost.nostrhost.service_projection import (
+    ServiceRenderError,
     check_drift,
     provenance_path,
     read_provenance,
+    reconcile_service_configs,
     render_managed,
+    run_validator,
     validate_notify,
     validate_nsite,
     validate_oidc,
@@ -60,7 +65,7 @@ def _projector(tmp_path, admin_pk, monkeypatch):
 
 
 def test_service_specs_registry_complete():
-    assert set(SERVICE_SPECS) == {"nsite", "notify", "oidc"}
+    assert set(SERVICE_SPECS) == {"nsite", "notify", "oidc", "security", "ddns"}
     for name, spec in SERVICE_SPECS.items():
         assert spec.path
         assert spec.source
@@ -373,3 +378,119 @@ def test_credential_broker_oidc_namespace(tmp_path):
 def test_credential_broker_rejects_bad_ref(tmp_path):
     with pytest.raises(Exception):
         read_secret("secret:../evil", state_dir=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# security / ddns render paths (WP7 targets)
+
+
+def test_security_config_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_SECURITY_CONFIG", str(tmp_path / "security.toml"))
+    from yunohost.nostrhost.cli import _render_security_config
+
+    path = _render_security_config()
+    assert path.is_file()
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["severity_default"] == "warning"
+    assert data["severity_recurring"] == "critical"
+    assert data["interval"] == 30.0
+    assert data["max_alerts"] == 1000
+    sidecar = read_provenance(path)
+    assert sidecar is not None
+    assert sidecar["source"] == spec_for_name("security").source
+    assert sidecar["source_revision"] == "local:operator"
+
+
+def test_ddns_config_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_DDNS_CONFIG", str(tmp_path / "ddns.toml"))
+    from yunohost.nostrhost.cli import _render_ddns_config
+
+    path = _render_ddns_config()
+    assert path.is_file()
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["watch"]["interval"] == 300.0
+    sidecar = read_provenance(path)
+    assert sidecar is not None
+    assert sidecar["source"] == spec_for_name("ddns").source
+
+
+def test_reconcile_service_configs_security_ddns(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOSTRHOST_SECURITY_CONFIG", str(tmp_path / "security.toml"))
+    monkeypatch.setenv("NOSTRHOST_DDNS_CONFIG", str(tmp_path / "ddns.toml"))
+    results = {row["name"]: row for row in reconcile_service_configs(names=["security", "ddns"])}
+    assert set(results) == {"security", "ddns"}
+    assert results["security"].get("reconciled") is True
+    assert results["ddns"].get("reconciled") is True
+    assert (tmp_path / "security.toml").is_file()
+    assert (tmp_path / "ddns.toml").is_file()
+
+
+def test_reconcile_service_configs_unknown_name_filtered():
+    # Unknown names are dropped by the shared reconcile (the operation layer
+    # validates the name set against the registry before calling).
+    assert reconcile_service_configs(names=["nope"]) == []
+
+
+# --------------------------------------------------------------------------- #
+# toml validator (generic structural parse)
+
+
+def test_toml_validator():
+    run_validator("toml", '[watch]\ninterval = 300.0\n')  # no raise
+    with pytest.raises(ServiceRenderError):
+        run_validator("toml", "this is [ not valid toml")
+
+
+# --------------------------------------------------------------------------- #
+# post-reload health check + rollback (WP7 exit gate)
+
+
+def test_render_managed_rolls_back_on_unhealthy_reload(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "yunohost.nostrhost.service_projection._wait_healthy", lambda *a, **k: False
+    )
+    spec = _spec_at("notify", tmp_path)
+    target = Path(spec.path)
+    render_managed(spec, "first\n", source_revision="r1", renderer="t", validate=False, reload=False)
+    first = target.read_bytes()
+    first_sidecar = read_provenance(target)
+    result = render_managed(
+        spec,
+        "second\n",
+        source_revision="r2",
+        renderer="t",
+        validate=False,
+        reload=True,
+        health_check=lambda: True,
+    )
+    assert result["changed"] is True
+    assert result["health"] == "failed"
+    assert result["rolled_back"] is True
+    assert result["reload"] == {"action": None, "ok": False}
+    # The last-known-good bytes and provenance sidecar are restored.
+    assert target.read_bytes() == first
+    assert read_provenance(target) == first_sidecar
+
+
+def test_render_managed_records_reload_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "yunohost.nostrhost.service_projection._wait_healthy", lambda *a, **k: True
+    )
+    spec = _spec_at("notify", tmp_path)
+    target = Path(spec.path)
+    result = render_managed(
+        spec,
+        "a\n",
+        source_revision="r1",
+        renderer="t",
+        validate=False,
+        reload=True,
+        health_check=lambda: True,
+    )
+    assert result["reload"] == {"action": None, "ok": True}
+    sidecar = read_provenance(target)
+    assert sidecar is not None
+    assert sidecar["reload"] == {"action": None, "ok": True}
+    report = check_drift(spec, target=target)
+    assert report["drifted"] is False
+    assert report["reload"] == {"action": None, "ok": True}

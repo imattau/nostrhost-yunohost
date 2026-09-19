@@ -37,7 +37,13 @@ PrivateTmp=true
 # account writes reaching the executor via the signed operation chain fail
 # with "groupadd ... exit status 10" / "useradd: cannot create directory"
 # regardless of the requester's own admin rights.
-ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt /etc/caddy
+# The native resource-engine providers (package.plan/reconcile, state.reconcile)
+# additionally write into /etc/tmpfiles.d (managed directories), /etc/sysusers.d
+# (service accounts), /etc/systemd/system (units/timers/sockets) and /var/www
+# (app install dir + extracted source) -- keep those explicit so a Protect*
+# hardening layer stacked on top of this list cannot silently EROFS a provider
+# write (cf. NSITES-DECISION-RECORD.md defect 1).
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost /etc/yunohost /var/lib/yunohost /var/cache/yunohost /home/yunohost.backup /var/log/yunohost /var/lib/apt /var/cache/apt /etc/caddy /etc/tmpfiles.d /etc/sysusers.d /etc/systemd/system /var/www
 
 [Install]
 WantedBy=multi-user.target

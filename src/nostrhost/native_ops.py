@@ -90,6 +90,10 @@ class ServiceStatusArgs(_Strict):
     pass
 
 
+class ServiceReconcileArgs(_Strict):
+    names: list[str] | None = None
+
+
 class ListReadArgs(_Strict):
     family: str
 
@@ -557,6 +561,36 @@ def _safe_service_config_status(**args: Any) -> dict[str, Any]:
 
     files = check_all_drift()
     return {"service_configs": files, "drifted": [row["name"] for row in files if row["drifted"]]}
+
+
+def _safe_service_config_reconcile(**args: Any) -> dict[str, Any]:
+    """Re-render the managed service configs from their authority (WP7).
+
+    Reconcile restores the desired version of every generated service config
+    (nsite/notify/oidc/security/ddns) from its event/ngit/derived source and
+    reports per-file source revision, rendered digest and reload outcome.
+    Running through the operation chain records the reconcile in the
+    ``2200``-series audit history. ``names`` optionally limits the set.
+    """
+    names = args.pop("names", None)
+    if args:
+        raise OperationError(f"service.config.reconcile does not accept extra args: {sorted(args)}")
+    from yunohost.nostrhost.service_projection import reconcile_service_configs
+
+    if names is not None:
+        from yunohost.nostrhost.service_specs import SERVICE_SPECS
+
+        unknown = [n for n in names if n not in SERVICE_SPECS]
+        if unknown:
+            raise OperationError(f"unknown service config: {', '.join(sorted(unknown))}")
+    results = reconcile_service_configs(names=names)
+    failed = [row for row in results if "error" in row]
+    if failed:
+        raise OperationError(
+            f"service.config.reconcile: {len(failed)} of {len(results)} failed: "
+            + "; ".join(f"{row['name']}: {row['error']}" for row in failed)
+        )
+    return {"service_configs": results}
 
 
 _LIST_FAMILIES = {
@@ -2687,6 +2721,11 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="service.config.status", handler=_safe_service_config_status, scope=SCOPE_SERVER_READ,
         require_approval=False, input_model=ServiceStatusArgs,
         description="generated service-config provenance + drift vs the rendered digest (WP7)",
+    ),
+    "service.config.reconcile": ToolSpec(
+        name="service.config.reconcile", handler=_safe_service_config_reconcile, scope=SCOPE_SETTINGS_WRITE,
+        input_model=ServiceReconcileArgs, risk=RISK_LOW, reversibility=REVERSIBLE,
+        description="re-render the generated service-config files from their authority (WP7)",
     ),
     "list.read": ToolSpec(
         name="list.read", handler=_safe_list_read, scope=SCOPE_SERVER_READ,

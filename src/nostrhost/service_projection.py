@@ -1,14 +1,17 @@
 """WP7: provenance-tracked rendering of generated service configuration.
 
 Every generated service file (``nsite.toml``, ``notify.toml``,
-``oidc.toml``) is treated as a *projection* of an authoritative source (an
-event document, an ngit desired-state revision, or a derived operator view).
-This module provides the shared plumbing:
+``oidc.toml``, ``security.toml``, ``ddns.toml``) is treated as a *projection*
+of an authoritative source (an event document, an ngit desired-state
+revision, or a derived operator view). This module provides the shared
+plumbing:
 
 * :func:`render_managed` — validate the candidate with the service's native
   config checker, write it atomically (mode + optional group ownership), and
-  record a provenance sidecar recording the source revision and the sha256 of
-  the exact bytes written, then reload the consumer when the file changed;
+  record a provenance sidecar recording the source revision, the sha256 of
+  the exact bytes written and the reload outcome, then reload the consumer
+  when the file changed. When a ``health_check`` is supplied the consumer is
+  polled after reload and a failed health check rolls the file back;
 * :func:`check_drift` — compare the on-disk file against its recorded digest
   so manual edits are detected (WP7 exit gate);
 * :func:`reconcile` — re-render from the authority and restore the desired
@@ -26,7 +29,9 @@ The validators are deliberately small and native:
   never installed;
 * ``notify-toml`` / ``oidc-toml`` — parse the candidate with ``tomllib`` and
   enforce the same structural invariants the Go consumers check, so a render
-  failure is caught before the file is replaced.
+  failure is caught before the file is replaced;
+* ``toml`` — parse the candidate with ``tomllib`` for configs whose consumer
+  (``security.toml``, ``ddns.toml``) has no separate native checker.
 """
 
 from __future__ import annotations
@@ -75,6 +80,15 @@ def read_provenance(target: str | Path) -> dict[str, Any] | None:
         return None
 
 
+def _restore_provenance(target: str | Path, record: dict[str, Any] | None) -> None:
+    """Restore a previous provenance sidecar (or remove it) after a rollback."""
+    path = provenance_path(target)
+    if record is None:
+        path.unlink(missing_ok=True)
+        return
+    _atomic_write(path, json.dumps(record, indent=2, sort_keys=True) + "\n", mode=0o644)
+
+
 def write_provenance(
     target: str | Path,
     *,
@@ -83,6 +97,7 @@ def write_provenance(
     renderer: str,
     digest: str,
     rendered_at: float | None = None,
+    reload: dict[str, Any] | None = None,
 ) -> Path:
     record = {
         "source": source,
@@ -91,6 +106,8 @@ def write_provenance(
         "rendered_sha256": digest,
         "rendered_at": rendered_at if rendered_at is not None else time.time(),
     }
+    if reload is not None:
+        record["reload"] = reload
     path = provenance_path(target)
     _atomic_write(path, json.dumps(record, indent=2, sort_keys=True) + "\n", mode=0o644)
     return path
@@ -180,6 +197,7 @@ _VALIDATORS: dict[str, Callable[[str], None]] = {
     "nsite-go": validate_nsite,
     "notify-toml": validate_notify,
     "oidc-toml": validate_oidc,
+    "toml": lambda content: validate_toml(content),
 }
 
 
@@ -194,18 +212,18 @@ def run_validator(name: str, content: str) -> None:
 # reload actions
 
 
-def _systemctl(action: str, service: str) -> None:
-    subprocess.run(
-        ["systemctl", "--no-block", action, service],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _systemctl(action: str, service: str, signal: str | None = None) -> None:
+    argv = ["systemctl", "--no-block"]
+    if signal is not None:
+        argv += ["kill", "-s", signal, service]
+    else:
+        argv += [action, service]
+    subprocess.run(argv, capture_output=True, text=True, check=False)
 
 
 def reload_sighup() -> None:
     """SIGHUP the nsite gateway: re-read config without dropping connections."""
-    _systemctl("kill", "-s", "HUP", NSITE_SERVICE)
+    _systemctl("kill", NSITE_SERVICE, signal="HUP")
 
 
 def reload_restart() -> None:
@@ -228,6 +246,20 @@ def run_reload(action: str | None) -> None:
 # the render entrypoint
 
 
+def _wait_healthy(
+    health_check: Callable[[], bool],
+    *,
+    retries: int = 5,
+    delay: float = 1.0,
+) -> bool:
+    """Poll ``health_check`` until it reports healthy or the window is spent."""
+    for _ in range(retries):
+        if health_check():
+            return True
+        time.sleep(delay)
+    return False
+
+
 def render_managed(
     spec,
     content: str,
@@ -237,6 +269,7 @@ def render_managed(
     validate: bool = True,
     reload: bool = True,
     chown_group: str | None = None,
+    health_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Validate → atomic-replace → provenance → reload a service config.
 
@@ -245,13 +278,22 @@ def render_managed(
     Returns the digest written and whether the file actually changed. A
     validation failure raises :class:`ServiceRenderError` and leaves the
     last-known-good file in place.
+
+    When ``health_check`` is given, the consumer is polled after the reload
+    action. If it does not come up healthy, the previously-rendered bytes and
+    provenance sidecar are restored and the report carries ``rolled_back`` —
+    a bad config is never left installed (WP7 exit gate).
     """
     target = Path(spec.path)
     if validate:
         run_validator(spec.validator, content)
     digest = _sha256(content)
     changed = not (target.is_file() and _sha256(target.read_text(encoding="utf-8")) == digest)
+    previous_text: str | None = None
+    previous_provenance: dict[str, Any] | None = None
     if changed:
+        previous_text = target.read_text(encoding="utf-8") if target.is_file() else None
+        previous_provenance = read_provenance(target)
         _atomic_write(target, content, mode=spec.mode)
         if chown_group:
             try:
@@ -260,15 +302,48 @@ def render_managed(
                 os.chown(target, 0, grp.getgrnam(chown_group).gr_gid)
             except (KeyError, OSError):
                 logger.warning("could not set group %s on %s", chown_group, target)
+    reload_result = None
+    if changed and reload:
+        reload_result = {"action": spec.reload, "ok": True}
+        run_reload(spec.reload)
+        if health_check is not None and not _wait_healthy(health_check):
+            reload_result["ok"] = False
+            if previous_text is not None:
+                _atomic_write(target, previous_text, mode=spec.mode)
+                if chown_group:
+                    try:
+                        import grp
+
+                        os.chown(target, 0, grp.getgrnam(chown_group).gr_gid)
+                    except (KeyError, OSError):
+                        logger.warning("could not set group %s on %s", chown_group, target)
+            _restore_provenance(target, previous_provenance)
+            logger.error(
+                "service %s failed health check after %s; rolled back %s",
+                spec.name,
+                reload_result["action"],
+                target,
+            )
+            return {
+                "name": spec.name,
+                "path": str(target),
+                "source": spec.source,
+                "source_revision": source_revision,
+                "rendered_sha256": digest,
+                "changed": True,
+                "reload": reload_result,
+                "health": "failed",
+                "rolled_back": True,
+            }
+    if changed:
         write_provenance(
             target,
             source=spec.source,
             source_revision=source_revision,
             renderer=renderer,
             digest=digest,
+            reload=reload_result,
         )
-        if reload:
-            run_reload(spec.reload)
     return {
         "name": spec.name,
         "path": str(target),
@@ -276,6 +351,7 @@ def render_managed(
         "source_revision": source_revision,
         "rendered_sha256": digest,
         "changed": changed,
+        "reload": reload_result,
     }
 
 
@@ -322,6 +398,7 @@ def check_drift(spec, target: str | Path | None = None) -> dict[str, Any]:
         "source_revision": provenance.get("source_revision", ""),
         "rendered_sha256": provenance.get("rendered_sha256", ""),
         "on_disk_sha256": on_disk,
+        "reload": provenance.get("reload"),
     }
 
 
@@ -341,6 +418,7 @@ def reconcile(
     validate: bool = True,
     reload: bool = True,
     chown_group: str | None = None,
+    health_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Re-render ``spec`` from its authority and restore the desired version."""
     content = render()
@@ -352,4 +430,83 @@ def reconcile(
         validate=validate,
         reload=reload,
         chown_group=chown_group,
+        health_check=health_check,
     )
+
+
+def reconcile_service_configs(names: list[str] | None = None) -> list[dict[str, Any]]:
+    """Re-render every (or selected) managed service config from its authority.
+
+    One dict per requested spec; a spec with no authority yet is reported as
+    ``skipped``, a failed render as ``error``. This is the shared entrypoint
+    behind both ``nostr-projector reconcile service`` and the
+    ``service.config.reconcile`` operation, so the operation chain records the
+    same per-file source revision, rendered digest and reload result.
+    """
+    from .service_specs import SERVICE_SPECS
+
+    specs = {name: spec for name, spec in SERVICE_SPECS.items() if names is None or name in names}
+    results: list[dict[str, Any]] = []
+    for name, spec in specs.items():
+        try:
+            results.append(_reconcile_one(name, spec))
+        except Exception as exc:  # noqa: BLE001 - one failure must not block the rest
+            results.append({"name": name, "error": str(exc)})
+    return results
+
+
+def _reconcile_one(name: str, spec) -> dict[str, Any]:
+    if name == "nsite":
+        from .nsites.service import NsiteService, _default_state_dir, _ngit_revision, load_gateway
+
+        state_dir = _default_state_dir()
+        state = load_gateway(state_dir)
+        config = (state or {}).get("config")
+        if not config:
+            return {"name": name, "skipped": "gateway not configured"}
+        from .nsites.models import GatewayConfig
+
+        return reconcile(
+            spec,
+            lambda c=config: NsiteService(state_dir=state_dir).render_config(GatewayConfig(**c))
+            and "",
+            source_revision=_ngit_revision(state_dir),
+            renderer="nostr-projector reconcile",
+            reload=False,
+        )
+    if name == "notify":
+        from yunohost.nostr_identity import _operator_config
+
+        cfg = _operator_config()
+        from .cli import _render_notify_config
+
+        return reconcile(
+            spec,
+            lambda sk=cfg.notifier_sk, relay=cfg.control_relay: _render_notify_config(sk, relay)
+            and "",
+            source_revision="local:operator+connectivity",
+            renderer="nostr-projector reconcile",
+            reload=False,
+        )
+    if name == "oidc":
+        from .policy_projection import PolicyStore, render_oidc_clients
+        from .policy_specs import spec_for_name as policy_spec_for_name
+
+        store = PolicyStore()
+        spec_entry = policy_spec_for_name("oidc-clients")
+        entry = store.get(spec_entry.event_key(spec_entry.d))
+        if entry is None:
+            return {"name": name, "skipped": "no oidc-clients document folded"}
+        render_oidc_clients(entry)
+        return {"name": name, "reconciled": True}
+    if name == "security":
+        from .cli import _render_security_config
+
+        _render_security_config()
+        return {"name": name, "reconciled": True}
+    if name == "ddns":
+        from .cli import _render_ddns_config
+
+        _render_ddns_config()
+        return {"name": name, "reconciled": True}
+    return {"name": name, "skipped": "no reconcile hook"}

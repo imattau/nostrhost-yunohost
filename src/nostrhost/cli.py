@@ -187,6 +187,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "system.status": native_ops._safe_system_status,
     "projection.status": native_ops._safe_projection_status,
     "service.config.status": native_ops._safe_service_config_status,
+    "service.config.reconcile": native_ops._safe_service_config_reconcile,
     "list.read": native_ops._safe_list_read,
     "list.publish": native_ops._safe_list_publish,
     "app.install": native_ops._safe_app_install,
@@ -611,6 +612,8 @@ INSTALLED_MARKER = "/etc/yunohost/installed"
 NOTIFY_CONFIG = os.environ.get("NOSTRHOST_NOTIFY_CONFIG", "/etc/nostrhost/notify.toml")
 CATALOGUE_ENV = os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env")
 KEYS_RECOVERY = os.environ.get("NOSTRHOST_KEYS_RECOVERY", "/etc/nostrhost/keys.recovery")
+SECURITY_CONFIG = os.environ.get("NOSTRHOST_SECURITY_CONFIG", "/etc/nostrhost/security.toml")
+DDNS_CONFIG = os.environ.get("NOSTRHOST_DDNS_CONFIG", "/etc/nostrhost/ddns.toml")
 NOTIFY_STATE_DIR = os.environ.get("NOSTRHOST_NOTIFY_STATE_DIR", "/var/lib/nostrhost/state/notifications")
 AGENT_CONFIG = "/etc/nostrhost-agent/config.json"
 AGENT_STATE_DIR = "/var/lib/nostrhost-agent"
@@ -1448,6 +1451,71 @@ def _render_notify_state(admin_pubkeys: list[str], *, force: bool = False) -> di
         "admins": len(npubs),
         "written": written,
     }
+
+
+def _render_security_config() -> Path:
+    """Render the nostr-securityd schedule + severity mapping (WP7).
+
+    WP7: the render is provenance-tracked through the shared service-config
+    framework. The file carries no secrets — it is the non-secret schedule
+    (interval, max_alerts) and severity mapping the daemon already falls back
+    to when the file is absent.
+    """
+    path = Path(os.environ.get("NOSTRHOST_SECURITY_CONFIG", SECURITY_CONFIG))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# nostr-securityd schedule + severity mapping (rendered from operator defaults).\n"
+        'severity_default = "warning"\n'
+        'severity_recurring = "critical"\n'
+        "interval = 30.0\n"
+        "max_alerts = 1000\n"
+    )
+    from dataclasses import replace
+
+    from .service_projection import render_managed
+    from .service_specs import spec_for_name
+
+    spec = replace(spec_for_name("security"), path=str(path))
+    render_managed(
+        spec,
+        content,
+        source_revision="local:operator",
+        renderer="cli._render_security_config",
+        validate=True,
+        reload=False,
+    )
+    return path
+
+
+def _render_ddns_config() -> Path:
+    """Render the nostr-ddnswatchd desired schedule (WP7).
+
+    Only the non-secret ``[watch] interval`` is rendered; DNS provider tokens
+    stay in the credential store (``secret:dns/<provider>/<name>``, WP6) and
+    never appear in this file.
+    """
+    path = Path(os.environ.get("NOSTRHOST_DDNS_CONFIG", DDNS_CONFIG))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# nostr-ddnswatchd desired schedule (rendered from operator defaults).\n"
+        "[watch]\n"
+        "interval = 300.0\n"
+    )
+    from dataclasses import replace
+
+    from .service_projection import render_managed
+    from .service_specs import spec_for_name
+
+    spec = replace(spec_for_name("ddns"), path=str(path))
+    render_managed(
+        spec,
+        content,
+        source_revision="local:operator",
+        renderer="cli._render_ddns_config",
+        validate=True,
+        reload=False,
+    )
+    return path
 
 
 def _resync_notify_state(*, force: bool = True) -> dict[str, Any]:

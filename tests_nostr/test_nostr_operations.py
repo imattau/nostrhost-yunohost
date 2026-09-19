@@ -160,6 +160,7 @@ def test_registry_has_the_safe_tools():
         "policy.read",
         "projection.status",
         "rollback.apply",
+        "service.config.reconcile",
         "service.config.status",
         "service.control",
         "service.history",

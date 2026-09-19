@@ -1,3 +1,32 @@
+yunohost (12.1.41.103) stable; urgency=low
+
+  * fix: nostr-operationsd.service ReadWritePaths now grants the native
+    resource-engine provider write dirs (/etc/tmpfiles.d, /etc/sysusers.d,
+    /etc/systemd/system and /var/www) in addition to the existing /etc and
+    /var grants. package.plan/package.reconcile and state.reconcile execute
+    in this daemon, and their directory.ensure / source.fetch / systemd
+    providers write exactly those paths; under Protect* hardening on top of
+    the list they failed with EROFS (found live installing armada:
+    "/etc/tmpfiles.d/nostrhost-install.conf Read-only file system").
+  * WP7 completion: security.toml and ddns.toml are now provenance-tracked
+    operator-derived projections (sidecars security.toml.source.json /
+    ddns.toml.source.json) through the same service-config framework; a
+    generic `toml` validator covers configs without a native checker.
+  * WP7 completion: render_managed accepts a post-reload health_check; a
+    consumer that fails to come up healthy after reload rolls the file and
+    its sidecar back to the previous good state (never leaves a bad config
+    installed), and the reload outcome ({action, ok}) is recorded in the
+    sidecar and surfaced by service.config.status / check_drift.
+  * WP7 completion: new service.config.reconcile tool (settings.write scope,
+    low risk) re-renders one or all managed configs through the shared
+    reconcile_service_configs entrypoint; the API exposes POST
+    /package/service/configs/reconcile. reconcile service in the bin now
+    covers nsite/notify/oidc/security/ddns.
+  * fix: reload_sighup no longer passes 4 args to the 2-arg _systemctl
+    helper (systemctl kill -s HUP is now signalled correctly).
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 11:05:07 +0000
+
 yunohost (12.1.41.102) stable; urgency=low
 
   * WP7: generated service configuration is now a provenance-tracked

@@ -1981,6 +1981,21 @@ def build_app(
         _run_tool."""
         return _run_lifecycle("settings.reset_all", {}, state=_State())
 
+    # -- WP7 service configs --------------------------------------------------
+
+    @app.post("/package/service/configs/reconcile")
+    def service_configs_reconcile() -> Any:
+        """Re-render the generated service-config files from their authority.
+        Low-risk: routed through the signed operation chain so the reconcile
+        (per-file source revision, digest, reload outcome) is recorded in the
+        ``2200``-series audit history."""
+        body = _json_body()
+        return _run_lifecycle(
+            "service.config.reconcile",
+            {"names": body.get("names")},
+            state=_State(),
+        )
+
     # -- package ------------------------------------------------------------
 
     @app.post("/package/plan")

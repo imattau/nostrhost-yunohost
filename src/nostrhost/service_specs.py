@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-Validator = Literal["nsite-go", "notify-toml", "oidc-toml"]
+Validator = Literal["nsite-go", "notify-toml", "oidc-toml", "toml"]
 Reload = Literal["sighup", "restart"]
 
 
@@ -72,6 +72,22 @@ SERVICE_SPECS: dict[str, ServiceSpec] = {
         validator="oidc-toml",
         mode=0o600,
         description="Non-secret OIDC client registrations rendered from the kind-31101 oidc-clients document; each client_secret is resolved from the local credential store at render time.",
+    ),
+    "security": ServiceSpec(
+        name="security",
+        path="/etc/nostrhost/security.toml",
+        source="derived:operator",
+        validator="toml",
+        mode=0o640,
+        description="nostr-securityd schedule + severity mapping (severity_default, severity_recurring, interval, max_alerts). No secrets; rendered provenance-tracked from operator defaults.",
+    ),
+    "ddns": ServiceSpec(
+        name="ddns",
+        path="/etc/nostrhost/ddns.toml",
+        source="derived:operator",
+        validator="toml",
+        mode=0o640,
+        description="nostr-ddnswatchd desired schedule ([watch] interval). Provider tokens stay in the credential store; only the non-secret schedule is rendered here.",
     ),
 }
 

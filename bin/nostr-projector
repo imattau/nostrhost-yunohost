@@ -15,7 +15,7 @@ Projections: permissions (NIP-51 kind 30000), identity (kind 31102),
 capabilities (kinds 31100/27236/27237), lists (NIP-51/NIP-65/NIP-78),
 policy (kind 31101). ``verify service`` / ``reconcile service`` check and
 re-render the WP7 generated service-config files (nsite.toml, notify.toml,
-oidc.toml) against their provenance sidecars.
+oidc.toml, security.toml, ddns.toml) against their provenance sidecars.
 """
 
 from __future__ import annotations
@@ -146,63 +146,9 @@ def _service_verify(as_json: bool) -> int:
 
 def _service_reconcile(as_json: bool) -> int:
     """Re-render every managed service config from its authority."""
-    from yunohost.nostrhost.nsites.service import _ngit_revision
-    from yunohost.nostrhost.policy_projection import render_oidc_clients
-    from yunohost.nostrhost.service_projection import reconcile
-    from yunohost.nostrhost.service_specs import SERVICE_SPECS
+    from yunohost.nostrhost.service_projection import reconcile_service_configs
 
-    cfg = nostr_identity._operator_config()
-    results: list[dict[str, Any]] = []
-    for name, spec in SERVICE_SPECS.items():
-        try:
-            if name == "nsite":
-                from yunohost.nostrhost.nsites.service import NsiteService, load_gateway
-
-                state = load_gateway()
-                config = (state or {}).get("config")
-                if not config:
-                    results.append({"name": name, "skipped": "gateway not configured"})
-                    continue
-                results.append(
-                    reconcile(
-                        spec,
-                        lambda c=config: NsiteService().render_config(
-                            __import__("yunohost.nostrhost.nsites.models", fromlist=["GatewayConfig"]).GatewayConfig(**c)
-                        )
-                        and "",
-                        source_revision=_ngit_revision(),
-                        renderer="nostr-projector reconcile",
-                        reload=False,
-                    )
-                )
-            elif name == "notify":
-                results.append(
-                    reconcile(
-                        spec,
-                        lambda: __import__("yunohost.nostrhost.cli", fromlist=["_render_notify_config"])._render_notify_config(
-                            cfg.notifier_sk, cfg.control_relay
-                        )
-                        and "",
-                        source_revision="local:operator+connectivity",
-                        renderer="nostr-projector reconcile",
-                        reload=False,
-                    )
-                )
-            elif name == "oidc":
-                from yunohost.nostrhost.policy_projection import PolicyStore
-
-                store = PolicyStore()
-                spec_entry = __import__("yunohost.nostrhost.policy_specs", fromlist=["spec_for_name"]).spec_for_name("oidc-clients")
-                entry = store.get(spec_entry.event_key(spec_entry.d))
-                if entry is None:
-                    results.append({"name": name, "skipped": "no oidc-clients document folded"})
-                    continue
-                render_oidc_clients(entry)
-                results.append({"name": name, "reconciled": True})
-            else:
-                results.append({"name": name, "skipped": "no reconcile hook"})
-        except Exception as exc:  # noqa: BLE001 - one failure must not block the rest
-            results.append({"name": name, "error": str(exc)})
+    results = reconcile_service_configs()
     if as_json:
         print(json.dumps({"name": "service", "reconciled": results}, indent=2, sort_keys=True))
     else:
