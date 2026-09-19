@@ -167,3 +167,65 @@ def test_ensure_client_key_is_stable(tmp_path):
     assert len(first) == 64
     assert ensure_client_key(path) == first
     assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_reload_targets_is_a_noop_without_a_loader(tmp_path):
+    client_sk, _ = new_key()
+    signer_sk, signer_pk = new_key()
+    bridge = SignerBridge(
+        admin_pubkeys=[signer_pk],
+        targets=[],
+        client_sk=client_sk,
+        publish=lambda relay, event: None,
+        state_path=tmp_path / "state.json",
+    )
+    bridge.reload_targets()
+    assert bridge.targets_for("x") == []
+
+
+def test_reload_targets_picks_up_a_new_registration(tmp_path):
+    """A signer registered while the service is running is used immediately,
+    without restarting nostr-signerd (targets_loader re-reads the file)."""
+    client_sk, _ = new_key()
+    signer_sk, signer_pk = new_key()
+    on_disk: list[SignerTarget] = []
+    published = []
+    bridge = SignerBridge(
+        admin_pubkeys=[signer_pk],
+        targets=[],
+        client_sk=client_sk,
+        publish=lambda relay, event: published.append(event),
+        transport=make_transport(signer_sk),
+        state_path=tmp_path / "state.json",
+        targets_loader=lambda: list(on_disk),
+    )
+    # No target yet: the notice is a no-op.
+    assert bridge.handle_notice(notice("cd" * 32)) is True
+    assert published == []
+
+    # Registration lands on disk, then a fresh notice reaches the signer.
+    on_disk.append(SignerTarget(signer_pubkey=signer_pk, relays=("wss://relay.example",)))
+    assert bridge.handle_notice(notice("ef" * 32)) is True
+    bridge.shutdown(wait=True)
+    assert len(published) == 1
+    assert validate_signed_approval(published[0], "ef" * 32)["pubkey"] == signer_pk
+
+
+def test_reload_targets_drops_non_admin_targets(tmp_path):
+    client_sk, _ = new_key()
+    signer_sk, signer_pk = new_key()
+    _, other_pk = new_key()
+    published = []
+    on_disk = [SignerTarget(signer_pubkey=other_pk, relays=("wss://relay.example",))]
+    bridge = SignerBridge(
+        admin_pubkeys=[signer_pk],
+        targets=[],
+        client_sk=client_sk,
+        publish=lambda relay, event: published.append(event),
+        transport=make_transport(signer_sk),
+        state_path=tmp_path / "state.json",
+        targets_loader=lambda: list(on_disk),
+    )
+    assert bridge.handle_notice(notice("cd" * 32)) is True
+    bridge.shutdown(wait=True)
+    assert published == []

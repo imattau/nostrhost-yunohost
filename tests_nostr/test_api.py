@@ -2276,3 +2276,126 @@ def test_contribution_settings_keeps_envelope_on_failure(monkeypatch):
     status, _, body = wsgi_request(app, "POST", "/package/agent/contribution/settings", {"dataset_repo": "x/y"})
     assert status == "200"
     assert json.loads(body) == envelope
+
+
+# --------------------------------------------------------------------------- #
+# remote-signer registration (cross-session approvals)
+
+_HEX_ADMIN = "ab" * 32
+_HEX_OTHER = "cd" * 32
+
+
+def _admin_app(admin=_HEX_ADMIN):
+    return build_app(authorizer=lambda _rule: admin)
+
+
+def _bunker_uri(signer=_HEX_ADMIN) -> str:
+    return f"bunker://{signer}?relay=wss%3A%2F%2Frelay.example&secret=s3cret"
+
+
+def test_notify_signers_register_own_bunker(monkeypatch):
+    from yunohost.nostr_signerd import SignerTarget
+
+    registered = []
+
+    def fake_add(uri, *, label=None, path=None):
+        registered.append((uri, label))
+        return []
+
+    monkeypatch.setattr("yunohost.nostr_signerd.add_target_from_bunker_uri", fake_add)
+    monkeypatch.setattr(
+        "yunohost.nostr_signerd.load_targets",
+        lambda: [SignerTarget(signer_pubkey=_HEX_ADMIN, relays=("wss://relay.example",), secret="s3cret", label="phone")],
+    )
+    status, _, body = wsgi_request(_admin_app(), "POST", "/package/notify/signers", {"bunker_uri": _bunker_uri(), "label": "phone"})
+    assert status == "200"
+    data = json.loads(body)
+    assert registered == [(_bunker_uri(), "phone")]
+    assert data["this_admin"] is True
+    assert data["targets"][0]["paired"] is True
+
+
+def test_notify_signers_register_rejects_another_identity():
+    status, _, body = wsgi_request(_admin_app(), "POST", "/package/notify/signers", {"bunker_uri": _bunker_uri(_HEX_OTHER)})
+    assert status == "403"
+    assert json.loads(body)["code"] == "not_authorized"
+
+
+def test_notify_signers_register_rejects_bad_uri():
+    status, _, body = wsgi_request(_admin_app(), "POST", "/package/notify/signers", {"bunker_uri": "npub1notabunker"})
+    assert status == "400"
+
+
+def test_notify_signers_remove_own_target(monkeypatch):
+    monkeypatch.setattr("yunohost.nostr_signerd.remove_target", lambda pubkey, path=None: True)
+    monkeypatch.setattr("yunohost.nostr_signerd.load_targets", lambda: [])
+    status, _, body = wsgi_request(_admin_app(), "DELETE", f"/package/notify/signers/{_HEX_ADMIN}")
+    assert status == "200"
+    assert json.loads(body)["removed"] is True
+
+
+def test_notify_signers_remove_rejects_another_identity():
+    status, _, _ = wsgi_request(_admin_app(), "DELETE", f"/package/notify/signers/{_HEX_OTHER}")
+    assert status == "403"
+
+
+def test_notify_signers_remove_missing_is_404(monkeypatch):
+    monkeypatch.setattr("yunohost.nostr_signerd.remove_target", lambda pubkey, path=None: False)
+    status, _, _ = wsgi_request(_admin_app(), "DELETE", f"/package/notify/signers/{_HEX_ADMIN}")
+    assert status == "404"
+
+
+def test_notify_signers_pair_start_and_status(monkeypatch):
+    from yunohost.nostr_signer_pairing import PairingRegistry
+
+    saved = []
+    registry = PairingRegistry(
+        client_sk="11" * 32,
+        pair_fn=lambda **k: {"signer_pubkey": _HEX_ADMIN, "relays": ["wss://signer.example"]},
+        save_target=lambda *a, **k: saved.append((a, k)),
+        start_thread=False,
+    )
+    monkeypatch.setattr(api_module, "_signer_pairing_registry", lambda: registry)
+    app = _admin_app()
+
+    status, _, body = wsgi_request(app, "POST", "/package/notify/signers/pair", {"relays": ["wss://relay.example"]})
+    assert status == "200"
+    data = json.loads(body)
+    assert data["status"] == "pending"
+    assert data["uri"].startswith("nostrconnect://")
+    pairing_id = data["pairing_id"]
+
+    status, _, body = wsgi_request(app, "GET", f"/package/notify/signers/pair/{pairing_id}")
+    assert json.loads(body)["status"] == "pending"
+
+    registry._run(registry.get(pairing_id), None)
+    assert saved and saved[0][0][0] == _HEX_ADMIN
+
+    from yunohost.nostr_signerd import SignerTarget
+
+    monkeypatch.setattr(
+        "yunohost.nostr_signerd.load_targets",
+        lambda: [SignerTarget(signer_pubkey=_HEX_ADMIN, relays=("wss://signer.example",))],
+    )
+    status, _, body = wsgi_request(app, "GET", f"/package/notify/signers/pair/{pairing_id}")
+    data = json.loads(body)
+    assert data["status"] == "paired"
+    assert data["this_admin"] is True
+
+
+def test_notify_signers_pair_status_is_admin_scoped(monkeypatch):
+    from yunohost.nostr_signer_pairing import PairingRegistry
+
+    registry = PairingRegistry(
+        client_sk="11" * 32,
+        pair_fn=lambda **k: {"signer_pubkey": _HEX_ADMIN, "relays": ["wss://r"]},
+        save_target=lambda *a, **k: None,
+        start_thread=False,
+    )
+    monkeypatch.setattr(api_module, "_signer_pairing_registry", lambda: registry)
+    pending = registry.start(admin_pubkey=_HEX_ADMIN, relays=["wss://r"])
+
+    status, _, _ = wsgi_request(_admin_app(_HEX_OTHER), "GET", f"/package/notify/signers/pair/{pending.pairing_id}")
+    assert status == "404"
+    status, _, _ = wsgi_request(_admin_app(), "GET", "/package/notify/signers/pair/" + "0" * 32)
+    assert status == "404"

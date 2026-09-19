@@ -3745,8 +3745,9 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         def run() -> dict[str, Any]:
             import secrets as _secrets
 
-            from yunohost.nostr_identity import _derive_pubkey, _operator_config, pubkey_is_admin
+            from yunohost.nostr_identity import _operator_config, pubkey_is_admin
             from yunohost.nostr_nip46 import build_nostrconnect_uri, pair_via_nostrconnect
+            from yunohost.nostr_operations import _derive_pubkey
             from yunohost.nostr_signerd import add_target, ensure_client_key
 
             cfg = _operator_config()

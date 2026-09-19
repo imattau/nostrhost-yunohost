@@ -220,9 +220,15 @@ class SignerBridge:
         timeout: float = 60.0,
         max_workers: int = 4,
         state_path: str | Path | None = None,
+        targets_loader: Callable[[], list[SignerTarget]] | None = None,
         now: Callable[[], float] = time.time,
     ) -> None:
         self._admins = {str(a).lower() for a in admin_pubkeys if isinstance(a, str)}
+        # When set, the bridge re-reads the target file before every notice so
+        # an admin registering/removing a signer through the console takes
+        # effect without restarting the service. Left ``None`` for the
+        # injected-targets tests, where the constructor list is authoritative.
+        self._targets_loader = targets_loader
         # Only push to signers that hold an admin identity; the executor would
         # ignore a 2201 from anyone else anyway.
         self._targets = [t for t in targets if t.signer_pubkey in self._admins]
@@ -264,6 +270,22 @@ class SignerBridge:
 
     # -- intake ------------------------------------------------------------ #
 
+    def reload_targets(self) -> None:
+        """Re-read the target file so console registrations take effect live.
+
+        A no-op when no loader was supplied (tests inject targets directly).
+        Targets whose signer pubkey is not an admin are dropped, matching the
+        construction-time filter.
+        """
+        if self._targets_loader is None:
+            return
+        try:
+            targets = self._targets_loader()
+        except Exception:  # noqa: BLE001 - a broken file must not stop dispatch
+            logger.warning("could not reload signer targets", exc_info=True)
+            return
+        self._targets = [t for t in targets if t.signer_pubkey in self._admins]
+
     def targets_for(self, request_id: str) -> list[SignerTarget]:
         return list(self._targets)
 
@@ -285,6 +307,7 @@ class SignerBridge:
                 return False
             self._handled.add(request_id)
         self._save_state()
+        self.reload_targets()
         tool = str(body.get("tool") or "")
         targets = self.targets_for(request_id)
         if not targets:
@@ -364,6 +387,7 @@ def run() -> None:  # pragma: no cover - wires real relay/transport
         targets=targets,
         client_sk=ensure_client_key(),
         control_relay=cfg.control_relay,
+        targets_loader=load_targets,
     )
 
     async def _main() -> None:

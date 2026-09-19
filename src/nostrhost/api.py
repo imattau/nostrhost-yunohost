@@ -2181,25 +2181,127 @@ def build_app(
         admin's own identity has a signer registered, and `remote` whether the
         node pushes parked approvals to signers at all.
         """
-        from yunohost.nostr_signerd import load_targets
+        return _notify_targets_payload(_authorized_pubkey())
 
-        admin = _authorized_pubkey()
-        targets = load_targets()
-        return {
-            "remote": len(targets) > 0,
-            "this_admin": any(t.signer_pubkey == admin for t in targets),
-            "targets": [
-                {
-                    "signer_pubkey": t.signer_pubkey,
-                    "relays": list(t.relays),
-                    "label": t.label,
-                    "paired": t.secret is not None,
-                }
-                for t in targets
-            ],
-        }
+    @app.post("/package/notify/signers")
+    def notify_signers_register() -> Any:
+        """Register the caller's own remote signer from a ``bunker://`` URI.
+
+        The node (not this browser) then pushes parked approvals to that
+        signer, so an approval no longer depends on a particular browser
+        session. Only the authenticated admin's own identity may be
+        registered; the signer still prompts its owner for every signature.
+        """
+        from yunohost.nostr_nip46 import Nip46Error, parse_bunker_uri
+        from yunohost.nostr_signerd import add_target_from_bunker_uri
+
+        admin = _authorized_pubkey().lower()
+        body = _json_body()
+        uri = str(body.get("bunker_uri") or "").strip()
+        if not uri:
+            raise ApiError(400, "invalid_body", "bunker_uri is required")
+        try:
+            parsed = parse_bunker_uri(uri)
+        except Nip46Error as exc:
+            raise ApiError(400, "invalid_bunker_uri", str(exc)) from exc
+        if parsed["signer_pubkey"].lower() != admin:
+            raise ApiError(403, "not_authorized", "you can only register your own remote signer")
+        label = body.get("label")
+        add_target_from_bunker_uri(uri, label=str(label) if label else None)
+        return _notify_targets_payload(admin)
+
+    @app.post("/package/notify/signers/pair")
+    def notify_signers_pair_start() -> Any:
+        """Start a node-initiated ``nostrconnect://`` pairing.
+
+        Returns the URI the admin opens/scans in their signer; poll the
+        returned ``pairing_id`` at GET .../pair/{id} until it reports
+        ``paired``. No signer secret is ever stored - the signer authorises
+        the node's own NIP-46 client key.
+        """
+        admin = _authorized_pubkey().lower()
+        body = _json_body()
+        relays = body.get("relays")
+        if not isinstance(relays, list) or not [r for r in relays if r]:
+            from .cli import _notify_outbound_relays
+
+            relays = _notify_outbound_relays() or ["wss://nos.lol"]
+        label = body.get("label")
+        try:
+            pending = _signer_pairing_registry().start(
+                admin_pubkey=admin,
+                relays=[str(r) for r in relays if r],
+                label=str(label) if label else None,
+            )
+        except ValueError as exc:
+            raise ApiError(400, "pairing_unavailable", str(exc)) from exc
+        return pending.to_json()
+
+    @app.get("/package/notify/signers/pair/{pairing_id}")
+    def notify_signers_pair_status(pairing_id: str) -> Any:
+        """Poll a pending pairing; on success the target is already saved."""
+        admin = _authorized_pubkey().lower()
+        pending = _signer_pairing_registry().get(pairing_id)
+        if pending is None or pending.admin_pubkey != admin:
+            raise ApiError(404, "not_found", "no such signer pairing")
+        payload = pending.to_json()
+        if pending.status == "paired":
+            payload.update(_notify_targets_payload(admin))
+        return payload
+
+    @app.delete("/package/notify/signers/{signer_pubkey}")
+    def notify_signers_remove(signer_pubkey: str) -> Any:
+        """Remove the caller's own registered remote signer."""
+        from yunohost.nostr_identity import _parse_pubkey
+        from yunohost.nostr_signerd import remove_target
+
+        admin = _authorized_pubkey().lower()
+        try:
+            pubkey = _parse_pubkey(signer_pubkey).lower()
+        except Exception as exc:  # noqa: BLE001 - any parse failure is a bad input
+            raise ApiError(400, "invalid_pubkey", str(exc)) from exc
+        if pubkey != admin:
+            raise ApiError(403, "not_authorized", "you can only remove your own remote signer")
+        if not remove_target(pubkey):
+            raise ApiError(404, "not_found", "no such remote signer is registered")
+        return {"removed": True, **_notify_targets_payload(admin)}
 
     return app
+
+
+def _notify_targets_payload(admin: str) -> dict[str, Any]:
+    """Serialise registered signer targets for the admin API (no secrets)."""
+    from yunohost.nostr_signerd import load_targets
+
+    admin = str(admin).lower()
+    targets = load_targets()
+    return {
+        "remote": len(targets) > 0,
+        "this_admin": any(t.signer_pubkey == admin for t in targets),
+        "targets": [
+            {
+                "signer_pubkey": t.signer_pubkey,
+                "relays": list(t.relays),
+                "label": t.label,
+                "paired": t.secret is not None,
+            }
+            for t in targets
+        ],
+    }
+
+
+_SIGNER_PAIRING_REGISTRY: Any = None
+
+
+def _signer_pairing_registry() -> Any:
+    """Lazily build the process-wide pairing registry (owns the node client key)."""
+    global _SIGNER_PAIRING_REGISTRY
+    if _SIGNER_PAIRING_REGISTRY is None:
+        from yunohost.nostr_signer_pairing import PairingRegistry
+        from yunohost.nostr_signerd import ensure_client_key
+
+        _SIGNER_PAIRING_REGISTRY = PairingRegistry(client_sk=ensure_client_key())
+    return _SIGNER_PAIRING_REGISTRY
 
 
 def _authorized_pubkey() -> str:
