@@ -97,6 +97,16 @@ class ListPublishArgs(_Strict):
     public: bool = False
 
 
+class PolicyReadArgs(_Strict):
+    family: str
+
+
+class PolicyPublishArgs(_Strict):
+    family: str
+    document: dict[str, Any]
+    revision: int = 1
+
+
 class AppInstallArgs(_Strict):
     app: str
     label: str | None = None
@@ -599,6 +609,49 @@ def _safe_list_publish(**args: Any) -> dict[str, Any]:
     return {"family": family, "event_id": event["id"]}
 
 
+def _safe_policy_read(**args: Any) -> dict[str, Any]:
+    """Read the effective folded view of one WP6 policy family."""
+    family = str(args.pop("family", "")).strip()
+    if args:
+        raise OperationError(f"policy.read does not accept extra args: {sorted(args)}")
+    from nostrhost import policy_projection as pp
+
+    if family == pp.NOTIFICATION_RULES:
+        return {"family": family, "document": pp.notification_rules()}
+    if family == pp.RESTIC_POLICY:
+        return {"family": family, "document": pp.restic_policy()}
+    if family == pp.HOST_POLICY:
+        return {"family": family, "document": pp.host_policy()}
+    raise OperationError(f"unknown policy family: {family}")
+
+
+def _safe_policy_publish(**args: Any) -> dict[str, Any]:
+    """Publish an operator-authored kind-31101 policy declaration (WP6).
+
+    The document carries only desired, non-secret state; Restic repo URL +
+    password and provider tokens are never part of a policy document.
+    """
+    family = str(args.pop("family", "")).strip()
+    document = args.pop("document", None)
+    revision = int(args.pop("revision", 1))
+    if args:
+        raise OperationError(f"policy.publish does not accept extra args: {sorted(args)}")
+    if not isinstance(document, dict):
+        raise OperationError("policy.publish requires a document object")
+    from nostrhost import policy_projection as pp
+
+    if family == pp.NOTIFICATION_RULES:
+        spec = pp.spec_for_name(pp.NOTIFICATION_RULES)
+    elif family == pp.RESTIC_POLICY:
+        spec = pp.spec_for_name(pp.RESTIC_POLICY)
+    elif family == pp.HOST_POLICY:
+        spec = pp.spec_for_name(pp.HOST_POLICY)
+    else:
+        raise OperationError(f"unknown policy family: {family}")
+    event = pp.publish_policy_document(spec, document, revision=revision)
+    return {"family": family, "event_id": event["id"]}
+
+
 def _publish_url_list(kind: int, urls: list[str]) -> dict[str, Any]:
     from yunohost.nostr_identity import _operator_config, _sign_event, publish_to_relay
 
@@ -827,7 +880,35 @@ def _safe_backup_policy_set(
 ) -> dict[str, Any]:
     if extra:
         raise OperationError(f"backup.policy.set does not accept extra args: {sorted(extra)}")
-    from yunohost.nostr_restic import write_restic_policy
+    from yunohost.nostr_restic import load_restic_config, write_restic_policy
+
+    # WP6: the desired Restic policy is now a kind-31101 document; the file is
+    # the rendered compatibility output the projector keeps current. Publish
+    # the document first so an event always records the operator's intent,
+    # then write the rendered file immediately (the daemon may not have folded
+    # the event yet) and keep the timer drop-in in sync.
+    from nostrhost import policy_projection as pp
+
+    try:
+        current = load_restic_config()
+        doc = {
+            "paths": list(current.paths) if current is not None else [],
+            "retention": {str(k): int(v) for k, v in (retention or {}).items() if v}
+            if retention is not None
+            else (dict(current.retention) if current is not None else {}),
+            "schedule": {
+                "enabled": schedule_enabled if schedule_enabled is not None else (current.schedule_enabled if current is not None else False),
+                "calendar": str(schedule_calendar or "") or (current.schedule_calendar if current is not None else "daily"),
+            },
+        }
+        try:
+            spec = pp.spec_for_name(pp.RESTIC_POLICY)
+            pp.publish_policy_document(spec, doc)
+        except Exception:  # noqa: BLE001 - an offline relay must not fail policy.set
+            logger = __import__("logging").getLogger("nostr-native-ops")
+            logger.warning("backup.policy.set: failed to publish 31101 restic-policy; continuing with file write")
+    except Exception:  # noqa: BLE001 - config may be absent; fall through to the file path
+        pass
 
     conf = write_restic_policy(
         retention=retention,
@@ -2593,6 +2674,16 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="list.publish", handler=_safe_list_publish, scope=SCOPE_SETTINGS_WRITE,
         input_model=ListPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
         description="publish an operator-authored host list or settings document (WP4)",
+    ),
+    "policy.read": ToolSpec(
+        name="policy.read", handler=_safe_policy_read, scope=SCOPE_SERVER_READ,
+        require_approval=False, input_model=PolicyReadArgs,
+        description="read the effective view of a kind-31101 policy family (WP6)",
+    ),
+    "policy.publish": ToolSpec(
+        name="policy.publish", handler=_safe_policy_publish, scope=SCOPE_SETTINGS_WRITE,
+        input_model=PolicyPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="publish an operator-authored kind-31101 policy declaration (WP6)",
     ),
     "app.install": ToolSpec(
         name="app.install", handler=_safe_app_install, scope=SCOPE_APPS_INSTALL,

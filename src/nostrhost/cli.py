@@ -589,6 +589,7 @@ POSTINSTALL_UNITS = [
     "nostr-identityd",
     "nostr-permissiond",
     "nostr-listd",
+    "nostr-policyd",
     "nostr-operationsd",
     "nostr-signerd",
     "nostr-securityd",
@@ -1436,13 +1437,43 @@ def _resync_notify_state(*, force: bool = True) -> dict[str, Any]:
     whose config predates a new field (e.g. outbound_relays) is repaired by
     `nostrhost notify sync`. Never raises: notification state can always be
     resynced with `nostrhost notify sync`.
+
+    WP6: also publishes the recipients/rules as a kind-31101
+    ``notification-rules`` document when none has been published yet, so the
+    policy projector can fold them (the local TOML remains the rendered
+    compatibility input the Go daemon reads).
     """
     try:
         from yunohost.nostr_identity import _operator_config, admin_npubs
 
         cfg = _operator_config()
         _render_notify_config(cfg.notifier_sk, cfg.control_relay)
-        return _render_notify_state(admin_npubs(configured_admins=cfg.admins), force=force)
+        state = _render_notify_state(admin_npubs(configured_admins=cfg.admins), force=force)
+        try:
+            from nostrhost import policy_projection as pp
+
+            if not pp.notification_rules():
+                recipients: list[dict[str, Any]] = []
+                rules: list[dict[str, Any]] = []
+                for npub in admin_npubs(configured_admins=cfg.admins):
+                    if not npub:
+                        continue
+                    recipients.append({"npub": npub, "role": "admin"})
+                    rules.append(
+                        {
+                            "recipient": npub,
+                            "classes": ["approval", "operation", "security", "backup"],
+                            "severity_min": "warning",
+                            "delivery": "immediate",
+                            "scope": "external",
+                        }
+                    )
+                if recipients:
+                    pp.import_notification_rules(recipients, rules)
+                    state["policy_document_published"] = True
+        except Exception:  # noqa: BLE001 - document publish is best-effort
+            pass
+        return state
     except Exception as exc:  # noqa: BLE001 - non-fatal; resyncable later
         return {"error": str(exc)}
 

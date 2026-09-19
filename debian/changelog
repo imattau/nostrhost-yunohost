@@ -1,3 +1,19 @@
+yunohost (12.1.41.99) stable; urgency=low
+
+  * WP6: kind-31101 policy declarations become real. New `policy_specs.py`
+    registry + `policy_projection.py` (`nostr-policyd`) fold operator-authored
+    31101 documents and render the compatibility files the existing services
+    read: notification recipients/rules -> the Go notify daemon's
+    recipients.toml/policy.toml, desired Restic schedule/retention/paths ->
+    restic.toml (preserving the root-only repo+password verbatim), and the
+    host operation safeguards -> /etc/nostrhost/policy.toml. Adds the
+    `policy.read`/`policy.publish` operations, seeds an initial
+    notification-rules document from `notify sync`, publishes the desired
+    Restic policy from `backup.policy.set`, adds 31101 to the relay allowlist,
+    and wires the `nostr-policyd` unit + `nostr-projector policy` adapter.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 13:30:00 +0000
+
 yunohost (12.1.41.98) stable; urgency=low
 
   * WP2: shared projector framework (`nostr_projector.py`, `bin/nostr-projector`,

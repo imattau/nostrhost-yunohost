@@ -31,6 +31,8 @@ nostr-permissiond:
   category: admin
 nostr-listd:
   category: admin
+nostr-policyd:
+  category: admin
 nostr-operationsd:
   category: admin
 nostr-securityd:

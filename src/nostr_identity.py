@@ -53,6 +53,10 @@ CONTROL_KINDS = [
     2200, 2201, 2202, 2203, 2204, 2205, 2206, 2210, 2211, 2212, 2213,
     31100, 31102, 30617, 2214,
     10000, 10002, 10006, 30000, 30078,
+    # WP6: kind-31101 policy declarations (notification rules, desired Restic
+    # policy, host operation safeguards). NIP-42 protected by the relay;
+    # this allowlist is what makes the writes actually land.
+    31101,
 ]
 
 VALID_SIGNER_TYPES = ("nip07", "nip46", "passkey", "unknown")

@@ -8,6 +8,7 @@ bin/nostr-identity-admin /usr/bin/
 bin/nostr-identityd /usr/bin/
 bin/nostr-permissiond /usr/bin/
 bin/nostr-listd /usr/bin/
+bin/nostr-policyd /usr/bin/
 bin/nostr-projector /usr/bin/
 bin/nostr-opctl /usr/bin/
 bin/nostr-operationsd /usr/bin/
@@ -30,6 +31,7 @@ conf/* /usr/share/yunohost/conf/
 conf/yunohost/nostr-identityd.service /lib/systemd/system/
 conf/yunohost/nostr-permissiond.service /lib/systemd/system/
 conf/yunohost/nostr-listd.service /lib/systemd/system/
+conf/yunohost/nostr-policyd.service /lib/systemd/system/
 conf/yunohost/nostr-operationsd.service /lib/systemd/system/
 conf/yunohost/nostr-signerd.service /lib/systemd/system/
 conf/yunohost/nostr-securityd.service /lib/systemd/system/

@@ -10,7 +10,8 @@ and status for the host's projections without touching a running daemon.
     nostr-projector shadow <name> --to <path> [--json]
 
 Projections: permissions (NIP-51 kind 30000), identity (kind 31102),
-capabilities (kinds 31100/27236/27237).
+capabilities (kinds 31100/27236/27237), lists (NIP-51/NIP-65/NIP-78),
+policy (kind 31101).
 """
 
 from __future__ import annotations
@@ -107,11 +108,24 @@ def _lists_adapter(cfg: Any) -> _Adapter:
     )
 
 
+def _policy_adapter(cfg: Any) -> _Adapter:
+    from yunohost import nostr_policyd
+    from yunohost.nostrhost.policy_projection import POLICY_KINDS, PolicyProjector
+
+    return _Adapter(
+        name=PolicyProjector.name,
+        rebuild=lambda c: nostr_policyd.rebuild(c.control_relay, admin_pubkeys=c.admins),
+        projector_factory=lambda c: PolicyProjector(admin_pubkeys=c.admins),
+        kinds=POLICY_KINDS,
+    )
+
+
 _ADAPTERS = {
     nostr_permissiond.PROJECTION_NAME: _permission_adapter,
     "identity": _identity_adapter,
     "capabilities": _capability_adapter,
     "lists": _lists_adapter,
+    "policy": _policy_adapter,
 }
 
 
