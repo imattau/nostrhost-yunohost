@@ -132,18 +132,24 @@ def test_render_notification_files(tmp_path, monkeypatch):
         coordinate=f"{HOST_NAMESPACE}:notification-rules",
         key=f"{KIND_TRUST_POLICY}:{HOST_NAMESPACE}:notification-rules",
         value={
-            "recipients": [{"npub": "npub1admin", "role": "admin"}],
-            "rules": [{"recipient": "npub1admin", "classes": ["approval", "security"], "severity_min": "warning"}],
+            "recipients": [{"npub": "npub107dr02g97fvwmrgvg3309wrc6mqxhu5pkkvy2jvzy9nm46z2dysset97ld", "role": "admin"}],
+            "rules": [
+                {
+                    "recipient": "npub107dr02g97fvwmrgvg3309wrc6mqxhu5pkkvy2jvzy9nm46z2dysset97ld",
+                    "classes": ["approval", "security"],
+                    "severity_min": "warning",
+                }
+            ],
         },
     )
     out = render_notification_files(entry)
     assert out["recipients"] == str(tmp_path / "recipients.toml")
     recipients = tomllib.loads((tmp_path / "recipients.toml").read_text())
     policy = tomllib.loads((tmp_path / "policy.toml").read_text())
-    assert recipients["recipient"] == [{"npub": "npub1admin", "role": "admin"}]
+    assert recipients["recipient"] == [{"npub": "npub107dr02g97fvwmrgvg3309wrc6mqxhu5pkkvy2jvzy9nm46z2dysset97ld", "role": "admin"}]
     assert policy["rule"] == [
         {
-            "recipient": "npub1admin",
+            "recipient": "npub107dr02g97fvwmrgvg3309wrc6mqxhu5pkkvy2jvzy9nm46z2dysset97ld",
             "classes": ["approval", "security"],
             "severity_min": "warning",
             "delivery": "immediate",
@@ -212,6 +218,21 @@ def test_notify_enum_violation_is_quarantined(tmp_path):
         pk,
         f"{HOST_NAMESPACE}:notification-rules",
         value={"recipients": [], "rules": [{"recipient": "npub1x", "classes": ["approval"], "delivery": "telegram"}]},
+    )
+    result = p.apply(event)
+    assert result.accepted is False
+    assert p.quarantined()
+    assert notification_rules(p.store) == {}
+
+
+def test_notify_invalid_npub_is_quarantined(tmp_path):
+    sk, pk = new_key()
+    p = _projector(tmp_path, pk)
+    event = _event(
+        sk,
+        pk,
+        f"{HOST_NAMESPACE}:notification-rules",
+        value={"recipients": [{"npub": "npub1dummy", "role": "admin"}], "rules": []},
     )
     result = p.apply(event)
     assert result.accepted is False

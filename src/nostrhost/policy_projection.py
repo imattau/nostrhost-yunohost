@@ -296,10 +296,17 @@ def _validate_notify(value: dict[str, Any]) -> None:
     """Reject notification-rules documents the notify daemon would refuse.
 
     The Go notify loader (``internal/notify``) hard-fails on ``delivery`` /
-    ``scope`` / ``severity_min`` values outside its fixed enum sets and on
-    rules with no classes; validate here so a bad document is quarantined at
-    fold time instead of writing a file that takes the service down.
+    ``scope`` / ``severity_min`` values outside its fixed enum sets, on rules
+    with no classes, and on recipients whose npub does not decode; validate
+    here so a bad document is quarantined at fold time instead of writing a
+    file that takes the service down.
     """
+    for recipient in value.get("recipients") or []:
+        if not isinstance(recipient, dict):
+            raise ValueError("notification-rules: each recipient must be an object")
+        npub = str(recipient.get("npub") or "")
+        if not npub or not _is_valid_npub(npub):
+            raise ValueError(f"notification-rules: invalid recipient npub {npub!r}")
     for rule in value.get("rules") or []:
         if not isinstance(rule, dict):
             raise ValueError("notification-rules: each rule must be an object")
@@ -318,6 +325,20 @@ def _validate_notify(value: dict[str, Any]) -> None:
         severity = str(rule.get("severity_min") or "warning")
         if severity not in _NOTIFY_SEVERITY:
             raise ValueError(f"notification-rules: severity_min must be one of {sorted(_NOTIFY_SEVERITY)}")
+
+
+def _is_valid_npub(value: str) -> bool:
+    """True when ``value`` decodes as a valid bech32 npub."""
+    if not value.startswith("npub1"):
+        return False
+    try:
+        from nostrhost_auth.identity.npub import npub_to_hex
+    except ImportError:  # pragma: no cover - auth lib not installed
+        return len(value) >= 59
+    try:
+        return bool(npub_to_hex(value))
+    except Exception:  # noqa: BLE001 - any decode failure is an invalid npub
+        return False
 
 
 def render_notification_files(entry: PolicyEntry) -> dict[str, Any]:
