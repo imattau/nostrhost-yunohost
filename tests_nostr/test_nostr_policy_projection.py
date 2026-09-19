@@ -122,6 +122,8 @@ def test_missing_schema_is_quarantined(tmp_path):
 
 
 def test_render_notification_files(tmp_path, monkeypatch):
+    import tomllib
+
     from yunohost.nostrhost.policy_projection import PolicyEntry
 
     monkeypatch.setattr("yunohost.nostrhost.policy_projection.NOTIFY_RECIPIENTS_PATH", str(tmp_path / "recipients.toml"))
@@ -136,11 +138,18 @@ def test_render_notification_files(tmp_path, monkeypatch):
     )
     out = render_notification_files(entry)
     assert out["recipients"] == str(tmp_path / "recipients.toml")
-    recipients = (tmp_path / "recipients.toml").read_text()
-    policy = (tmp_path / "policy.toml").read_text()
-    assert 'npub = "npub1admin"' in recipients
-    assert 'recipient = "npub1admin"' in policy
-    assert 'classes = ["approval", "security"]' in policy
+    recipients = tomllib.loads((tmp_path / "recipients.toml").read_text())
+    policy = tomllib.loads((tmp_path / "policy.toml").read_text())
+    assert recipients["recipient"] == [{"npub": "npub1admin", "role": "admin"}]
+    assert policy["rule"] == [
+        {
+            "recipient": "npub1admin",
+            "classes": ["approval", "security"],
+            "severity_min": "warning",
+            "delivery": "immediate",
+            "scope": "external",
+        }
+    ]
 
 
 def test_render_restic_preserves_secrets(tmp_path, monkeypatch):
@@ -169,6 +178,8 @@ def test_render_restic_preserves_secrets(tmp_path, monkeypatch):
 
 
 def test_render_host_policy(tmp_path, monkeypatch):
+    import tomllib
+
     from yunohost.nostrhost.policy_projection import PolicyEntry
 
     monkeypatch.setattr("yunohost.nostrhost.policy_projection.HOST_POLICY_PATH", str(tmp_path / "policy.toml"))
@@ -184,11 +195,28 @@ def test_render_host_policy(tmp_path, monkeypatch):
     )
     out = render_host_policy(entry)
     assert out["written"] is True
-    text = (tmp_path / "policy.toml").read_text()
-    assert "[policy.apps.remove]" in text
-    assert "require_confirmation = true" in text
-    assert 'max_backup_age = "24h"' in text
-    assert "[policy.firewall.write]" in text
+    data = tomllib.loads((tmp_path / "policy.toml").read_text())
+    assert data["policy"]["apps.remove"] == {
+        "require_confirmation": True,
+        "require_backup": True,
+        "max_backup_age": "24h",
+    }
+    assert data["policy"]["firewall.write"] == {"require_confirmation": True, "require_owner_signature": True}
+
+
+def test_notify_enum_violation_is_quarantined(tmp_path):
+    sk, pk = new_key()
+    p = _projector(tmp_path, pk)
+    event = _event(
+        sk,
+        pk,
+        f"{HOST_NAMESPACE}:notification-rules",
+        value={"recipients": [], "rules": [{"recipient": "npub1x", "classes": ["approval"], "delivery": "telegram"}]},
+    )
+    result = p.apply(event)
+    assert result.accepted is False
+    assert p.quarantined()
+    assert notification_rules(p.store) == {}
 
 
 # --------------------------------------------------------------------------- #

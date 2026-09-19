@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from yunohost.nostr_projector import _atomic_write
 
 logger = logging.getLogger("nostr-list-render")
 
@@ -99,17 +100,4 @@ def render_portal_settings(
             continue
         merged = dict(current)
         merged.update(clean)
-        _atomic_write_json(path, merged)
-
-
-def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    payload = json.dumps(data, sort_keys=True, indent=4).encode() + b"\n"
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".portal-")
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        _atomic_write(path, json.dumps(merged, sort_keys=True, indent=4) + "\n", mode=0o644)

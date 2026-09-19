@@ -1,3 +1,17 @@
+yunohost (12.1.41.100) stable; urgency=low
+
+  * WP6 follow-up cleanup: render the notify recipients/policy and host-policy
+    compatibility TOML with `tomli_w` instead of hand-rolled string building,
+    validate the notify `delivery`/`scope`/`severity_min` enums at fold time so
+    a bad 31101 document is quarantined rather than breaking the notify
+    daemon, reuse the framework's crash-safe `_atomic_write` everywhere, and
+    extract the shared `JsonCoordinateStore`/`StoreProjector` base shared by
+    the list and policy projections (dropping the duplicated atomic-write and
+    projector lifecycle boilerplate). `verify`/`rebuild` clones now clean up
+    their temporary stores.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 14:30:00 +0000
+
 yunohost (12.1.41.99) stable; urgency=low
 
   * WP6: kind-31101 policy declarations become real. New `policy_specs.py`

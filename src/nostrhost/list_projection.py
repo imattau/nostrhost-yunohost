@@ -26,16 +26,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from yunohost.nostr_projector import (
     DEFAULT_CURSOR_DIR,
-    Projector,
+    JsonCoordinateStore,
     ProjectionResult,
+    StoreProjector,
 )
 
 from nostrhost.events import _d_tag
@@ -105,41 +104,13 @@ class ListEntry:
         )
 
 
-class ListStore:
+class ListStore(JsonCoordinateStore):
     """Atomic JSON persistence for folded list/preference coordinates."""
 
+    entry_cls = ListEntry
+
     def __init__(self, path: Path = DEFAULT_LIST_STORE) -> None:
-        self.path = Path(path)
-        self._entries: dict[str, ListEntry] = {}
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            raw = json.loads(self.path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return
-        for key, info in (raw or {}).items():
-            try:
-                self._entries[key] = ListEntry.from_dict(info)
-            except (TypeError, ValueError):
-                logger.warning("ignoring malformed stored list entry %s", key)
-
-    def _save(self) -> None:
-        payload = {key: entry.as_dict() for key, entry in self._entries.items()}
-        data = json.dumps(payload, indent=1, sort_keys=True).encode() + b"\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".lists-")
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-
-    def get(self, key: str) -> ListEntry | None:
-        return self._entries.get(key)
+        super().__init__(path)
 
     def get_by_coordinate(self, kind: int, coordinate: str | None) -> ListEntry | None:
         return self._entries.get(f"{kind}:{coordinate or ''}")
@@ -163,9 +134,6 @@ class ListStore:
 
     def entries_for(self, kind: int) -> list[ListEntry]:
         return [entry for entry in self._entries.values() if entry.kind == kind]
-
-    def all_entries(self) -> list[ListEntry]:
-        return list(self._entries.values())
 
 
 def _tag_values(event: dict[str, Any], name: str) -> list[str]:
@@ -202,11 +170,12 @@ def _spec_for_event(event: dict[str, Any]) -> ListSpec | None:
     return None
 
 
-class ListProjector(Projector):
+class ListProjector(StoreProjector):
     """Fold NIP-51/NIP-78 events into :class:`ListStore` + compatibility files."""
 
     name = PROJECTION_NAME
     schema = 1
+    _clone_prefix = "lists-verify-"
 
     def __init__(
         self,
@@ -286,33 +255,14 @@ class ListProjector(Projector):
             author=author,
         )
 
-    def clone(self) -> "ListProjector":
-        import tempfile as _tempfile
-
-        tmp = _tempfile.NamedTemporaryFile(prefix="lists-verify-", suffix=".json", delete=False)
-        tmp.close()
+    def _clone_for(self, path: Path) -> "ListProjector":
         return ListProjector(
-            store=ListStore(Path(tmp.name)),
+            store=ListStore(path),
             admin_pubkeys=self.admin_pubkeys,
             validate_self_service=self._validate_self_service,
             on_change=None,
             cursor_dir=str(self.cursor_dir),
         )
-
-    def current(self) -> str:
-        return json.dumps(self._digest(), sort_keys=True)
-
-    def render(self, state: Any) -> str | None:
-        return json.dumps(self._digest(), sort_keys=True)
-
-    def commit(self, candidate: str) -> None:  # pragma: no cover - store owns the write
-        raise NotImplementedError("list projection is written by ListStore.put")
-
-    def _digest(self) -> dict[str, Any]:
-        return {
-            key: entry.as_dict()
-            for key, entry in sorted(self.store._entries.items())
-        }
 
 
 # --------------------------------------------------------------------------- #

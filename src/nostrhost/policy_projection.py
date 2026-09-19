@@ -27,16 +27,19 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import tomli_w
+
 from yunohost.nostr_projector import (
     DEFAULT_CURSOR_DIR,
-    Projector,
+    JsonCoordinateStore,
     ProjectionResult,
+    StoreProjector,
+    _atomic_write,
 )
 
 from nostrhost.events import _d_tag
@@ -112,41 +115,13 @@ class PolicyEntry:
         )
 
 
-class PolicyStore:
+class PolicyStore(JsonCoordinateStore):
     """Atomic JSON persistence for folded policy coordinates."""
 
+    entry_cls = PolicyEntry
+
     def __init__(self, path: Path = DEFAULT_POLICY_STORE) -> None:
-        self.path = Path(path)
-        self._entries: dict[str, PolicyEntry] = {}
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            raw = json.loads(self.path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return
-        for key, info in (raw or {}).items():
-            try:
-                self._entries[key] = PolicyEntry.from_dict(info)
-            except (TypeError, ValueError):
-                logger.warning("ignoring malformed stored policy entry %s", key)
-
-    def _save(self) -> None:
-        payload = {key: entry.as_dict() for key, entry in self._entries.items()}
-        data = json.dumps(payload, indent=1, sort_keys=True).encode() + b"\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".policy-")
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-
-    def get(self, key: str) -> PolicyEntry | None:
-        return self._entries.get(key)
+        super().__init__(path)
 
     def get_by_coordinate(self, coordinate: str) -> PolicyEntry | None:
         return self._entries.get(f"{KIND_TRUST_POLICY}:{coordinate}")
@@ -177,9 +152,6 @@ class PolicyStore:
         self._save()
         return True
 
-    def all_entries(self) -> list[PolicyEntry]:
-        return list(self._entries.values())
-
     def enabled_entries(self) -> list[PolicyEntry]:
         return [entry for entry in self._entries.values() if entry.enabled]
 
@@ -208,11 +180,12 @@ def _parse_body(event: dict[str, Any]) -> tuple[dict[str, Any], int, int, bool]:
     return value, schema, revision, enabled
 
 
-class PolicyProjector(Projector):
+class PolicyProjector(StoreProjector):
     """Fold kind-31101 declarations into :class:`PolicyStore` + rendered files."""
 
     name = PROJECTION_NAME
     schema = 1
+    _clone_prefix = "policy-verify-"
 
     def __init__(
         self,
@@ -246,6 +219,8 @@ class PolicyProjector(Projector):
         spec = validated
         try:
             value, schema, revision, enabled = _parse_body(event)
+            if spec.name == NOTIFICATION_RULES:
+                _validate_notify(value)
         except ValueError as exc:
             self.quarantine(event, str(exc))
             return ProjectionResult(accepted=False, reason="invalid")
@@ -272,32 +247,13 @@ class PolicyProjector(Projector):
         self._advance(event)
         return ProjectionResult(accepted=True, changed=stored)
 
-    def clone(self) -> "PolicyProjector":
-        import tempfile as _tempfile
-
-        tmp = _tempfile.NamedTemporaryFile(prefix="policy-verify-", suffix=".json", delete=False)
-        tmp.close()
+    def _clone_for(self, path: Path) -> "PolicyProjector":
         return PolicyProjector(
-            store=PolicyStore(Path(tmp.name)),
+            store=PolicyStore(path),
             admin_pubkeys=self.admin_pubkeys,
             on_change=None,
             cursor_dir=str(self.cursor_dir),
         )
-
-    def current(self) -> str:
-        return json.dumps(self._digest(), sort_keys=True)
-
-    def render(self, state: Any) -> str | None:
-        return json.dumps(self._digest(), sort_keys=True)
-
-    def commit(self, candidate: str) -> None:  # pragma: no cover - store owns the write
-        raise NotImplementedError("policy projection is written by PolicyStore.put")
-
-    def _digest(self) -> dict[str, Any]:
-        return {
-            key: entry.as_dict()
-            for key, entry in sorted(self.store._entries.items())
-        }
 
 
 # --------------------------------------------------------------------------- #
@@ -331,44 +287,73 @@ def host_policy(store: PolicyStore | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # renderers: write the compatibility files the existing services read
 
+_NOTIFY_DELIVERY = frozenset({"immediate", "summary"})
+_NOTIFY_SCOPE = frozenset({"local-only", "external"})
+_NOTIFY_SEVERITY = frozenset({"info", "warning", "critical"})
+
+
+def _validate_notify(value: dict[str, Any]) -> None:
+    """Reject notification-rules documents the notify daemon would refuse.
+
+    The Go notify loader (``internal/notify``) hard-fails on ``delivery`` /
+    ``scope`` / ``severity_min`` values outside its fixed enum sets and on
+    rules with no classes; validate here so a bad document is quarantined at
+    fold time instead of writing a file that takes the service down.
+    """
+    for rule in value.get("rules") or []:
+        if not isinstance(rule, dict):
+            raise ValueError("notification-rules: each rule must be an object")
+        recipient = str(rule.get("recipient") or "")
+        if not recipient:
+            raise ValueError("notification-rules: a rule must name a recipient")
+        classes = rule.get("classes") or ["approval", "operation", "security", "backup"]
+        if not isinstance(classes, list) or not classes:
+            raise ValueError("notification-rules: a rule must have at least one class")
+        delivery = str(rule.get("delivery") or "immediate")
+        if delivery not in _NOTIFY_DELIVERY:
+            raise ValueError(f"notification-rules: delivery must be one of {sorted(_NOTIFY_DELIVERY)}")
+        scope = str(rule.get("scope") or "external")
+        if scope not in _NOTIFY_SCOPE:
+            raise ValueError(f"notification-rules: scope must be one of {sorted(_NOTIFY_SCOPE)}")
+        severity = str(rule.get("severity_min") or "warning")
+        if severity not in _NOTIFY_SEVERITY:
+            raise ValueError(f"notification-rules: severity_min must be one of {sorted(_NOTIFY_SEVERITY)}")
+
 
 def render_notification_files(entry: PolicyEntry) -> dict[str, Any]:
     """Write recipients.toml + policy.toml for the Go notify daemon."""
     value = entry.value or {}
-    recipients = value.get("recipients") or []
-    rules = value.get("rules") or []
+    _validate_notify(value)
 
-    recipients_lines = ["# notification recipients (rendered from kind-31101 notification-rules)\n"]
-    for item in recipients:
-        if not isinstance(item, dict):
-            continue
-        npub = str(item.get("npub") or "")
-        if not npub:
-            continue
-        recipients_lines.append("\n[[recipient]]\n")
-        recipients_lines.append(f'npub = "{npub}"\n')
-        recipients_lines.append(f'role = "{item.get("role") or "admin"}"\n')
-
-    policy_lines = ["# notification policy (rendered from kind-31101 notification-rules)\n"]
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        recipient = str(rule.get("recipient") or "")
-        if not recipient:
-            continue
-        classes = rule.get("classes") or ["approval", "operation", "security", "backup"]
-        classes = ", ".join(f'"{c}"' for c in classes)
-        policy_lines.append("\n[[rule]]\n")
-        policy_lines.append(f'recipient = "{recipient}"\n')
-        policy_lines.append(f"classes = [{classes}]\n")
-        policy_lines.append(f'severity_min = "{rule.get("severity_min") or "warning"}"\n')
-        policy_lines.append(f'delivery = "{rule.get("delivery") or "immediate"}"\n')
-        policy_lines.append(f'scope = "{rule.get("scope") or "external"}"\n')
+    recipients = [
+        {"npub": str(item["npub"]), "role": str(item.get("role") or "admin")}
+        for item in (value.get("recipients") or [])
+        if isinstance(item, dict) and item.get("npub")
+    ]
+    rules = [
+        {
+            "recipient": str(rule["recipient"]),
+            "classes": [str(c) for c in (rule.get("classes") or ["approval", "operation", "security", "backup"])],
+            "severity_min": str(rule.get("severity_min") or "warning"),
+            "delivery": str(rule.get("delivery") or "immediate"),
+            "scope": str(rule.get("scope") or "external"),
+        }
+        for rule in (value.get("rules") or [])
+        if isinstance(rule, dict) and rule.get("recipient")
+    ]
 
     recipients_path = Path(NOTIFY_RECIPIENTS_PATH)
     policy_path = Path(NOTIFY_POLICY_PATH)
-    _atomic_write(recipients_path, "".join(recipients_lines))
-    _atomic_write(policy_path, "".join(policy_lines))
+    _atomic_write(
+        recipients_path,
+        "# notification recipients (rendered from kind-31101 notification-rules)\n"
+        + (f"\n{tomli_w.dumps({'recipient': recipients})}" if recipients else ""),
+    )
+    _atomic_write(
+        policy_path,
+        "# notification policy (rendered from kind-31101 notification-rules)\n"
+        + (f"\n{tomli_w.dumps({'rule': rules})}" if rules else ""),
+    )
     return {"recipients": str(recipients_path), "policy": str(policy_path)}
 
 
@@ -397,8 +382,6 @@ def render_restic_desired(entry: PolicyEntry) -> dict[str, Any]:
         }
     # Secrets are preserved because they are never read from the document;
     # they simply stay in the existing TOML table and are re-serialised.
-    import tomli_w
-
     _atomic_write(path, tomli_w.dumps(conf))
     return {"written": True}
 
@@ -409,35 +392,33 @@ def render_host_policy(entry: PolicyEntry) -> dict[str, Any]:
     overrides = value.get("policy")
     if not isinstance(overrides, dict) or not overrides:
         return {"written": False, "reason": "host-policy document carries no [policy.*] overrides"}
-    lines = ["# host operation safeguards (rendered from kind-31101 host-policy)\n"]
+    table: dict[str, dict[str, Any]] = {}
     for key, rule in overrides.items():
         if not isinstance(rule, dict):
             continue
-        lines.append(f"\n[policy.{key}]\n")
-        for toml_key, candidate in rule.items():
-            if toml_key not in ("require_confirmation", "require_backup", "require_owner_signature"):
-                continue
-            lines.append(f"{toml_key} = {str(bool(candidate)).lower()}\n")
+        clean: dict[str, Any] = {}
+        for toml_key in ("require_confirmation", "require_backup", "require_owner_signature"):
+            if toml_key in rule:
+                clean[toml_key] = bool(rule[toml_key])
         if "minimum_free_space" in rule:
-            lines.append(f'minimum_free_space = "{rule["minimum_free_space"]}"\n')
+            clean["minimum_free_space"] = str(rule["minimum_free_space"])
         if "max_backup_age" in rule:
-            lines.append(f'max_backup_age = "{rule["max_backup_age"]}"\n')
+            clean["max_backup_age"] = str(rule["max_backup_age"])
+        table[key] = clean
     path = Path(HOST_POLICY_PATH)
-    _atomic_write(path, "".join(lines))
+    _atomic_write(
+        path,
+        "# host operation safeguards (rendered from kind-31101 host-policy)\n"
+        + (f"\n{tomli_w.dumps({'policy': table})}" if table else ""),
+    )
     return {"written": True}
 
 
-def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".policy-render-")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(content)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+_RENDERERS: dict[str, Callable[[PolicyEntry], dict[str, Any] | None]] = {
+    "notify": render_notification_files,
+    "restic": render_restic_desired,
+    "host-policy": render_host_policy,
+}
 
 
 def render_entry(entry: PolicyEntry) -> dict[str, Any] | None:
@@ -446,16 +427,10 @@ def render_entry(entry: PolicyEntry) -> dict[str, Any] | None:
     if spec is None or spec.renderer is None:
         return None
     try:
-        if spec.renderer == "notify":
-            return render_notification_files(entry)
-        if spec.renderer == "restic":
-            return render_restic_desired(entry)
-        if spec.renderer == "host-policy":
-            return render_host_policy(entry)
+        return _RENDERERS[spec.renderer](entry)
     except Exception as exc:  # noqa: BLE001 - a render failure must not kill the loop
         logger.error("policy render %s failed: %s", spec.name, exc)
         raise
-    return None
 
 
 # --------------------------------------------------------------------------- #

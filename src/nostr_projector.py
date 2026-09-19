@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -260,6 +261,91 @@ class Projector:
     def health(self) -> ProjectionHealth:
         self.health_state.lag_seconds = max(0.0, time.time() - self.health_state.applied_at) if self.health_state.applied_at else 0.0
         return self.health_state
+
+
+class JsonCoordinateStore:
+    """Atomic JSON store for folded projection coordinates (WP4/WP6).
+
+    Shared by the list and policy projections: entries are keyed by their
+    stable event key and persisted atomically (0o600) via :func:`_atomic_write`.
+    Which event wins for a key is the fold rule, implemented by each
+    subclass's :meth:`put`; the base supplies load/save/get/all_entries.
+    """
+
+    #: Entry type; must provide ``from_dict(dict)`` and ``as_dict()``.
+    entry_cls: type | None = None
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._entries: dict[str, Any] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if self.entry_cls is None:  # pragma: no cover - subclass must set it
+            raise TypeError(f"{type(self).__name__} requires entry_cls")
+        for key, info in (raw or {}).items():
+            try:
+                self._entries[key] = self.entry_cls.from_dict(info)
+            except (TypeError, ValueError):
+                logger.warning("ignoring malformed stored entry %s", key)
+
+    def _save(self) -> None:
+        payload = {key: entry.as_dict() for key, entry in self._entries.items()}
+        _atomic_write(self.path, json.dumps(payload, indent=1, sort_keys=True) + "\n", mode=0o600)
+
+    def get(self, key: str) -> Any | None:
+        return self._entries.get(key)
+
+    def all_entries(self) -> list[Any]:
+        return list(self._entries.values())
+
+
+class StoreProjector(Projector):
+    """Store-backed projector plumbing shared by list/policy projections.
+
+    Provides the ``current``/``render``/``commit``/``_digest``/``clone``
+    boilerplate on top of a :class:`JsonCoordinateStore`; subclasses keep
+    their own validation, fold rule and renderer dispatch, and implement
+    :meth:`_clone_for` to build a fresh, empty projector of the same kind.
+    """
+
+    #: Prefix for the clone's temporary directory (per-subclass).
+    _clone_prefix = "verify-"
+    #: Backing :class:`JsonCoordinateStore` (set by the subclass __init__).
+    store: JsonCoordinateStore
+    #: Temp dir owned by the most recent clone; released on garbage collection.
+    _tmpdir: tempfile.TemporaryDirectory[str] | None = None
+
+    def clone(self) -> "StoreProjector":
+        """Return a fresh, empty projector refolding into a throwaway store.
+
+        The clone owns a private :class:`tempfile.TemporaryDirectory` that is
+        released when the clone is garbage-collected, so ``verify`` no longer
+        leaks a ``.json`` file per run.
+        """
+        tmp = tempfile.TemporaryDirectory(prefix=f"{self._clone_prefix}-")
+        clone = self._clone_for(Path(tmp.name) / "clone.json")
+        clone._tmpdir = tmp  # keep the temp dir alive with the clone
+        return clone
+
+    def _clone_for(self, path: Path) -> "StoreProjector":
+        raise NotImplementedError
+
+    def current(self) -> str:
+        return json.dumps(self._digest(), sort_keys=True)
+
+    def render(self, state: Any) -> str | None:
+        return json.dumps(self._digest(), sort_keys=True)
+
+    def commit(self, candidate: str) -> None:  # pragma: no cover - store owns the write
+        raise NotImplementedError(f"{type(self).__name__} projection is written by its store")
+
+    def _digest(self) -> dict[str, Any]:
+        return {key: entry.as_dict() for key, entry in sorted(self.store._entries.items())}
 
 
 def _event_revision(event: dict[str, Any]) -> str:

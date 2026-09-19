@@ -115,8 +115,9 @@ def spec_for_name(name: str) -> PolicySpec:
         raise KeyError(f"unknown policy family: {name}") from exc
 
 
+#: Reverse index: ``d`` coordinate -> spec (built once at import).
+_SPECS_BY_COORDINATE: dict[str, PolicySpec] = {spec.d: spec for spec in SPECS.values()}
+
+
 def spec_for_coordinate(coordinate: str | None) -> PolicySpec | None:
-    for spec in SPECS.values():
-        if spec.owns_coordinate(coordinate):
-            return spec
-    return None
+    return _SPECS_BY_COORDINATE.get(coordinate or "")
