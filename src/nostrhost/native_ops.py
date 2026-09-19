@@ -18,7 +18,6 @@ import datetime as _dt
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -81,6 +80,21 @@ def _catalog_relay_arg(explicit: str = "") -> str:
 
 class SystemStatusArgs(_Strict):
     pass
+
+
+class ProjectionStatusArgs(_Strict):
+    name: str | None = None
+
+
+class ListReadArgs(_Strict):
+    family: str
+
+
+class ListPublishArgs(_Strict):
+    family: str
+    values: list[str] | None = None
+    settings: dict[str, Any] | None = None
+    public: bool = False
 
 
 class AppInstallArgs(_Strict):
@@ -500,6 +514,111 @@ class AuditGetArgs(_Strict):
 # --------------------------------------------------------------------------- #
 # handlers
 
+def _safe_projection_status(**args: Any) -> dict[str, Any]:
+    """Read-only projection health: applied revision, freshness, quarantine.
+
+    Reads the durable cursor files under /var/lib/nostrhost/projections (WP2),
+    so it works cross-process without calling into the daemons.
+    """
+    name = args.pop("name", None)
+    if args:
+        raise OperationError(f"projection.status does not accept extra args: {sorted(args)}")
+    from yunohost.nostr_projector import read_status_dir
+
+    rows = read_status_dir()
+    if name is not None:
+        rows = [row for row in rows if row["name"] == name]
+    return {"projections": rows}
+
+
+_LIST_FAMILIES = {
+    "trusted-publishers",
+    "approved-repositories",
+    "blocked-relays",
+    "blocked-site-owners",
+    "preferred-relays",
+    "portal-settings",
+}
+
+
+def _safe_list_read(**args: Any) -> dict[str, Any]:
+    """Read the effective view of one WP4 list/preference family."""
+    family = str(args.pop("family", "")).strip()
+    if args:
+        raise OperationError(f"list.read does not accept extra args: {sorted(args)}")
+    if family not in _LIST_FAMILIES:
+        raise OperationError(f"unknown list family: {family}")
+    from nostrhost import list_projection as lp
+
+    if family == "trusted-publishers":
+        return {"family": family, "entries": lp.trusted_publishers()}
+    if family == "approved-repositories":
+        return {"family": family, "entries": lp.approved_repositories()}
+    if family == "blocked-relays":
+        return {"family": family, "entries": lp.blocked_relays()}
+    if family == "blocked-site-owners":
+        return {"family": family, "entries": lp.blocked_site_owners()}
+    if family == "preferred-relays":
+        return {"family": family, "entries": lp.preferred_relays()}
+    return {"family": family, "settings": lp.portal_settings()}
+
+
+def _safe_list_publish(**args: Any) -> dict[str, Any]:
+    """Publish an operator-authored host list / settings document (WP4).
+
+    Only the operator-owned families are publishable here; the per-user
+    preference family is self-service on the portal and is deliberately not
+    reachable through the operator chain, so this tool can never act on a
+    user's behalf.
+    """
+    family = str(args.pop("family", "")).strip()
+    values = args.pop("values", None)
+    settings = args.pop("settings", None)
+    args.pop("public", None)
+    if args:
+        raise OperationError(f"list.publish does not accept extra args: {sorted(args)}")
+    from nostrhost import list_projection as lp
+
+    if family == "trusted-publishers":
+        event = lp.import_trusted_publishers([str(v) for v in (values or [])])
+    elif family == "approved-repositories":
+        event = lp.import_approved_repositories([str(v) for v in (values or [])])
+    elif family in ("blocked-relays", "blocked-site-owners"):
+        from nostrhost.nsites import blocklist
+
+        if family == "blocked-site-owners":
+            result = blocklist.publish_blocklist([str(v) for v in (values or [])])
+        else:
+            result = _publish_url_list(10006, [str(v) for v in (values or [])])
+        return {"family": family, "result": result}
+    elif family == "portal-settings":
+        result = _publish_settings(30078, "nostrhost:portal-settings", dict(settings or {}))
+        return {"family": family, "result": result}
+    else:
+        raise OperationError(f"list family is not operator-publishable: {family}")
+    return {"family": family, "event_id": event["id"]}
+
+
+def _publish_url_list(kind: int, urls: list[str]) -> dict[str, Any]:
+    from yunohost.nostr_identity import _operator_config, _sign_event, publish_to_relay
+
+    cfg = _operator_config(None, None)
+    event = _sign_event(cfg.operator_sk, cfg.operator_pubkey, kind, "", [["r", url] for url in sorted(set(urls))])
+    publish_to_relay(cfg.control_relay, event)
+    return {"event_id": event["id"], "urls": sorted(set(urls))}
+
+
+def _publish_settings(kind: int, coordinate: str, settings: dict[str, Any]) -> dict[str, Any]:
+    import json as _json
+
+    from yunohost.nostr_identity import _operator_config, _sign_event, publish_to_relay
+
+    cfg = _operator_config(None, None)
+    event = _sign_event(cfg.operator_sk, cfg.operator_pubkey, kind, _json.dumps(settings), [["d", coordinate]])
+    publish_to_relay(cfg.control_relay, event)
+    return {"event_id": event["id"], "coordinate": coordinate}
+
+
 def _safe_system_status(**args: Any) -> dict[str, Any]:
     """Read-only host snapshot: versions, platform, load average."""
     if args:
@@ -890,14 +1009,31 @@ CATALOG_STATE = os.environ.get("NOSTRHOST_CATALOG_STATE", "/var/lib/nostrhost/ca
 
 
 def _trusted_publishers() -> str:
-    """Comma-separated trusted publisher pubkeys: catalogue.env first, else the
-    node's own publisher key (operator.toml)."""
+    """Comma-separated trusted publisher pubkeys.
+
+    WP4: the authoritative source is the ``trusted-publishers`` people-set
+    projected into ``/etc/nostrhost/lists.json`` (and rendered into
+    ``catalogue.env``). For compatibility this still prefers an explicit
+    ``catalogue.env`` value, then the projected set, then the node's own
+    publisher key (operator.toml) — so effective trust is unchanged through
+    the cutover.
+    """
     env_path = Path(os.environ.get("NOSTRHOST_CATALOGUE_ENV", "/etc/nostrhost/catalogue.env"))
     try:
         for line in env_path.read_text().splitlines():
             if line.startswith("NOSTRHOST_CATALOG_PUBLISHERS="):
-                return line.split("=", 1)[1].strip()
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return value
     except OSError:
+        pass
+    try:
+        from nostrhost.list_projection import trusted_publishers
+
+        projected = trusted_publishers()
+        if projected:
+            return ",".join(projected)
+    except Exception:  # noqa: BLE001 - projection is best-effort; fall back to the operator key
         pass
     from yunohost.nostr_identity import _operator_config
 
@@ -1077,57 +1213,82 @@ def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str
 # built here is signed with the node's publisher key the same way
 # catalog.publish already is (_sign_event, never leaving this process), then
 # handed to the catalogue CLI's kind-agnostic "publish" subcommand for pure
-# transport - the CLI itself never accepts a private key. Local bookkeeping
-# (endorsement/announcement history, the "already announced" dedup, and the
-# last-published profile fields) lives in small JSON files next to the
-# catalogue state file rather than inside the Go projection, since none of it
-# is relay-sourced truth the way the trusted declarations/attestations are.
+# transport - the CLI itself never accepts a private key. WP5: all history /
+# profile / announcement reads are relay-derived (no local JSON ledgers).
 
-def _catalog_attestation_ledger_path() -> str:
-    return os.environ.get("NOSTRHOST_CATALOG_ATTESTATION_LEDGER", "/var/lib/nostrhost/catalogue-attestations.json")
+def _catalog_own_events(kinds: tuple[int, ...]) -> list[dict[str, Any]]:
+    """Every event this node's catalogue publisher key authored, read from the
+    control relay (WP5: the relay is authoritative; there is no local ledger).
 
+    Bounded pagination so a large history is not silently truncated."""
+    from yunohost.nostr_identity import _operator_config
+    from yunohost.nostrhost.events import query_chain_events
 
-def _catalog_announce_ledger_path() -> str:
-    return os.environ.get("NOSTRHOST_CATALOG_ANNOUNCE_LEDGER", "/var/lib/nostrhost/catalogue-announcements.json")
-
-
-def _catalog_profile_state_path() -> str:
-    return os.environ.get("NOSTRHOST_CATALOG_PROFILE_STATE", "/var/lib/nostrhost/catalogue-profile.json")
-
-
-def _read_json_list(path: str) -> list[dict[str, Any]]:
+    cfg = _operator_config()
     try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError):
+        return query_chain_events(
+            cfg.control_relay, kinds=kinds, authors=(cfg.publisher_pubkey,), limit=5000, page_all=True
+        )
+    except Exception:  # noqa: BLE001 - a relay hiccup must not break the admin page
         return []
-    return data if isinstance(data, list) else []
 
 
-def _read_json_object(path: str) -> dict[str, Any]:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError):
+def _catalog_endorsements() -> list[dict[str, Any]]:
+    """This node's own kind-30079 curator endorsements, newest first."""
+    records: list[dict[str, Any]] = []
+    for event in _catalog_own_events((30079,)):
+        tags = {t[0]: t[1] for t in event.get("tags") or [] if len(t) >= 2}
+        parts = str(tags.get("a") or "").split(":")
+        records.append(
+            {
+                "app_id": parts[2] if len(parts) >= 3 else "",
+                "publisher": parts[1] if len(parts) >= 2 else "",
+                "claim": tags.get("claim", ""),
+                "comment": event.get("content", ""),
+                "event_id": event.get("id"),
+                "created_at": event.get("created_at"),
+            }
+        )
+    records.sort(key=lambda record: record.get("created_at") or 0, reverse=True)
+    return records
+
+
+def _catalog_announcements_from_relay() -> list[dict[str, Any]]:
+    """This node's own kind-1 announcement notes, newest first."""
+    records: list[dict[str, Any]] = []
+    for event in _catalog_own_events((1,)):
+        tags = {t[0]: t[1] for t in event.get("tags") or [] if len(t) >= 2}
+        coordinate = str(tags.get("a") or "")
+        app_id = coordinate.split(":")[2] if coordinate.count(":") >= 2 else ""
+        records.append(
+            {
+                "app_id": app_id,
+                "version": tags.get("version", ""),
+                "event_id": event.get("id"),
+                "created_at": event.get("created_at"),
+            }
+        )
+    records.sort(key=lambda record: record.get("created_at") or 0, reverse=True)
+    return records
+
+
+def _catalog_profile_from_relay() -> dict[str, Any]:
+    """This node's newest kind-0 catalogue publisher profile content."""
+    events = _catalog_own_events((0,))
+    if not events:
         return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_json_atomic(path: str, value: Any) -> None:
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, mode=0o750, exist_ok=True)
-    descriptor, temporary_path = tempfile.mkstemp(dir=directory, prefix=".catalogue-")
+    newest = max(events, key=lambda e: (int(e.get("created_at") or 0), str(e.get("id") or "")))
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle)
-        os.chmod(temporary_path, 0o640)
-        os.replace(temporary_path, path)
-    except BaseException:
-        try:
-            os.unlink(temporary_path)
-        except OSError:
-            pass
-        raise
+        parsed = json.loads(newest.get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+# --------------------------------------------------------------------------- #
+# catalogue history / profile / announcements are read from the control relay
+# (WP5) - see _catalog_own_events / _catalog_endorsements /
+# _catalog_announcements_from_relay / _catalog_profile_from_relay above.
 
 
 def _catalog_entries() -> list[dict[str, Any]]:
@@ -1152,7 +1313,7 @@ def _safe_catalog_candidates(**args: Any) -> dict[str, Any]:
         installed = {}
     attested = {
         (record.get("app_id"), record.get("publisher"))
-        for record in _read_json_list(_catalog_attestation_ledger_path())
+        for record in _catalog_endorsements()
     }
 
     candidates = []
@@ -1201,18 +1362,9 @@ def _safe_catalog_attest(
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 30079, comment, tags)
 
     result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
-    ledger = _read_json_list(_catalog_attestation_ledger_path())
-    ledger.append(
-        {
-            "app_id": app_id,
-            "publisher": publisher,
-            "claim": claim,
-            "comment": comment,
-            "event_id": event["id"],
-            "created_at": event["created_at"],
-        }
-    )
-    _write_json_atomic(_catalog_attestation_ledger_path(), ledger)
+    # WP5: no local ledger — the kind-30079 event is addressable
+    # (d=app_id:publisher), so a re-endorsement is an ordinary replaceable
+    # event and the relay is the read source.
     return {"app_id": app_id, "publisher": publisher, "event_id": event["id"], "published": result}
 
 
@@ -1220,8 +1372,7 @@ def _safe_catalog_history(**args: Any) -> dict[str, Any]:
     """Every endorsement this node has published, most recent first."""
     if args:
         raise OperationError(f"catalog.history does not accept extra args: {sorted(args)}")
-    history = sorted(_read_json_list(_catalog_attestation_ledger_path()), key=lambda record: record.get("created_at", 0), reverse=True)
-    return {"history": history}
+    return {"history": _catalog_endorsements()}
 
 
 def _safe_catalog_trust(
@@ -1267,7 +1418,7 @@ def _safe_catalog_profile_get(**args: Any) -> dict[str, Any]:
         raise OperationError(f"catalog.profile.get does not accept extra args: {sorted(args)}")
     from yunohost.nostr_identity import _operator_config
 
-    return {"profile": _read_json_object(_catalog_profile_state_path()), "self_publisher": _operator_config().publisher_pubkey}
+    return {"profile": _catalog_profile_from_relay(), "self_publisher": _operator_config().publisher_pubkey}
 
 
 def _safe_catalog_profile_set(
@@ -1290,13 +1441,10 @@ def _safe_catalog_profile_set(
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 0, content, [])
 
     result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
-    # Only cache the edited fields once at least one relay accepted the
-    # event - a total publish failure should leave the cache showing what is
-    # still genuinely live, not a profile nobody has seen.
     published = isinstance(result, dict) and any(not item.get("error") for item in result.get("relays", []))
-    if published:
-        _write_json_atomic(_catalog_profile_state_path(), profile)
-    return {"event_id": event["id"], "published": result, "cached": published}
+    # WP5: no local cache — the kind-0 profile is a replaceable event and is
+    # read back from the relay (see _catalog_profile_from_relay).
+    return {"event_id": event["id"], "published": result, "published_any": bool(published)}
 
 
 def _safe_catalog_announce(app_id: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
@@ -1317,13 +1465,16 @@ def _safe_catalog_announce(app_id: str = "", relays: str = "", **extra: Any) -> 
     if declaration.get("Publisher") != cfg.publisher_pubkey:
         raise OperationError("catalog.announce can only announce this node's own declarations")
     commit = declaration.get("Commit") or ""
-    if any(
-        record.get("app_id") == app_id and record.get("commit") == commit
-        for record in _read_json_list(_catalog_announce_ledger_path())
-    ):
-        raise OperationError(f"app {app_id!r} at commit {commit[:7]} was already announced")
-
     version = declaration.get("Version") or ""
+    # WP5: idempotency is checked against the relay, not a local ledger. A note
+    # carries a `version` tag (and, for legacy notes, the short commit in its
+    # content), so a re-announce of the same revision is refused.
+    if any(
+        record.get("app_id") == app_id and record.get("version") == version
+        for record in _catalog_announcements_from_relay()
+    ):
+        raise OperationError(f"app {app_id!r} version {version!r} was already announced")
+
     repository = declaration.get("Repository") or ""
     name = declaration.get("Name") or app_id
     short_commit = commit[:7] if commit else ""
@@ -1331,13 +1482,10 @@ def _safe_catalog_announce(app_id: str = "", relays: str = "", **extra: Any) -> 
     # nip19 encoder (see catalog.verify's own naddr note), and the "a" tag
     # below already gives clients a resolvable address for the declaration.
     content = f"\U0001f4e6 {name} {version} published\n{repository}@{short_commit}".rstrip()
-    tags = [["a", f"32267:{cfg.publisher_pubkey}:{app_id}"], ["r", repository]]
+    tags = [["a", f"32267:{cfg.publisher_pubkey}:{app_id}"], ["r", repository], ["version", version]]
     event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 1, content, tags)
 
     result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
-    ledger = _read_json_list(_catalog_announce_ledger_path())
-    ledger.append({"app_id": app_id, "commit": commit, "version": version, "event_id": event["id"], "created_at": event["created_at"]})
-    _write_json_atomic(_catalog_announce_ledger_path(), ledger)
     return {"app_id": app_id, "event_id": event["id"], "published": result}
 
 
@@ -1345,8 +1493,7 @@ def _safe_catalog_announcements(**args: Any) -> dict[str, Any]:
     """Every announcement note this node has published, most recent first."""
     if args:
         raise OperationError(f"catalog.announcements does not accept extra args: {sorted(args)}")
-    history = sorted(_read_json_list(_catalog_announce_ledger_path()), key=lambda record: record.get("created_at", 0), reverse=True)
-    return {"announcements": history}
+    return {"announcements": _catalog_announcements_from_relay()}
 
 
 # --------------------------------------------------------------------------- #
@@ -2281,14 +2428,40 @@ AUDIT_MAX_SCAN = 5000
 AUDIT_LIST_WINDOW = 400
 
 
-def _audit_events(kinds: tuple[int, ...] | None = None, limit: int = 100, since: int | None = None) -> list[dict[str, Any]]:
-    """Durable audit: the signed operation chain on the control relay."""
+def _audit_raw_events(
+    kinds: tuple[int, ...] | None = None,
+    limit: int = 100,
+    since: int | None = None,
+    *,
+    page_all: bool = False,
+) -> list[dict[str, Any]]:
+    """Raw signed chain events from the control relay (tags/content intact).
+
+    ``page_all`` walks the whole history with ``until`` (WP5) so a chain
+    larger than the relay's single-REQ cap cannot silently drop older events.
+    """
     from yunohost.nostr_identity import _operator_config
-    from yunohost.nostr_operations import KIND_OPERATION_REQUEST
-    from yunohost.nostrhost.events import _e_tag, query_chain_events
+    from yunohost.nostrhost.events import query_chain_events
 
     cfg = _operator_config()
-    events = query_chain_events(cfg.control_relay, kinds=kinds or AUDIT_CHAIN_KINDS, limit=limit, since=since)
+    return query_chain_events(
+        cfg.control_relay, kinds=kinds or AUDIT_CHAIN_KINDS, limit=limit, since=since, page_all=page_all
+    )
+
+
+def _audit_events(
+    kinds: tuple[int, ...] | None = None,
+    limit: int = 100,
+    since: int | None = None,
+    *,
+    page_all: bool = False,
+) -> list[dict[str, Any]]:
+    """Normalized audit view: one row per raw chain event with the resolved
+    request id and tool (used by ``audit.events``-style callers)."""
+    from yunohost.nostr_operations import KIND_OPERATION_REQUEST
+    from yunohost.nostrhost.events import _e_tag
+
+    events = _audit_raw_events(kinds=kinds, limit=limit, since=since, page_all=page_all)
     entries: list[dict[str, Any]] = []
     for event in events:
         content = event.get("content", "")
@@ -2329,72 +2502,60 @@ def _audit_operations(limit: int = 100) -> list[dict[str, Any]]:
     """One audit entry per operation: the kind-2200 request with its terminal
     state, plus standalone capability/delegation events.
 
-    A flat raw-event view is dominated by each operation's 2203/2204 tail and
-    hides the requests the audit is meant to surface, so the chain is grouped
-    by request id (a 2200 request's own id) and the outcome derived from the
-    latest chained event (2202 -> REJECTED, 2204.ok -> SUCCEEDED/FAILED, 2203
-    -> EXECUTING, 2201 -> APPROVED, else REQUESTED)."""
-    from yunohost.nostr_operations import (
-        KIND_OPERATION_REQUEST,
-        KIND_OPERATION_APPROVAL,
-        KIND_OPERATION_REJECTION,
-        KIND_EXECUTION_STARTED,
-        KIND_EXECUTION_RESULT,
-    )
+    WP5: the per-operation state reduction is delegated to the single
+    authoritative fold, ``nostr_operations._operation_entry`` (same-second
+    chain-position tie-break, strict state machine, illegal-result ->
+    FAILED), rather than the divergent ad-hoc logic that used to live here —
+    so ``audit.list`` and ``/package/operations`` can never disagree. The
+    chain is read with bounded pagination so an older terminal result is not
+    silently omitted. Each entry also carries the read-side signer/link
+    validation (``validated``/``anomalies``)."""
+    from yunohost.nostr_operations import KIND_CAPABILITY, KIND_OPERATION_REQUEST, _operation_entry
+    from yunohost.nostrhost.events import _e_tag
 
-    events = _audit_events(limit=max(limit, AUDIT_LIST_WINDOW))
-    chain_kinds = {
-        KIND_OPERATION_REQUEST,
-        KIND_OPERATION_APPROVAL,
-        KIND_OPERATION_REJECTION,
-        KIND_EXECUTION_STARTED,
-        KIND_EXECUTION_RESULT,
-    }
-    ops: dict[str, dict[str, Any]] = {}
+    events = _audit_raw_events(limit=AUDIT_MAX_SCAN, page_all=True)
+    by_request: dict[str, list[dict[str, Any]]] = {}
     standalone: list[dict[str, Any]] = []
     for event in events:
-        rid = event.get("request_id")
-        if event.get("kind") in chain_kinds and rid:
-            ops.setdefault(rid, {"events": []})["events"].append(event)
+        if event.get("kind") == KIND_OPERATION_REQUEST:
+            by_request.setdefault(event["id"], []).append(event)
         else:
-            standalone.append(event)
+            rid = _e_tag(event)
+            if rid:
+                by_request.setdefault(rid, []).append(event)
+            else:
+                standalone.append(event)
 
+    admins, server_pubkey = _audit_authority()
     entries: list[dict[str, Any]] = []
-    for rid, op in ops.items():
-        tail = sorted(op["events"], key=lambda x: x.get("created_at") or 0)
-        req = next((x for x in tail if x["kind"] == KIND_OPERATION_REQUEST), None)
-        latest = tail[-1]
-        state = "REQUESTED"
-        if any(x["kind"] == KIND_OPERATION_REJECTION for x in tail):
-            state = "REJECTED"
-        elif latest["kind"] == KIND_EXECUTION_RESULT:
-            ok = None
-            content = latest.get("content", "{}")
-            try:
-                parsed = json.loads(content) if isinstance(content, str) else content
-                ok = bool(parsed.get("ok")) if isinstance(parsed, dict) else None
-            except (json.JSONDecodeError, TypeError):
-                ok = None
-            state = "SUCCEEDED" if ok else ("FAILED" if ok is False else "EXECUTING")
-        elif latest["kind"] == KIND_EXECUTION_STARTED:
-            state = "EXECUTING"
-        elif any(x["kind"] == KIND_OPERATION_APPROVAL for x in tail):
-            state = "APPROVED"
-        anchor = req or latest
-        entries.append(
-            {
-                "id": anchor.get("id"),
-                "kind": KIND_OPERATION_REQUEST,
-                "request_id": rid,
-                "tool": req.get("tool") if req else None,
-                "pubkey": anchor.get("pubkey"),
-                "created_at": anchor.get("created_at"),
-                "state": state,
-            }
-        )
+    for chain in by_request.values():
+        entry = _operation_entry(chain, admins=admins, server_pubkey=server_pubkey)
+        if entry is None:
+            # Orphaned follow-ons (their request is older than the window):
+            # surface the raw events rather than discarding them.
+            standalone.extend(chain)
+            continue
+        entries.append(entry)
+    for item in standalone:
+        item.setdefault("request_id", None)
+        item.setdefault("validated", True)
+        item.setdefault("anomalies", [])
+        if item.get("kind") == KIND_CAPABILITY and item.get("tool") is None:
+            item["tool"] = "capability.grant"
     entries.extend(standalone)
     entries.sort(key=lambda entry: entry.get("created_at") or 0, reverse=True)  # newest first
     return entries[:limit]
+
+
+def _audit_authority() -> tuple[tuple[str, ...], str | None]:
+    """Admins + server pubkey for read-side chain validation (best-effort)."""
+    try:
+        from yunohost.nostr_identity import _operator_config
+
+        cfg = _operator_config()
+        return tuple(cfg.admins), cfg.server_pubkey
+    except Exception:  # noqa: BLE001 - audit read must survive an unbootstrapped node
+        return (), None
 
 
 def _safe_audit_get(audit_id: str = "", **extra: Any) -> dict[str, Any]:
@@ -2417,6 +2578,21 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="system.status", handler=_safe_system_status, scope=SCOPE_SERVER_READ,
         require_approval=False, input_model=SystemStatusArgs,
         description="read-only host snapshot: versions, platform, load average",
+    ),
+    "projection.status": ToolSpec(
+        name="projection.status", handler=_safe_projection_status, scope=SCOPE_SERVER_READ,
+        require_approval=False, input_model=ProjectionStatusArgs,
+        description="projection health: applied revision, freshness, quarantine (WP2)",
+    ),
+    "list.read": ToolSpec(
+        name="list.read", handler=_safe_list_read, scope=SCOPE_SERVER_READ,
+        require_approval=False, input_model=ListReadArgs,
+        description="read the effective view of a NIP-51/NIP-78 list or settings family (WP4)",
+    ),
+    "list.publish": ToolSpec(
+        name="list.publish", handler=_safe_list_publish, scope=SCOPE_SETTINGS_WRITE,
+        input_model=ListPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
+        description="publish an operator-authored host list or settings document (WP4)",
     ),
     "app.install": ToolSpec(
         name="app.install", handler=_safe_app_install, scope=SCOPE_APPS_INSTALL,

@@ -65,6 +65,64 @@ def update_route():
     return {"fullname": fullname}
 
 
+#: User-settable preference keys. Anything else in the body is ignored, so a
+#: client cannot smuggle arbitrary fields into the stored document.
+_USER_PREFERENCE_KEYS = ("portal_theme", "portal_tile_theme", "prefered_locale")
+
+
+def _session_linked_pubkey() -> str | None:
+    """The first linked pubkey for the portal session user, or None."""
+    from yunohost.nostr_account import _session_linked_pubkeys
+
+    pubkeys = _session_linked_pubkeys()
+    return pubkeys[0] if pubkeys else None
+
+
+def preferences_get_route():
+    """GET /nostrhost/portalapi/preferences — effective prefs for the session user."""
+    from yunohost.nostrhost.list_projection import portal_settings, user_preferences
+
+    pubkey = _session_linked_pubkey()
+    if not pubkey:
+        raise web.HTTPResponse("not signed in or no linked identity", 401)
+    server = portal_settings()
+    return {
+        "preferences": user_preferences(pubkey),
+        "mandatory": sorted(server.get("mandatory_restrictions") or {}),
+    }
+
+
+def preferences_put_route():
+    """PUT /nostrhost/portalapi/preferences — self-service preference publish.
+
+    Only the session user's **own** linked pubkey coordinate is written; the
+    publish is server-attested through the identityd control socket (the
+    server holds no user signer key), and the projector rejects any attempt to
+    write a coordinate that does not name the author's own pubkey. A user
+    preference can never set a mandatory server restriction.
+    """
+    from yunohost.nostr_account import AccountError, identityd_request
+
+    pubkey = _session_linked_pubkey()
+    if not pubkey:
+        raise web.HTTPResponse("not signed in or no linked identity", 401)
+    payload = web.request.json or {}
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "invalid preferences payload"}, status_code=400)
+    settings = {key: payload[key] for key in _USER_PREFERENCE_KEYS if key in payload}
+    if not settings:
+        return JSONResponse({"error": "no settable preference keys supplied"}, status_code=400)
+    try:
+        result = identityd_request({"action": "set-preferences", "username": "", "pubkey": pubkey, "settings": settings})
+    except AccountError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error", "preference update failed")}, status_code=400)
+    from yunohost.nostrhost.list_projection import user_preferences
+
+    return {"ok": True, "preferences": user_preferences(pubkey)}
+
+
 def logout_route():
     """GET /nostrhost/portalapi/logout — clear the portal session.
 
@@ -204,6 +262,8 @@ def build_app() -> FastAPI:
     app.get("/public")(portal_public_route)
     app.get("/me")(portal_me_route)
     app.put("/update")(update_route)
+    app.get("/preferences")(preferences_get_route)
+    app.put("/preferences")(preferences_put_route)
     app.get("/logout")(logout_route)
     app.post("/report")(client_error_report_route)
     app.get("/nostr/challenge")(challenge_route)

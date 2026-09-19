@@ -528,3 +528,53 @@ def test_bootstrap_node_rejects_bad_import(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("NOSTRHOST_OPERATOR_CONFIG", str(tmp_path / "operator.toml"))
     with pytest.raises(IdentityError):
         bootstrap_node(operator_sk="not-hex", force=True)
+
+
+# --------------------------------------------------------------------------- #
+# WP3: rebuildable identity projection
+
+
+def test_identity_rebuild_refolds_from_events(tmp_path):
+    """Deleting identity.db and replaying 31102 reproduces the mapping (WP3)."""
+    from yunohost.nostr_identityd import IdentityProjector
+    from yunohost.nostr_projector import rebuild
+
+    admin_sk, admin_pk = new_key()
+    _, pk1 = new_key()
+    _, pk2 = new_key()
+    events = [
+        _build_identity_event(admin_sk, admin_pk, pk1, "matt", "nip07", None, True),
+        _build_identity_event(admin_sk, admin_pk, pk2, "matt", "nip46", "phone", True),
+    ]
+    # accounts=None: a rebuild must not provision Unix accounts.
+    projector = IdentityProjector(store=_store(tmp_path / "i.db"), admin_pubkeys=[admin_pk])
+    report = rebuild(events, projector=projector)
+    assert report["accepted"] == 2
+    assert resolve_pubkey(pk1, db_path=tmp_path / "i.db").username == "matt"
+    assert resolve_pubkey(pk2, db_path=tmp_path / "i.db").label == "phone"
+
+
+def test_identity_verify_reports_no_drift_when_matched(tmp_path):
+    from yunohost.nostr_identityd import IdentityProjector
+    from yunohost.nostr_projector import verify
+
+    admin_sk, admin_pk = new_key()
+    _, subject_pk = new_key()
+    store = _store(tmp_path / "i.db")
+    event = _build_identity_event(admin_sk, admin_pk, subject_pk, "matt", "nip07", None, True)
+    IdentityProjector(store=store, admin_pubkeys=[admin_pk]).apply(event)
+    projector = IdentityProjector(store=store, admin_pubkeys=[admin_pk])
+    assert verify(projector, [event]) == []
+
+
+def test_identity_verify_detects_drift(tmp_path):
+    from yunohost.nostr_identityd import IdentityProjector
+    from yunohost.nostr_projector import verify
+
+    admin_sk, admin_pk = new_key()
+    _, subject_pk = new_key()
+    store = _store(tmp_path / "i.db")
+    projector = IdentityProjector(store=store, admin_pubkeys=[admin_pk])
+    event = _build_identity_event(admin_sk, admin_pk, subject_pk, "matt", "nip07", None, True)
+    problems = verify(projector, [event])  # store is empty -> drift expected
+    assert problems

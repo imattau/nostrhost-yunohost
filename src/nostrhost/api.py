@@ -156,6 +156,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     # below (control-relay replay), not a plain audit.get forward.
     ("/package/system/version", "system.version", {}),
     ("/package/system/status", "system.status", {}),
+    # Projection health (WP2): applied revision, freshness, quarantine.
+    ("/package/projections", "projection.status", {}),
     # Cached apt/app updates + pending-migrations flag (no network refresh).
     ("/package/system/updates", "updates.check", {}),
     ("/package/domain/list", "domain.list", {}),
@@ -327,11 +329,24 @@ def _session_linked_pubkeys() -> list[str]:
 def _granted_scopes(pubkey: str) -> set[str]:
     """The kind-31100 capability scopes granted to ``pubkey`` (best-effort).
 
-    Mirrors ``nostr_operationsd``'s subject->scope projection so the HTTP
-    routes gate a non-admin caller exactly like the signed operation chain
-    does (D8: the portal surface rides the same scope path). An unreachable
-    control relay yields an empty set — admins bypass this check entirely.
+    WP3: the authorization read model is the persisted capability projection
+    written by ``nostr-operationsd`` / ``nostr-projector``. Reading it avoids a
+    relay round-trip per request and, crucially, means a revoked grant stops
+    being honoured the moment the executor folds the revoke. When the file is
+    missing or stale (see ``capabilities_are_fresh``) this re-reads the relay
+    once and fails closed on error, so a relay/config hiccup never widens
+    access. Admins bypass this check entirely (see ``default_authorizer``).
     """
+    from yunohost.nostr_capability_projection import capabilities_are_fresh, load_capabilities
+
+    try:
+        projection = load_capabilities()
+    except Exception:  # noqa: BLE001 - unreadable file: fall through to relay
+        projection = None
+    if projection is not None and capabilities_are_fresh(projection):
+        return set(projection.scopes_for(pubkey))
+    # Stale or missing projection: fall back to the relay read rather than
+    # trusting a projection that may not have seen a recent revoke.
     try:
         grants = list_capabilities()
     except Exception:  # noqa: BLE001 - relay/config hiccup: fail closed

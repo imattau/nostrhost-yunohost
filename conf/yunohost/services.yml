@@ -29,6 +29,8 @@ nostr-identityd:
   category: admin
 nostr-permissiond:
   category: admin
+nostr-listd:
+  category: admin
 nostr-operationsd:
   category: admin
 nostr-securityd:

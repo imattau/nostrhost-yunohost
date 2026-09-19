@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -43,8 +42,6 @@ from .nostr_identity import (
     _sign_event,
     pubkey_is_admin,
     _require_bootstrapped,
-    _sign_auth_event,
-    _wait_auth_ok_async,
     default_auth,
 )
 from .nostr_notify import KIND_SYSTEM_EVENT
@@ -66,6 +63,7 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
+from .nostr_projector import REGISTRY, ProjectionRuntime
 from .nostrhost.events import _d_tag, _e_tag, _tag_value, query_chain_events
 
 logger = logging.getLogger("nostr-operationsd")
@@ -131,6 +129,7 @@ class OperationEngine:
         policy_owner: str | None = None,
         brokers: tuple[str, ...] | list[str] = (),
         admin_authorizer: Callable[[str], bool] | None = None,
+        capability_projector: Any = None,
     ) -> None:
         self._publish = publish
         self._server_sk = server_sk
@@ -143,10 +142,17 @@ class OperationEngine:
         self._restic = restic  # optional ResticClient (Stage B: restore steps)
         self._policy = policy  # optional nostrhost-policy adapter
         self._policy_owner = policy_owner
+        # WP3: the persisted, rebuildable authorization projection. When set,
+        # grant/delegation events are validated+folded+persisted through it and
+        # the in-memory views below mirror its state (kept for the state
+        # recorder and existing readers).
+        self._capability_projector = capability_projector
         self.records: dict[str, OperationRecord] = {}
         self.scopes: dict[str, set[str]] = defaultdict(set)
         self.delegations: dict[str, dict[str, Any]] = {}
         self.revoked_delegations: set[str] = set()
+        if capability_projector is not None:
+            self._mirror_projection()
         # Request ids that already reached a terminal execution result (2204).
         # Rebuilt from a fresh-connect replay before any request is re-fed, so
         # a daemon restart can never re-run an already-executed write.
@@ -156,6 +162,23 @@ class OperationEngine:
         """Record request ids whose execution already reached a terminal
         result (used when rebuilding state from a relay replay)."""
         self.executed.update(request_ids)
+
+    def _mirror_projection(self) -> None:
+        """Mirror the persisted capability projection into the in-memory views.
+
+        ``scopes``/``delegations``/``revoked_delegations`` remain the fields
+        the state recorder and older readers consume; the projection is the
+        durable authority. Called after construction and imports.
+        """
+        projection = getattr(self._capability_projector, "projection", None)
+        if projection is None:
+            return
+        self.scopes = defaultdict(set, {pk: set(sc) for pk, sc in projection.scopes.items()})
+        self.delegations = {
+            key: {"delegator": d["delegator"], "delegate": d["delegate"], "scopes": set(d["scopes"]), "expiry": d["expiry"]}
+            for key, d in projection.delegations.items()
+        }
+        self.revoked_delegations = set(projection.revoked)
 
     # -- event intake ------------------------------------------------------ #
 
@@ -414,6 +437,11 @@ class OperationEngine:
         Only admin-authored grants are authoritative. The relay rejects forged
         31100 at write time too, but the daemon re-checks so a relay policy
         regression cannot silently expand scopes."""
+        if self._capability_projector is not None:
+            result = self._capability_projector.apply(event)
+            if result.accepted:
+                self._mirror_projection()
+            return result.accepted
         subject = _d_tag(event)
         if not subject:
             return False
@@ -431,6 +459,11 @@ class OperationEngine:
         return True
 
     def handle_delegation(self, event: dict[str, Any]) -> bool:
+        if self._capability_projector is not None:
+            result = self._capability_projector.apply(event)
+            if result.accepted:
+                self._mirror_projection()
+            return result.accepted
         try:
             _verify_delegation_event(event)
             delegate = next(t[1] for t in event.get("tags", []) if len(t) >= 2 and t[0] == "p")
@@ -453,6 +486,11 @@ class OperationEngine:
         return True
 
     def handle_delegation_revocation(self, event: dict[str, Any]) -> bool:
+        if self._capability_projector is not None:
+            result = self._capability_projector.apply(event)
+            if result.accepted:
+                self._mirror_projection()
+            return result.accepted
         delegation_id = _e_tag(event)
         if not delegation_id:
             return False
@@ -673,80 +711,62 @@ def _sorted_replay(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _mark_terminal_results(engine: OperationEngine, replay: list[dict[str, Any]]) -> None:
+    """Rebuild already-executed request ids from a replay's terminal results.
+
+    Must run BEFORE the sorted chain is fed, so a daemon restart can never
+    re-run an approved write (the replayed 2200/2201 would otherwise execute
+    again before the replayed 2203/2204 arrive).
+    """
+    terminal = {
+        eid
+        for ev in replay
+        if int(ev.get("kind") or 0) == KIND_EXECUTION_RESULT
+        for eid in [_e_tag(ev)]
+        if eid
+    }
+    if terminal:
+        engine.mark_executed(terminal)
+
+
 async def subscribe_loop(
     relay_url: str,
     *,
     engine: OperationEngine,
+    projector: Any = None,
     stop: asyncio.Event | None = None,
 ) -> None:
-    """Subscribe to chain + capability kinds and drive the engine. Reconnects
-    with backoff; the relay replays stored events so state rebuilds."""
-    import websockets
+    """Drive the engine from the relay through the shared ProjectionRuntime.
 
-    # ping_interval=None: the relay owns the keepalive (it pings every 30s and
-    # we auto-pong); if the client also pings, its 20s ping_timeout can fire
-    # while the event loop is briefly busy during a replay burst and the client
-    # tears the connection down with close 1011 "keepalive ping timeout",
-    # kicking the daemon into a reconnect loop.
-    while not (stop is not None and stop.is_set()):
-        try:
-            async with websockets.connect(relay_url, ping_interval=None, ping_timeout=None) as ws:
-                sub_id = "nostrhost-operations-" + secrets.token_hex(4)
-                await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS, "limit": REPLAY_LIMIT}]))
-                logger.info("operations executor subscribed to %s", relay_url)
-                replay: list[dict[str, Any]] = []
-                replaying = True
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg[0] == "AUTH":
-                        challenge = msg[1] if len(msg) > 1 else ""
-                        auth = default_auth()
-                        if auth is not None:
-                            auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
-                            await ws.send(json.dumps(["AUTH", auth_ev]))
-                            await _wait_auth_ok_async(ws, auth_ev["id"])
-                            replay = []
-                            replaying = True
-                            await ws.send(json.dumps(["REQ", sub_id, {"kinds": SUBSCRIBE_KINDS, "limit": REPLAY_LIMIT}]))
-                        continue
-                    if msg[0] == "EVENT":
-                        if replaying:
-                            replay.append(msg[2])
-                        else:
-                            # handle_event performs blocking work (synchronous
-                            # publish_to_relay round-trips, state snapshots).
-                            # Run it in a worker thread so the subscribe
-                            # websocket keeps reading and the relay does not
-                            # time the connection out during replay bursts.
-                            await asyncio.to_thread(engine.handle_event, msg[2])
-                    elif msg[0] == "EOSE":
-                        # Rebuild the set of already-executed request ids from
-                        # the terminal results in this replay BEFORE feeding
-                        # the sorted chain, so a daemon restart can never
-                        # re-run an approved write (the replayed 2200/2201
-                        # would otherwise execute again before the replayed
-                        # 2203/2204 arrive).
-                        terminal = {
-                            eid
-                            for ev in replay
-                            if int(ev.get("kind") or 0) == KIND_EXECUTION_RESULT
-                            for eid in [_e_tag(ev)]
-                            if eid
-                        }
-                        if terminal:
-                            engine.mark_executed(terminal)
-                        for ev in _sorted_replay(replay):
-                            await asyncio.to_thread(engine.handle_event, ev)
-                        replay.clear()
-                        replaying = False
-                    elif msg[0] == "CLOSED":
-                        logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
-                        break
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - keep the daemon alive
-            logger.error("subscription error: %s; retrying in 5s", exc)
-            await asyncio.sleep(5)
+    WP3 migrated this off its bespoke loop: the shared runtime owns NIP-42
+    AUTH, deterministic replay ordering, reconnect backoff and health. The
+    engine is *both* an executor and a projector, so events are dispatched
+    through ``engine.handle_event`` (the runtime's ``apply`` override) rather
+    than a pure fold. ``handle_event`` performs blocking work (synchronous
+    publish round-trips, state snapshots), so application runs in a worker
+    thread to keep the websocket draining during a replay burst.
+    """
+    if projector is None:
+        from .nostr_capability_projection import CapabilityProjector
+
+        projector = engine._capability_projector or CapabilityProjector(admin_pubkeys=engine._admins)
+    projector.server_pubkey = engine._server_pubkey
+    projector.health_state.name = "operations"
+    REGISTRY.register(projector)
+    runtime = ProjectionRuntime(
+        relay_url,
+        projector=projector,
+        kinds=list(SUBSCRIBE_KINDS),
+        limit=REPLAY_LIMIT,
+        priority=_REPLAY_PRIORITY,
+        ping_interval=None,
+        apply_in_thread=True,
+        apply=engine.handle_event,
+        prepare_replay=lambda replay: _mark_terminal_results(engine, replay),
+        auth_factory=default_auth,
+        stop=stop,
+    )
+    await runtime.run()
 
 
 def preload_capabilities(engine: OperationEngine, relay_url: str) -> None:
@@ -783,11 +803,47 @@ def run() -> None:
     except Exception as exc:  # noqa: BLE001 - policy remains optional on old nodes
         logger.error("native policy adapter unavailable (%s); continuing without policy facts", exc)
         policy = None
-    engine = OperationEngine(
-        publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
-        restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
-        admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
+
+    # WP3: the capability projection is now durable. Load it and seed the
+    # engine BEFORE the live subscription, so a restart honours the last
+    # known grants without waiting for a replay. When the file is missing or
+    # stale, refresh it from the relay first (preload_capabilities: the
+    # combined chain subscription truncates NIP-33 grants to the newest one).
+    from .nostr_capability_projection import (
+        CapabilityProjector,
+        capabilities_are_fresh,
+        load_capabilities,
     )
+
+    projector = CapabilityProjector(
+        projection=load_capabilities(),
+        admin_pubkeys=cfg.admins,
+        server_pubkey=cfg.server_pubkey,
+    )
+    if not capabilities_are_fresh(projector.projection):
+        try:
+            preload_capabilities(OperationEngine(
+                publish=lambda ev: None, server_sk=cfg.server_sk, admins=cfg.admins,
+                capability_projector=projector,
+            ), cfg.control_relay)
+        except Exception as exc:  # noqa: BLE001 - best-effort; replay still rebuilds
+            logger.warning("capability preload failed (%s); relying on replay", exc)
+
+    def make_engine(**extra: Any) -> OperationEngine:
+        return OperationEngine(
+            publish=lambda ev: _publish_default(cfg.control_relay, ev),
+            server_sk=cfg.server_sk,
+            admins=cfg.admins,
+            restic=restic,
+            policy=policy,
+            policy_owner=cfg.operator_pubkey,
+            brokers=cfg.broker_pubkeys,
+            admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
+            capability_projector=projector,
+            **extra,
+        )
+
+    engine = make_engine()
     try:
         from .nostr_state import StateRecorder, StateRepo, state_dir_from_env
         from .nostr_restic import restic_snapshot_hook
@@ -797,32 +853,12 @@ def run() -> None:
             capabilities=lambda: {pk: sorted(sc) for pk, sc in engine.scopes.items()},
             restic_hook=restic_snapshot_hook() if restic is not None else None,
         )
-        engine = OperationEngine(
-            publish=lambda ev: _publish_default(cfg.control_relay, ev),
-            server_sk=cfg.server_sk,
-            admins=cfg.admins,
-            state=state,
-            restic=restic,
-            policy=policy,
-            policy_owner=cfg.operator_pubkey,
-            brokers=cfg.broker_pubkeys,
-            admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
-        )
+        engine = make_engine(state=state)
     except Exception as exc:  # noqa: BLE001 - state history is additive; a broken state layer must not kill the executor
         logger.error("state recorder unavailable (%s); continuing without pre/post snapshots", exc)
-        engine = OperationEngine(
-            publish=lambda ev: _publish_default(cfg.control_relay, ev), server_sk=cfg.server_sk, admins=cfg.admins,
-            restic=restic, policy=policy, policy_owner=cfg.operator_pubkey, brokers=cfg.broker_pubkeys,
-            admin_authorizer=lambda pubkey: pubkey_is_admin(pubkey, configured_admins=cfg.admins),
-        )
-    # Preload the replaceable capability/delegation grants with dedicated
-    # single-kind queries before the live subscription (see
-    # preload_capabilities: the combined chain subscription truncates NIP-33
-    # grants to the single newest one, which would reject every other grantee
-    # with spurious `unauthorized` errors).
-    preload_capabilities(engine, cfg.control_relay)
+
     try:
-        asyncio.run(subscribe_loop(cfg.control_relay, engine=engine))
+        asyncio.run(subscribe_loop(cfg.control_relay, engine=engine, projector=projector))
     except KeyboardInterrupt:
         pass
 

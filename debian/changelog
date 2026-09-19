@@ -1,3 +1,29 @@
+yunohost (12.1.41.98) stable; urgency=low
+
+  * WP2: shared projector framework (`nostr_projector.py`, `bin/nostr-projector`,
+    diagnoser 65-projections, `projection.status`). Atomic projection writes,
+    checkpointed after commit, quarantined invalid events, rebuild/verify/shadow
+    modes and per-projection health.
+  * WP3: durable capability projection (`nostr_capability_projection.py`,
+    `/var/lib/nostrhost/capabilities.json`, freshness window), operationsd
+    migrated onto the shared runtime, identityd rebuild/verify, and
+    authorization reads against the projection with a freshness fallback.
+  * WP4: NIP-51/NIP-78 list and preference projection (`nostr_listd.py`,
+    `list_specs.py`/`list_projection.py`/`list_render.py`, `/etc/nostrhost/
+    lists.json`), trusted-publisher/approved-repository/relay/blocked lists,
+    portal-settings merging, server-stored per-user preferences with a
+    self-service 30078 publish path, and the `list.read`/`list.publish`
+    operations.
+  * WP5: catalogue + audit read models. Audit folds the 2200-2205 chain with
+    bounded `until` pagination (`query_chain_events` authors/page_all) and
+    signer-anomaly annotation (validate, never drop). Catalogue endorsements/
+    announcements/profile are read back from the control relay - the local
+    attestation/announcement ledgers and profile cache are gone; attest
+    idempotency is the replaceable 30079 d-tag and announce dedup a version
+    tag. Relay allowlist admits 10000/10002/10006/30000/30078.
+
+ -- NostrHost <nostrhost@example.com>  Sat, 19 Sep 2026 12:10:00 +0000
+
 yunohost (12.1.41.97) stable; urgency=low
 
   * `catalog.declare` tags a native declaration `platform=linux` instead of

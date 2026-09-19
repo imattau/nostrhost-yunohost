@@ -225,3 +225,50 @@ def test_merge_projection_skips_permissions_not_in_ldap_projection(tmp_path):
     merge_projection(permissions, store, resolve_pubkey=lambda pk: _FakeIdentity(username="alice"))
 
     assert permissions == {}
+
+
+# --------------------------------------------------------------------------- #
+# WP4: permission projector (kind 30000) on the shared projection framework
+
+
+def test_permission_projector_applies_and_regenerates(tmp_path):
+    from yunohost.nostr_projector import rebuild
+    from yunohost.nostr_permissiond import PermissionProjector
+
+    changes = []
+    store = PermissionStore(tmp_path / "grants.json")
+    projector = PermissionProjector(
+        store=store,
+        admin_pubkeys=[ADMIN],
+        on_change=lambda: changes.append(1),
+        cursor_dir=tmp_path / "c",
+    )
+    report = rebuild(
+        [_event(members=[MEMBER_1]), _event(members=[MEMBER_1, MEMBER_2], created_at=200, event_id="e2")],
+        projector=projector,
+    )
+    assert report["accepted"] == 2
+    assert set(store.get("myapp.main").pubkeys) == {MEMBER_1, MEMBER_2}
+    assert len(changes) == 2
+
+
+def test_permission_projector_quarantines_non_admin(tmp_path):
+    from yunohost.nostr_permissiond import PermissionProjector
+
+    store = PermissionStore(tmp_path / "grants.json")
+    projector = PermissionProjector(store=store, admin_pubkeys=[ADMIN], cursor_dir=tmp_path / "c")
+    result = projector.apply(_event(author=OTHER, members=[MEMBER_1]))
+    assert not result.accepted
+    assert projector.health().quarantined == 1
+    assert store.get("myapp.main") is None
+
+
+def test_permission_projector_verify_detects_drift(tmp_path):
+    from yunohost.nostr_projector import verify
+    from yunohost.nostr_permissiond import PermissionProjector
+
+    store = PermissionStore(tmp_path / "grants.json")
+    projector = PermissionProjector(store=store, admin_pubkeys=[ADMIN], on_change=lambda: None, cursor_dir=tmp_path / "c")
+    assert verify(projector, [_event(members=[MEMBER_1])])  # empty store -> drift
+    projector.apply(_event(members=[MEMBER_1]))
+    assert verify(projector, [_event(members=[MEMBER_1])]) == []

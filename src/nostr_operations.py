@@ -2090,7 +2090,9 @@ def list_capabilities(
 
     cfg = _operator_config(admin_sk, control_relay)
     fetch = query or query_chain_events
-    events = fetch(cfg.control_relay, kinds=(KIND_CAPABILITY,), limit=500)
+    # WP5: page the whole grant history (NIP-33 replaceable, but older revokes
+    # must be seen to reconcile a subject that was granted-then-revoked).
+    events = fetch(cfg.control_relay, kinds=(KIND_CAPABILITY,), limit=5000, page_all=True)
     latest: dict[str, dict[str, Any]] = {}
     for event in events:
         subject = next((t[1] for t in event.get("tags", []) if len(t) > 1 and t[0] == "d"), None)
@@ -2236,11 +2238,52 @@ def fetch_chain_events(relay_url: str, *, kinds: tuple[int, ...] | None = None, 
     return list(collected.values())
 
 
-def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _chain_anomalies(
+    chain: list[dict[str, Any]],
+    request_event: dict[str, Any],
+    *,
+    admins: tuple[str, ...] | list[str] = (),
+    server_pubkey: str | None = None,
+) -> list[str]:
+    """Read-side authority checks for one operation chain (WP5).
+
+    operationsd enforces who may author each chain step at write time; a
+    replica or a relay-store compromise could still present a chain whose
+    follow-on events were forged. This validates the author of each step
+    against the node's own expectations and returns human-readable anomalies
+    — it never drops an event, so an operator can see a forged/foreign chain
+    rather than have it silently vanish.
+    """
+    admin_set = {a.lower() for a in admins}
+    anomalies: list[str] = []
+    for event in chain:
+        kind = event.get("kind")
+        author = str(event.get("pubkey") or "").lower()
+        if kind == KIND_OPERATION_REQUEST:
+            continue
+        if kind in (KIND_OPERATION_APPROVAL, KIND_OPERATION_REJECTION):
+            if admin_set and author not in admin_set:
+                anomalies.append(f"{kind} authored by non-admin {author[:16] or 'unknown'}")
+        elif kind in (KIND_EXECUTION_STARTED, KIND_EXECUTION_RESULT, KIND_EXECUTION_PROGRESS):
+            if server_pubkey and author != server_pubkey.lower():
+                anomalies.append(f"{kind} authored by non-server {author[:16] or 'unknown'}")
+    return anomalies
+
+
+def _operation_entry(
+    chain: list[dict[str, Any]],
+    *,
+    admins: tuple[str, ...] | list[str] = (),
+    server_pubkey: str | None = None,
+) -> dict[str, Any] | None:
     """Reduce one request's chain events (the 2200 request plus whatever
     2201-2204 follow-ons have landed) to a single summary entry, replaying
     the state machine in event order. Returns None for an orphaned follow-on
-    event whose request isn't in this relay snapshot."""
+    event whose request isn't in this relay snapshot.
+
+    With ``admins``/``server_pubkey`` supplied, each follow-on's author is
+    validated and any anomaly recorded (validate + annotate, never drop).
+    """
     from .nostr_operations_state import TERMINAL, InvalidTransition, next_state
 
     request_event = next((e for e in chain if e.get("kind") == KIND_OPERATION_REQUEST), None)
@@ -2282,21 +2325,49 @@ def _operation_entry(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
                 state = OpState.FAILED
             continue  # ignore out-of-order/duplicate/invalid chain events
 
+    anomalies = _chain_anomalies(chain, request_event, admins=admins, server_pubkey=server_pubkey)
+    # The 2200 request binds an `actor` tag to the signing key; when the two
+    # differ, only an admin or a configured broker may relay another actor's
+    # request (operationsd's write-time rule). Note a divergence here.
+    signer = str(request_event.get("pubkey") or "").lower()
+    actor = next(
+        (str(t[1]) for t in request_event.get("tags") or [] if len(t) >= 2 and t[0] == "actor"),
+        None,
+    )
+    if actor and actor.lower() != signer and admins and signer not in {a.lower() for a in admins}:
+        anomalies.append(f"2200 actor {actor[:16]} relayed by non-admin signer {signer[:16]}")
     return {
         "id": request_event["id"],
+        "kind": KIND_OPERATION_REQUEST,
         "request_id": request_event["id"],
         "tool": content.get("tool"),
         "args": content.get("args"),
         "pubkey": request_event.get("pubkey"),
         "created_at": request_event.get("created_at"),
         "state": state.value.upper(),
+        "validated": not anomalies,
+        "anomalies": anomalies,
     }
+
+
+def _read_authority() -> tuple[tuple[str, ...], str | None]:
+    """Admins + server pubkey for read-side chain validation (best-effort).
+
+    A read on a node that is not bootstrapped (no operator.toml) yields empty
+    authority, in which case validation only records what it can.
+    """
+    try:
+        cfg = _operator_config(None, None)
+        return tuple(cfg.admins), cfg.server_pubkey
+    except Exception:  # noqa: BLE001 - read path must not fail on config
+        return (), None
 
 
 def list_operations(*, limit: int | None = None, control_relay: str | None = None) -> list[dict[str, Any]]:
     """Every operation on the control relay, newest request first."""
     relay = _control_relay(control_relay)
     events = fetch_chain_events(relay)
+    admins, server_pubkey = _read_authority()
     by_request: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         request_id = event["id"] if event.get("kind") == KIND_OPERATION_REQUEST else _read_e_tag(event)
@@ -2306,7 +2377,7 @@ def list_operations(*, limit: int | None = None, control_relay: str | None = Non
 
     entries = []
     for chain in by_request.values():
-        entry = _operation_entry(chain)
+        entry = _operation_entry(chain, admins=admins, server_pubkey=server_pubkey)
         if entry is not None:
             entries.append(entry)
     entries.sort(key=lambda e: e["created_at"], reverse=True)

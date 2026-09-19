@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""nostr-projector — operational commands for the shared projector framework.
+
+WP2/WP3 of docs/RELAY-STATE-MIGRATION-PLAN.md. Provides rebuild, verify, shadow
+and status for the host's projections without touching a running daemon.
+
+    nostr-projector status [--json]
+    nostr-projector rebuild <name> [--json]
+    nostr-projector verify <name> [--json]
+    nostr-projector shadow <name> --to <path> [--json]
+
+Projections: permissions (NIP-51 kind 30000), identity (kind 31102),
+capabilities (kinds 31100/27236/27237).
+"""
+
+from __future__ import annotations
+
+import os as _os
+import sys as _sys
+from pathlib import Path as _Path
+
+# Prefer the bundled runtime venv (same convention as the nostr-*d bins): the
+# runtime wheels (nostr-sdk, websockets) are only guaranteed inside
+# /opt/nostrhost/venv; the system python is a fallback for nodes where the
+# runtime has not been installed yet.
+_VENV_PY = _Path("/opt/nostrhost/venv/bin/python3")
+if _VENV_PY.is_file() and _os.path.realpath(_sys.executable) != _os.path.realpath(str(_VENV_PY)):
+    _os.execv(str(_VENV_PY), [str(_VENV_PY), _sys.argv[0]] + _sys.argv[1:])
+
+
+import argparse
+import json
+import sys
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from yunohost.nostr_projector import (
+    DEFAULT_CURSOR_DIR,
+    read_status_dir,
+)
+from yunohost import nostr_identity, nostr_permissiond
+
+
+@dataclass
+class _Adapter:
+    """Per-projection wiring: how to build the projector and fetch its events."""
+
+    name: str
+    rebuild: Callable[[Any], dict[str, Any]]
+    projector_factory: Callable[[Any], Any]
+    kinds: tuple[int, ...]
+
+
+def _permission_adapter(cfg: Any) -> _Adapter:
+    from yunohost.nostrhost.nip51_permissions import PERMISSION_LIST_KIND
+
+    return _Adapter(
+        name=nostr_permissiond.PROJECTION_NAME,
+        rebuild=lambda c: nostr_permissiond.rebuild(c.control_relay, admin_pubkeys=c.admins),
+        projector_factory=lambda c: nostr_permissiond.PermissionProjector(
+            store=nostr_permissiond.PermissionStore(), admin_pubkeys=c.admins
+        ),
+        kinds=(PERMISSION_LIST_KIND,),
+    )
+
+
+def _identity_adapter(cfg: Any) -> _Adapter:
+    from yunohost import nostr_identityd
+
+    return _Adapter(
+        name=nostr_identityd.IdentityProjector.name,
+        rebuild=lambda c: nostr_identityd.rebuild(c.control_relay, admin_pubkeys=c.admins),
+        projector_factory=lambda c: nostr_identityd.IdentityProjector(
+            store=nostr_identity._store(), admin_pubkeys=c.admins
+        ),
+        kinds=(nostr_identity.IDENTITY_KIND,),
+    )
+
+
+def _capability_adapter(cfg: Any) -> _Adapter:
+    from yunohost import nostr_capability_projection as cap
+
+    return _Adapter(
+        name=cap.PROJECTION_NAME,
+        rebuild=lambda c: cap.rebuild_from_relay(
+            c.control_relay, admin_pubkeys=c.admins, server_pubkey=c.server_pubkey
+        ),
+        projector_factory=lambda c: cap.CapabilityProjector(
+            admin_pubkeys=c.admins, server_pubkey=c.server_pubkey
+        ),
+        kinds=cap.CAPABILITY_KINDS,
+    )
+
+
+def _lists_adapter(cfg: Any) -> _Adapter:
+    from yunohost import nostr_listd
+    from yunohost.nostrhost.list_projection import LIST_KINDS, ListProjector
+    from yunohost.nostrhost.list_specs import is_self_service_coordinate
+
+    return _Adapter(
+        name="lists",
+        rebuild=lambda c: nostr_listd.rebuild(c.control_relay, admin_pubkeys=c.admins),
+        projector_factory=lambda c: ListProjector(
+            admin_pubkeys=c.admins, validate_self_service=is_self_service_coordinate
+        ),
+        kinds=LIST_KINDS,
+    )
+
+
+_ADAPTERS = {
+    nostr_permissiond.PROJECTION_NAME: _permission_adapter,
+    "identity": _identity_adapter,
+    "capabilities": _capability_adapter,
+    "lists": _lists_adapter,
+}
+
+
+def _adapter(name: str, cfg: Any) -> _Adapter:
+    factory = _ADAPTERS.get(name)
+    if factory is None:
+        raise KeyError(name)
+    return factory(cfg)
+
+
+def _status(as_json: bool) -> int:
+    rows = read_status_dir()
+    if as_json:
+        print(json.dumps({"projections": rows}, indent=2, sort_keys=True))
+    else:
+        if not rows:
+            print("no projection cursors found")
+        for row in rows:
+            print(f"{row['name']}\t{row['applied_revision'] or '-'}\t{row['last_event_id'][:16] or '-'}")
+    return 0
+
+
+def _rebuild(name: str, as_json: bool) -> int:
+    cfg = nostr_identity._operator_config()
+    try:
+        report = _adapter(name, cfg).rebuild(cfg)
+    except KeyError:
+        print(f"unknown projection: {name}", file=sys.stderr)
+        return 2
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"{name}: rebuilt ({report['accepted']} accepted, {report['rejected']} rejected)")
+    return 0
+
+
+def _verify(name: str, as_json: bool) -> int:
+    from yunohost.nostr_projector import verify
+    from yunohost.nostrhost.events import query_chain_events
+
+    cfg = nostr_identity._operator_config()
+    try:
+        adapter = _adapter(name, cfg)
+    except KeyError:
+        print(f"unknown projection: {name}", file=sys.stderr)
+        return 2
+    projector = adapter.projector_factory(cfg)
+    events = query_chain_events(cfg.control_relay, kinds=adapter.kinds, limit=500)
+    problems = verify(projector, events)
+    if as_json:
+        print(json.dumps({"name": name, "problems": problems}, indent=2, sort_keys=True))
+    elif problems:
+        for problem in problems:
+            print(f"DRIFT: {problem}")
+    else:
+        print(f"{name}: projection matches the relay")
+    return 1 if problems else 0
+
+
+def _shadow(name: str, to: str, as_json: bool) -> int:
+    from yunohost.nostr_projector import shadow
+    from yunohost.nostrhost.events import query_chain_events
+
+    cfg = nostr_identity._operator_config()
+    try:
+        adapter = _adapter(name, cfg)
+    except KeyError:
+        print(f"unknown projection: {name}", file=sys.stderr)
+        return 2
+    projector = adapter.projector_factory(cfg)
+    events = query_chain_events(cfg.control_relay, kinds=adapter.kinds, limit=500)
+    report = shadow(events, projector=projector, staging_path=to)
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"{name}: shadow rendered to {report['staging_path']}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("status", "rebuild", "verify", "shadow"))
+    parser.add_argument("name", nargs="?")
+    parser.add_argument("--to", default="/tmp/nostrhost-projection.shadow")
+    parser.add_argument("--cursor-dir", default=DEFAULT_CURSOR_DIR)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.command == "status":
+        return _status(args.json)
+    if not args.name:
+        parser.error(f"{args.command} requires a projection name")
+    if args.command == "rebuild":
+        return _rebuild(args.name, args.json)
+    if args.command == "verify":
+        return _verify(args.name, args.json)
+    return _shadow(args.name, args.to, args.json)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

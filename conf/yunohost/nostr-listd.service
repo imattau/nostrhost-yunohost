@@ -1,0 +1,28 @@
+[Unit]
+Description=NostrHost list/preference projector (NIP-51/NIP-78 -> list projection)
+After=network-online.target nostrhost-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/nostrhost/venv/bin/python3 /usr/bin/nostr-listd
+Restart=on-failure
+RestartSec=5s
+User=root
+UMask=0077
+RuntimeDirectory=nostrhost
+RuntimeDirectoryPreserve=yes
+# Sandboxing hardening block: kept identical (module for module) across all
+# nostr-*d.service units (ddnswatchd/securityd/permissiond/identityd/
+# operationsd/listd) -- change one, change them all. ProtectHome=true because
+# this daemon never reads or writes anything under /home; nostr-operationsd is
+# the one deliberate exception (ProtectHome=read-only, because it needs to
+# write /home/yunohost.backup) -- see that unit's comment before assuming drift.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nostrhost /var/lib/nostrhost
+
+[Install]
+WantedBy=multi-user.target

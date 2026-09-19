@@ -21,7 +21,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -32,13 +31,17 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _operator_config,
     _require_bootstrapped,
-    _sign_auth_event,
     _store,
-    _wait_auth_ok_async,
-    default_auth,
+)
+from .nostr_projector import (
+    DEFAULT_CURSOR_DIR,
+    Projector,
+    ProjectionResult,
+    ProjectionRuntime,
+    REGISTRY,
 )
 from nostrhost_auth.identity.mappings import PubkeyAlreadyLinked
-from .nostrhost.events import _d_tag
+from .nostrhost.events import _d_tag, query_chain_events
 
 logger = logging.getLogger("nostr-identityd")
 
@@ -291,6 +294,42 @@ def handle_control_request(
                 event_ids.append(event["id"])
             return {"ok": True, "event_ids": event_ids}
 
+        if action == "set-preferences":
+            # WP4 self-service: the portal has already authenticated the
+            # session; here we only accept a preference document for a pubkey
+            # that is *linked to the caller's own account*. The projector keys
+            # the coordinate by that pubkey, so a user can never write another
+            # user's preferences, and the document is server-attested (the
+            # operator authors it about the subject, exactly like identity
+            # linking) because the server holds no user signer key.
+            from yunohost.nostrhost.list_specs import user_preferences_coordinate
+
+            try:
+                pubkey = _parse_pubkey(request.get("pubkey"))
+            except Exception:
+                return {"ok": False, "error": "pubkey is not a valid npub or hex pubkey"}
+            identity = store.get_identity_by_pubkey(pubkey)
+            if identity is None or identity.ynh_username != username:
+                return {"ok": False, "error": "pubkey is not linked to this account"}
+            settings = request.get("settings")
+            if not isinstance(settings, dict):
+                return {"ok": False, "error": "settings must be an object"}
+            coordinate = user_preferences_coordinate(pubkey)
+            import json as _json
+
+            from yunohost.nostr_identity import _pubkey, _sign_event, publish_to_relay
+            from yunohost.nostrhost.list_specs import KIND_APP_DATA
+
+            event = _sign_event(
+                operator_sk,
+                _pubkey(operator_sk),
+                KIND_APP_DATA,
+                _json.dumps(settings),
+                [["d", coordinate]],
+            )
+            (transport or publish_to_relay)(control_relay, event)
+            return {"ok": True, "event_id": event["id"], "coordinate": coordinate}
+
         return {"ok": False, "error": f"unknown action {action!r}"}
     except Exception as exc:  # noqa: BLE001 - the socket protocol is JSON-only
         logger.error("identity control request failed: %s", exc)
@@ -372,6 +411,90 @@ def serve_control(
     return thread
 
 
+class IdentityProjector(Projector):
+    """Projector contract around the kind-31102 identity mapping (+ LDAP).
+
+    The heavy lifting stays in :func:`handle_identity_event`; this class adds
+    the shared lifecycle (quarantine, checkpoint, health, registry).
+    """
+
+    name = "identity"
+    schema = 1
+
+    def __init__(
+        self,
+        *,
+        store: Any,
+        admin_pubkeys: tuple[str, ...] | list[str],
+        accounts: AccountBackend | None = None,
+        cursor_dir: str = DEFAULT_CURSOR_DIR,
+    ) -> None:
+        super().__init__(cursor_dir=cursor_dir)
+        self.store = store
+        self.admin_pubkeys = tuple(admin_pubkeys)
+        self.accounts = accounts
+
+    def validate(self, event: dict[str, Any]) -> Any:
+        if event.get("kind") not in (IDENTITY_KIND, 0):
+            return None
+        if event.get("kind") == IDENTITY_KIND and event.get("pubkey") not in self.admin_pubkeys:
+            self.quarantine(event, "identity event authored by non-admin")
+            return None
+        return event
+
+    def apply(self, event: dict[str, Any]) -> ProjectionResult:
+        if self.validate(event) is None:
+            return ProjectionResult(accepted=False, reason="invalid")
+        handled = handle_identity_event(
+            event,
+            store=self.store,
+            admin_pubkeys=self.admin_pubkeys,
+            accounts=self.accounts,
+        )
+        self._advance(event)
+        return ProjectionResult(accepted=True, changed=handled)
+
+    def current(self) -> str:
+        """Deterministic digest of the live mapping (for :func:`verify`)."""
+        return self._digest()
+
+    def render(self, state: Any) -> str | None:
+        return self._digest()
+
+    def commit(self, candidate: str) -> None:  # pragma: no cover - store owns the write
+        raise NotImplementedError("identity mapping is written by handle_identity_event")
+
+    def _digest(self) -> str:
+        rows = [
+            {
+                "pubkey": identity.pubkey,
+                "username": identity.ynh_username,
+                "enabled": bool(identity.enabled),
+                "signer_type": identity.signer_type,
+                "label": identity.label,
+            }
+            for identity in self.store.list_all()
+        ]
+        rows.sort(key=lambda r: (r["username"], r["pubkey"]))
+        return json.dumps(rows, sort_keys=True)
+
+    def clone(self) -> "IdentityProjector":
+        """A fresh projector over an empty temp DB, for :func:`verify`.
+
+        Never provisions Unix accounts: a verification refold is data-only.
+        """
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(prefix="identity-verify-", suffix=".db", delete=False)
+        tmp.close()
+        return IdentityProjector(
+            store=_store(Path(tmp.name)),
+            admin_pubkeys=self.admin_pubkeys,
+            accounts=None,
+            cursor_dir=str(self.cursor_dir),
+        )
+
+
 async def subscribe_loop(
     relay_url: str,
     *,
@@ -380,62 +503,79 @@ async def subscribe_loop(
     accounts: AccountBackend | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     stop: asyncio.Event | None = None,
+    cursor_dir: str = DEFAULT_CURSOR_DIR,
 ) -> None:
-    """Subscribe to identity kinds and materialise until stopped. Reconnects
-    on error after a short backoff."""
-    import websockets
+    """Subscribe to identity kinds and materialise until stopped.
 
-    filter: dict[str, Any] = {"kinds": [IDENTITY_KIND, 0]}
-    while not (stop is not None and stop.is_set()):
-        try:
-            async with websockets.connect(relay_url) as ws:
-                sub_id = "nostrhost-identity-" + secrets.token_hex(4)
-                await ws.send(json.dumps(["REQ", sub_id, filter]))
-                logger.info("identity projector subscribed to %s", relay_url)
-                replay: list[dict[str, Any]] = []
-                replaying = True
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg[0] == "AUTH":
-                        challenge = msg[1] if len(msg) > 1 else ""
-                        auth = default_auth()
-                        if auth is not None:
-                            auth_ev = _sign_auth_event(auth[0], auth[1], relay_url, challenge, sub_id)
-                            await ws.send(json.dumps(["AUTH", auth_ev]))
-                            await _wait_auth_ok_async(ws, auth_ev["id"])
-                            replay = []
-                            replaying = True
-                            await ws.send(json.dumps(["REQ", sub_id, filter]))
-                        continue
-                    if msg[0] == "EVENT":
-                        if replaying:
-                            replay.append(msg[2])
-                        else:
-                            handled = handle_identity_event(
-                                msg[2], store=store, admin_pubkeys=admin_pubkeys, accounts=accounts
-                            )
-                            if on_event is not None and handled:
-                                on_event(msg[2])
-                    elif msg[0] == "EOSE":
-                        for ev in sorted(
-                            replay,
-                            key=lambda e: (int(e.get("created_at") or 0), str(e.get("id") or "")),
-                        ):
-                            handled = handle_identity_event(
-                                ev, store=store, admin_pubkeys=admin_pubkeys, accounts=accounts
-                            )
-                            if on_event is not None and handled:
-                                on_event(ev)
-                        replay.clear()
-                        replaying = False
-                    elif msg[0] == "CLOSED":
-                        logger.warning("relay closed subscription: %s", msg[2] if len(msg) > 2 else "")
-                        break
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - keep the projector alive
-            logger.error("subscription error: %s; retrying in 5s", exc)
-            await asyncio.sleep(5)
+    Delegates the WebSocket replay/AUTH/backoff loop to the shared
+    :class:`~nostr_projector.ProjectionRuntime` (WP2).
+    """
+    projector = IdentityProjector(
+        store=store,
+        admin_pubkeys=admin_pubkeys,
+        accounts=accounts,
+        cursor_dir=cursor_dir,
+    )
+    REGISTRY.register(projector)
+
+    def _notify(events: list[dict[str, Any]]) -> None:
+        if on_event is not None:
+            for event in events:
+                if event.get("kind") == IDENTITY_KIND:
+                    on_event(event)
+
+    runtime = ProjectionRuntime(
+        relay_url,
+        projector=projector,
+        kinds=[IDENTITY_KIND, 0],
+        on_replay=_notify if on_event else None,
+        stop=stop,
+    )
+    await runtime.run()
+
+
+def rebuild(
+    relay_url: str,
+    *,
+    admin_pubkeys: tuple[str, ...] | list[str],
+    store: Any = None,
+    accounts: AccountBackend | None = None,
+) -> dict[str, Any]:
+    """Rebuild the identity projection (``identity.db``) from kind 31102 (WP3).
+
+    Replays the relay's identity definitions through the projector into the
+    mapping store. ``accounts`` should be ``None`` for a pure data rebuild —
+    account provisioning is an execution side-effect, not part of the
+    projection, and must not run during a state rebuild.
+    """
+    from .nostr_projector import rebuild as _rebuild
+
+    projector = IdentityProjector(
+        store=store if store is not None else _store(),
+        admin_pubkeys=admin_pubkeys,
+        accounts=accounts,
+    )
+    events = query_chain_events(relay_url, kinds=(IDENTITY_KIND,), limit=500)
+    report = _rebuild(events, projector=projector)
+    report["projection"] = projector._digest()
+    return report
+
+
+def verify(
+    relay_url: str,
+    *,
+    admin_pubkeys: tuple[str, ...] | list[str],
+    store: Any = None,
+) -> list[str]:
+    """Report drift between ``identity.db`` and a relay replay (WP3 verify)."""
+    from .nostr_projector import verify as _verify
+
+    projector = IdentityProjector(
+        store=store if store is not None else _store(),
+        admin_pubkeys=admin_pubkeys,
+    )
+    events = query_chain_events(relay_url, kinds=(IDENTITY_KIND,), limit=500)
+    return _verify(projector, events)
 
 
 def run() -> None:

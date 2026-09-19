@@ -23,9 +23,6 @@ def boot(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("NOSTRHOST_NOTICE_CONFIG", str(tmp_path / "portal.toml"))
     monkeypatch.setenv("NOSTRHOST_CATALOG_BIN", "/nonexistent/nostrhost-catalog")
     monkeypatch.setenv("NOSTRHOST_CATALOG_STATE", str(tmp_path / "catalogue.json"))
-    monkeypatch.setenv("NOSTRHOST_CATALOG_ATTESTATION_LEDGER", str(tmp_path / "attestations.json"))
-    monkeypatch.setenv("NOSTRHOST_CATALOG_ANNOUNCE_LEDGER", str(tmp_path / "announcements.json"))
-    monkeypatch.setenv("NOSTRHOST_CATALOG_PROFILE_STATE", str(tmp_path / "profile.json"))
     return bootstrap_node(force=True, write_relay=str(tmp_path / "relay.toml"))
 
 
@@ -103,10 +100,14 @@ def test_candidates_excludes_self_and_uninstalled(boot, cli_fake, app_list_fake)
     ]
 
 
-def test_candidates_excludes_already_attested(boot, cli_fake, app_list_fake, tmp_path):
+def test_candidates_excludes_already_attested(boot, cli_fake, app_list_fake, monkeypatch):
     import nostrhost.native_ops as no
 
-    no._write_json_atomic(no._catalog_attestation_ledger_path(), [{"app_id": "other-app", "publisher": OTHER_PUBLISHER}])
+    monkeypatch.setattr(
+        no,
+        "_catalog_endorsements",
+        lambda: [{"app_id": "other-app", "publisher": OTHER_PUBLISHER}],
+    )
     result = no._safe_catalog_candidates()
     assert result["candidates"] == []
 
@@ -155,8 +156,25 @@ def test_declare_rejects_invalid_manifest(boot, cli_fake):
 # --------------------------------------------------------------------------- #
 # attest
 
-def test_attest_signs_endorsement_and_records_history(boot, cli_fake):
+def test_attest_signs_endorsement_and_records_history(boot, cli_fake, monkeypatch):
     import nostrhost.native_ops as no
+
+    def fake_endorsements():
+        event = json.loads(next(c[1] for c in cli_fake if "publish" in c[0]))
+        tags = dict((t[0], t[1]) for t in event["tags"])
+        coordinate = tags["a"]
+        return [
+            {
+                "app_id": coordinate.split(":")[2],
+                "publisher": coordinate.split(":")[1],
+                "claim": tags["claim"],
+                "comment": event["content"],
+                "event_id": event["id"],
+                "created_at": event["created_at"],
+            }
+        ]
+
+    monkeypatch.setattr(no, "_catalog_endorsements", fake_endorsements)
 
     result = no._safe_catalog_attest(app_id="other-app", publisher=OTHER_PUBLISHER, claim="recommend", comment="good app")
     assert result["event_id"]
@@ -225,11 +243,17 @@ def test_reverify_requires_app_id(boot, cli_fake):
 # --------------------------------------------------------------------------- #
 # profile
 
-def test_profile_set_publishes_and_caches(boot, cli_fake):
+def test_profile_set_publishes_and_reads_back(boot, cli_fake, monkeypatch):
     import nostrhost.native_ops as no
 
+    def fake_own_events(kinds):
+        event = json.loads(next(c[1] for c in cli_fake if "publish" in c[0]))
+        return [event]
+
+    monkeypatch.setattr(no, "_catalog_own_events", fake_own_events)
+
     result = no._safe_catalog_profile_set(name="Node Publisher", about="hi")
-    assert result["cached"] is True
+    assert result["published_any"] is True
 
     pub_call = next(c for c in cli_fake if "publish" in c[0])
     event = json.loads(pub_call[1])
@@ -248,8 +272,14 @@ def test_profile_set_publishes_and_caches(boot, cli_fake):
 # --------------------------------------------------------------------------- #
 # announce
 
-def test_announce_signs_note_and_dedupes(boot, cli_fake):
+def test_announce_signs_note_and_dedupes(boot, cli_fake, monkeypatch):
     import nostrhost.native_ops as no
+
+    def fake_own_events(kinds):
+        published = [c for c in cli_fake if "publish" in c[0]]
+        return [json.loads(c[1]) for c in published]
+
+    monkeypatch.setattr(no, "_catalog_own_events", fake_own_events)
 
     result = no._safe_catalog_announce(app_id="nostrhost-test")
     assert result["event_id"]
@@ -260,6 +290,7 @@ def test_announce_signs_note_and_dedupes(boot, cli_fake):
     assert "nostrhost-test" in event["content"]
     tags = dict((t[0], t[1]) for t in event["tags"])
     assert tags["a"] == f"32267:{boot['publisher_pubkey']}:nostrhost-test"
+    assert tags["version"] == "1.0.0"
 
     from nostr_sdk import Event
 
@@ -267,6 +298,7 @@ def test_announce_signs_note_and_dedupes(boot, cli_fake):
 
     announcements = no._safe_catalog_announcements()["announcements"]
     assert len(announcements) == 1
+    assert announcements[0]["app_id"] == "nostrhost-test"
 
     with pytest.raises(OperationError, match="already announced"):
         no._safe_catalog_announce(app_id="nostrhost-test")
