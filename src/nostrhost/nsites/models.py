@@ -165,5 +165,49 @@ class PublishRequest(BaseModel):
     plan_sha256: str = ""
 
 
+class CollectionEntry(BaseModel):
+    """One entry in a curated nsite collection (kind 30004), in display order.
+
+    ``kind`` is ``live-root`` (a=15128:pubkey:), ``live-named``
+    (a=35128:pubkey:d) or ``pinned`` (e=5128 event id); ``ref`` is the
+    coordinate or event id; ``relay`` is an optional external relay hint for
+    finding the referenced manifest (a hint, not authority).
+    """
+
+    kind: str  # live-root | live-named | pinned
+    ref: str
+    relay: str = ""
+
+
+class CollectionPlan(BaseModel):
+    """The unsigned collection a curator is about to sign.
+
+    Built by ``nsite.collection.publish.plan``, never persisted. The plan
+    digest ``plan_sha256`` binds pubkey, ``d``, metadata and the *ordered*
+    entry tags plus the destination relay set, so ``nsite.collection.publish``
+    can reject a signed event whose digest does not match (stale-plan
+    rejection). ``copy_of`` records the ``30004:<pubkey>:<d>`` source when this
+    plan re-signs another curator's list under a new identity.
+    """
+
+    pubkey: str
+    d: str = ""
+    title: str = ""
+    description: str = ""
+    image: str = ""
+    entries: list[CollectionEntry] = Field(default_factory=list)
+    relays: list[str] = Field(default_factory=list)
+    copy_of: str = ""
+    unsigned_event: dict = Field(default_factory=dict)
+    plan_sha256: str = ""
+
+
+class CollectionRequest(BaseModel):
+    """A signed kind-30004 collection + the plan digest it was built from."""
+
+    event: dict
+    plan_sha256: str = ""
+
+
 def _str_list(values: list[str]) -> str:
     return "[" + ", ".join(f'"{v}"' for v in values) + "]"

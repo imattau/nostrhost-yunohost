@@ -83,6 +83,17 @@ DISCOVER_BLOB_PHASE_TIMEOUT = 6.0
 _discover_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _discover_cache_lock = threading.Lock()
 
+# Module-level collection cache (``nsite.collection.discover``): same shape as
+# the nsite discover cache, keyed by the effective relay set so a config or
+# block change invalidates it. ``refresh=True`` bypasses it.
+_collection_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_collection_cache_lock = threading.Lock()
+
+# Upper bound on how many collections a single discover call returns, and how
+# many entries each resolved collection carries back into the Admin.
+DISCOVER_MAX_COLLECTIONS = 100
+COLLECTION_ENTRY_RESOLVE_LIMIT = 100
+
 # Phase 3b draft area (implementation plan §3.2 / D6): the one fixed
 # server-side file path involved in publishing. The Admin agent writes site
 # files here; publish_plan can read its inventory ("shown to the user before
@@ -179,7 +190,7 @@ def plan_digest(
     values: list[Any] = [kind, d, sorted(paths), sorted(set(servers))]
     if relays is not None:
         values.append(sorted(set(relays)))
-    payload = json.dumps(values, separators=(",", ":"))
+    payload = json.dumps(values, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -542,6 +553,26 @@ def _filter_blocked(payload: dict[str, Any], blocked: frozenset[str]) -> dict[st
     blob = dict(payload.get("blob_check") or {})
     blob["blocked"] = int(blob.get("blocked", 0)) + dropped
     payload["blob_check"] = blob
+    return payload
+
+
+def _filter_blocked_collections(payload: dict[str, Any], blocked: frozenset[str]) -> dict[str, Any]:
+    """Drop blocked curators from a (possibly cached) collection payload.
+
+    Same shape as ``_filter_blocked`` but for the kind-30004 discover payload,
+    whose list lives under ``collections`` (each item carries ``pubkey``).
+    Returns the input untouched when nothing is blocked.
+    """
+    if not blocked:
+        return payload
+    items = payload.get("collections") or []
+    kept = [item for item in items if item.get("pubkey") not in blocked]
+    dropped = len(items) - len(kept)
+    if not dropped:
+        return payload
+    payload = dict(payload)
+    payload["collections"] = kept
+    payload["count"] = len(kept)
     return payload
 
 
@@ -2083,6 +2114,428 @@ class NsiteService:
         with _discover_cache_lock:
             _discover_cache[cache_key] = (now, payload)
         return _filter_blocked(payload, blocked)
+
+    # -- curated nsite collections (kind 30004, NSITES-CURATED-LISTS.md) ---
+
+    def collection_validate(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Validate a candidate collection event (no network)."""
+        from .collections import validate_collection as _validate
+        from .signer_guard import forbidden_signer_pubkeys
+
+        v = _validate(event, forbidden_pubkeys=forbidden_signer_pubkeys())
+        return {
+            "valid": v.valid,
+            "errors": v.errors,
+            "coordinate": v.coordinate,
+            "pubkey": v.pubkey,
+            "event_id": v.event_id,
+            "d": v.d,
+            "title": v.title,
+            "entries": [entry.__dict__ for entry in v.entries],
+        }
+
+    def collection_publish_plan(
+        self,
+        pubkey: str,
+        *,
+        d: str,
+        title: str = "",
+        description: str = "",
+        image: str = "",
+        entries: list[dict[str, str]] | None = None,
+        relays: list[str] | None = None,
+        copy_of: str = "",
+    ) -> dict[str, Any]:
+        """Build the unsigned kind-30004 event and its plan digest.
+
+        ``entries`` is the ordered ``[{"kind": "live-root"|"live-named"|"pinned",
+        "ref": "…", "relay": "…"}]`` list from the Admin, in display order.
+        ``copy_of`` (a ``30004:<pubkey>:<d>`` coordinate) resolves the source
+        collection from relays and re-signs its entries under this curator's
+        pubkey with a fresh ``d`` — "save a copy". Nothing is signed or
+        broadcast here.
+        """
+        from .collections import (
+            COLLECTION_KIND,
+            collection_plan_digest,
+            is_valid_coordinate,
+            is_valid_d,
+        )
+
+        pubkey = _pubkey_hex(pubkey)
+        if not is_valid_d(d):
+            raise NsiteError(f"invalid collection d tag: {d!r}")
+
+        src_entries: list[dict[str, str]] = []
+        if copy_of:
+            if not is_valid_coordinate(copy_of) or not copy_of.startswith(f"{COLLECTION_KIND}:"):
+                raise NsiteError(
+                    f"invalid copy source {copy_of!r} (expect 30004:<pubkey>:<d>)"
+                )
+            resolved = self.collection_resolve(copy_of)
+            if not resolved.get("found"):
+                raise NsiteError(f"copy source {copy_of!r} could not be resolved from relays")
+            src_entries = [
+                {"kind": e["kind"], "ref": e["ref"], "relay": e.get("relay", "")}
+                for e in resolved.get("entries", [])
+            ]
+            if not src_entries:
+                raise NsiteError("copy source has no entries to copy")
+
+        entry_tags: list[list[str]] = []
+        seen: set[str] = set()
+        ordered: list[dict[str, str]] = []
+        raw = entries if entries is not None else src_entries
+        for item in raw:
+            kind = str(item.get("kind", ""))
+            ref = str(item.get("ref", ""))
+            relay = str(item.get("relay", ""))
+            if kind not in ("live-root", "live-named", "pinned"):
+                raise NsiteError(f"invalid entry kind {kind!r}")
+            if ref in seen:
+                raise NsiteError(f"duplicate entry {ref!r}")
+            seen.add(ref)
+            tag = ["a" if kind in ("live-root", "live-named") else "e", ref]
+            if relay:
+                tag.append(relay)
+            entry_tags.append(tag)
+            ordered.append({"kind": kind, "ref": ref, "relay": relay})
+
+        from ..connectivity import effective as _effective
+
+        relays = [r for r in (relays or []) if r] or list(_effective()["relays"]["nsite"])
+        for url in relays:
+            if not url.startswith("wss://"):
+                raise NsiteError(f"refusing non-WSS relay URL: {url!r}")
+
+        tags: list[list[str]] = [
+            ["d", d],
+            ["t", "nsite"],
+        ]
+        if title:
+            tags.append(["title", title[:120]])
+        if description:
+            tags.append(["description", description[:500]])
+        if image:
+            tags.append(["image", image])
+        tags.extend(entry_tags)
+
+        digest = collection_plan_digest(
+            pubkey=pubkey,
+            d=d,
+            title=title[:120],
+            description=description[:500],
+            image=image,
+            entries=entry_tags,
+            relays=relays,
+        )
+        plan = {
+            "pubkey": pubkey,
+            "d": d,
+            "title": title[:120],
+            "description": description[:500],
+            "image": image,
+            "entries": ordered,
+            "relays": relays,
+            "copy_of": copy_of,
+            "unsigned_event": {
+                "kind": COLLECTION_KIND,
+                "pubkey": pubkey,
+                "created_at": 0,
+                "tags": tags,
+                "content": "",
+            },
+            "plan_sha256": digest,
+        }
+        return {"plan": plan}
+
+    def collection_publish(
+        self,
+        event: dict[str, Any],
+        *,
+        plan_sha256: str = "",
+        relays: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Verify a signed collection, broadcast it and report per-relay results.
+
+        Rejects (before any broadcast) when the event is not a valid kind-30004
+        ``t = nsite`` collection, is signed by a host key, or the plan digest
+        does not match the event's signed content. A publish that reaches at
+        least one relay succeeds with a warning list; one that reaches none
+        fails (D5 semantics). No local state is written — the signed event on
+        external relays is authoritative.
+        """
+        from .collections import (
+            COLLECTION_KIND,
+            collection_plan_digest,
+            validate_collection as _validate,
+        )
+        from .signer_guard import forbidden_signer_pubkeys
+
+        verdict = _validate(event, forbidden_pubkeys=forbidden_signer_pubkeys())
+        if not verdict.valid or verdict.pubkey is None:
+            raise NsiteError(
+                "collection is not valid: " + ", ".join(verdict.errors or ["bad_event"])
+            )
+
+        entry_tags: list[list[str]] = []
+        for t in event.get("tags", []):
+            if isinstance(t, list) and t and t[0] in ("a", "e"):
+                entry_tags.append(t)
+        from ..connectivity import effective as _effective
+
+        planned = [r for r in (relays or []) if r] or list(_effective()["relays"]["nsite"])
+        digest = collection_plan_digest(
+            pubkey=verdict.pubkey,
+            d=verdict.d or "",
+            title=verdict.title,
+            description=verdict.description,
+            image=verdict.image,
+            entries=entry_tags,
+            relays=planned,
+        )
+        if plan_sha256 and digest != plan_sha256:
+            raise NsiteError("plan digest mismatch: the signed collection does not match the planned content")
+        if not plan_sha256:
+            raise NsiteError("collection publish requires the plan_sha256 from nsite.collection.publish.plan")
+
+        broadcast = _broadcast(event, planned)
+        if not broadcast["succeeded"]:
+            raise NsiteError(
+                "collection publish reached no relay: " + ", ".join(
+                    f"{r['relay']}: {r.get('error', 'rejected')}" for r in broadcast["results"]
+                )
+            )
+        return {
+            "action": "nsite.collection.publish",
+            "event_id": verdict.event_id,
+            "coordinate": verdict.coordinate,
+            "d": verdict.d,
+            "title": verdict.title,
+            "entries": len(verdict.entries),
+            "relays": broadcast,
+            "ok": True,
+        }
+
+    def collection_resolve(
+        self,
+        coordinate: str,
+        *,
+        relays: list[str] | None = None,
+        limit: int = 5,
+        timeout: float = 8.0,
+    ) -> dict[str, Any]:
+        """Resolve one collection coordinate and its entries from public relays.
+
+        Bounded: at most ``limit`` relays for the collection event, each with
+        ``timeout`` seconds; newest valid event for the exact coordinate wins.
+        Each live/pinned entry is then resolved with the same bounded nsite
+        ``resolve`` (the entry's relay hint first, then lookup relays) so the
+        result renders ordered entries with per-entry availability. Reads only.
+        """
+        from .collections import COLLECTION_KIND, is_valid_coordinate
+
+        if not is_valid_coordinate(coordinate) or not coordinate.startswith(f"{COLLECTION_KIND}:"):
+            raise NsiteError(f"invalid collection coordinate {coordinate!r}")
+        parts = coordinate.split(":", 2)
+        author, d = parts[1], parts[2]
+
+        lookup_relays = [r for r in (relays or []) if r]
+        if relays:
+            for relay in lookup_relays:
+                _validate_relay_url(relay)
+        if not lookup_relays:
+            from ..connectivity import effective as _effective
+
+            lookup_relays = _effective()["relays"]["nsite_lookup"]
+
+        filters: dict[str, Any] = {"kinds": [COLLECTION_KIND], "#d": [d], "authors": [author]}
+        candidates: list[dict[str, Any]] = []
+        for relay in lookup_relays[:limit]:
+            candidates.extend(_query_relay_events(relay, filters, limit=20, timeout=timeout))
+        if not candidates:
+            return {"found": False, "relays_queried": lookup_relays[:limit], "collection": None}
+
+        from .collections import validate_collection as _validate
+
+        newest: tuple[int, str, dict[str, Any], Any] | None = None
+        for event in candidates:
+            v = _validate(event)
+            if not v.valid or v.pubkey != author or (v.d or "") != d:
+                continue
+            created_at = int(event.get("created_at", 0))
+            event_id = str(event.get("id", ""))
+            if newest is None or created_at > newest[0] or (
+                created_at == newest[0] and event_id > newest[1]
+            ):
+                newest = (created_at, event_id, event, v)
+        if newest is None:
+            return {"found": False, "relays_queried": lookup_relays[:limit], "collection": None}
+
+        _created, _event_id, event, verdict = newest
+        entries_out: list[dict[str, Any]] = []
+        for entry in verdict.entries[:COLLECTION_ENTRY_RESOLVE_LIMIT]:
+            resolved = None
+            if entry.kind in ("live-root", "live-named"):
+                try:
+                    resolved = self.resolve(
+                        pubkey=entry.ref.split(":", 2)[1],
+                        d=entry.ref.split(":", 2)[2],
+                        relays=[entry.relay] if entry.relay else None,
+                        limit=2,
+                        timeout=min(timeout, 6.0),
+                    )
+                except NsiteError:
+                    resolved = None
+            elif entry.kind == "pinned":
+                # A pinned entry references a kind-5128 snapshot event id: an
+                # immutable version. Resolve it by its snapshot label.
+                from .manifest import snapshot_label
+
+                try:
+                    resolved = self.resolve(
+                        label=snapshot_label(entry.ref),
+                        relays=[entry.relay] if entry.relay else None,
+                        limit=2,
+                        timeout=min(timeout, 6.0),
+                    )
+                except NsiteError:
+                    resolved = None
+            entries_out.append(
+                {
+                    "kind": entry.kind,
+                    "ref": entry.ref,
+                    "relay": entry.relay,
+                    "site": (resolved.get("manifest") if resolved and resolved.get("found") else None),
+                    "available": bool(resolved and resolved.get("found")),
+                }
+            )
+
+        blocked = _operator_blocklist()
+        return {
+            "found": True,
+            "relays_queried": lookup_relays[:limit],
+            "coordinate": verdict.coordinate,
+            "d": verdict.d,
+            "pubkey": verdict.pubkey,
+            "event_id": verdict.event_id,
+            "title": verdict.title,
+            "description": verdict.description,
+            "image": verdict.image,
+            "created_at": int(event.get("created_at", 0)),
+            "entries": entries_out,
+            "entries_total": len(verdict.entries),
+            "blocked": author in blocked,
+        }
+
+    def collection_discover(
+        self,
+        *,
+        limit: int = 100,
+        max_relays: int = 6,
+        timeout: float = 8.0,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Discover kind-30004 ``t = nsite`` collections from the relays.
+
+        On-demand, bounded read — no state is written. Scans the operator-
+        trusted catalogue + nsite-lookup relay sets for ``{"kinds":[30004],
+        "#t":["nsite"]}``, validates every candidate, keeps the newest valid
+        event per coordinate (event-id tie-break), drops the operator's blocked
+        npubs and returns bounded metadata only. Results are cached for
+        ``DISCOVER_CACHE_TTL`` seconds keyed by the effective relay set;
+        ``refresh=True`` bypasses the cache.
+        """
+        from ..connectivity import effective as _effective
+        from .collections import COLLECTION_KIND, validate_collection as _validate
+
+        effective = _effective()
+        relays: list[str] = []
+        for purpose in ("catalogue", "nsite_lookup"):
+            for url in effective["relays"].get(purpose) or []:
+                if url in relays:
+                    continue
+                try:
+                    _validate_relay_url(url)
+                except NsiteError:
+                    continue
+                relays.append(url)
+
+        scan_relays = relays[:max_relays]
+        blocked = _operator_blocklist()
+        cache_key = _discover_cache_key(scan_relays)
+        now = time.time()
+        with _collection_cache_lock:
+            cached = _collection_cache.get(cache_key)
+            if cached is not None and not refresh and (now - cached[0]) < DISCOVER_CACHE_TTL:
+                payload = _filter_blocked_collections(dict(cached[1]), blocked)
+                payload["cached"] = True
+                payload["cached_at"] = int(cached[0])
+                return payload
+
+        candidates: list[dict[str, Any]] = []
+        if scan_relays:
+            with ThreadPoolExecutor(max_workers=len(scan_relays)) as pool:
+                futures = [
+                    pool.submit(
+                        _query_relay_events,
+                        relay,
+                        {"kinds": [COLLECTION_KIND], "#t": ["nsite"]},
+                        limit=limit,
+                        timeout=timeout,
+                    )
+                    for relay in scan_relays
+                ]
+                for future in futures:
+                    try:
+                        candidates.extend(future.result())
+                    except Exception:  # noqa: BLE001 - a failed relay scan is skipped
+                        continue
+
+        newest: dict[str, tuple[int, str, dict[str, Any], Any]] = {}
+        for event in candidates:
+            verdict = _validate(event)
+            if not verdict.valid or not verdict.coordinate:
+                continue
+            key = verdict.coordinate
+            created_at = int(event.get("created_at", 0))
+            event_id = str(event.get("id", ""))
+            existing = newest.get(key)
+            if existing is None or created_at > existing[0] or (
+                created_at == existing[0] and event_id > existing[1]
+            ):
+                newest[key] = (created_at, event_id, event, verdict)
+
+        collections: list[dict[str, Any]] = []
+        for _created_at, _event_id, event, verdict in newest.values():
+            if verdict.pubkey in blocked:
+                continue
+            collections.append(
+                {
+                    "coordinate": verdict.coordinate,
+                    "pubkey": verdict.pubkey,
+                    "d": verdict.d,
+                    "title": verdict.title[:120],
+                    "description": verdict.description[:500],
+                    "image": verdict.image,
+                    "event_id": verdict.event_id,
+                    "created_at": int(event.get("created_at", 0)),
+                    "entries": len(verdict.entries),
+                }
+            )
+        collections.sort(key=lambda c: (-c["created_at"], c["coordinate"] or ""))
+        truncated = len(collections) > DISCOVER_MAX_COLLECTIONS
+        payload: dict[str, Any] = {
+            "collections": collections[:DISCOVER_MAX_COLLECTIONS],
+            "relays_queried": scan_relays,
+            "count": len(collections[:DISCOVER_MAX_COLLECTIONS]),
+            "truncated": truncated,
+            "cached": False,
+            "cached_at": None,
+        }
+        with _collection_cache_lock:
+            _collection_cache[cache_key] = (now, payload)
+        return _filter_blocked_collections(payload, blocked)
 
     def reachability(
         self,

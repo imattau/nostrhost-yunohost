@@ -13,10 +13,11 @@ Reason codes are stable strings shared with the corpus ``expect.errors``.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from .nip01 import verify_event
 
 KIND_ROOT = 15128
 KIND_NAMED = 35128
@@ -138,26 +139,6 @@ def decode_label(label: str) -> tuple[str | None, str | None, str | None]:
 # ---------------------------------------------------------------------------
 
 
-def _id_hex(
-    pubkey: str, created_at: int, kind: int, tags: list[list[str]], content: str
-) -> str:
-    serialized = json.dumps(
-        [0, pubkey, created_at, kind, tags, content],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _verify_signature(event: dict[str, Any]) -> bool:
-    from nostr_sdk import Event
-
-    try:
-        return Event.from_json(json.dumps(event)).verify_signature()
-    except Exception:
-        return False
-
-
 def _path_is_bad(path: str) -> bool:
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
         return True
@@ -207,9 +188,10 @@ def validate_manifest(
         or not is_sha256_hex(event_id)
     ):
         return Verdict(valid=False, errors=["bad_id"])
-    if _id_hex(pubkey, created_at, kind, tags, content) != event_id:
+    id_ok, signature_ok = verify_event(event)
+    if not id_ok:
         return Verdict(valid=False, errors=["bad_id"])
-    if not is_sha256_hex(pubkey) or not _verify_signature(event):
+    if not is_sha256_hex(pubkey) or not signature_ok:
         return Verdict(valid=False, errors=["bad_signature"])
 
     # Host keys may not sign user manifests (D7 / signer guard).

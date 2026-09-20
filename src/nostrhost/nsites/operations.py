@@ -153,6 +153,44 @@ class BlockSetArgs(_Strict):
     pubkeys: list[str] = Field(default_factory=list, description="the full blocked pubkey set (replaces the mute list)")
 
 
+class CollectionValidateArgs(_Strict):
+    event: dict = Field(description="the signed (or unsigned) collection event")
+
+
+class CollectionPlanArgs(_Strict):
+    pubkey: str = Field(description="the curator pubkey (hex or npub)")
+    d: str = Field(description="the collection d identifier (1-64 [a-zA-Z0-9_-])")
+    title: str = Field(default="", description="collection title (max 120 chars)")
+    description: str = Field(default="", description="collection description (max 500 chars)")
+    image: str = Field(default="", description="optional https cover image URL")
+    entries: list[dict[str, str]] | None = Field(
+        None,
+        description='ordered entries: [{"kind": "live-root"|"live-named"|"pinned", "ref": "<coordinate|event id>", "relay": "<optional wss hint>"}]',
+    )
+    relays: list[str] | None = Field(None, description="publication relays (defaults to host list)")
+    copy_of: str = Field(
+        default="",
+        description="save a copy: the 30004:<pubkey>:<d> source to re-sign under this identity",
+    )
+
+
+class CollectionPublishArgs(_Strict):
+    event: dict = Field(description="the signed collection event to verify/broadcast")
+    plan_sha256: str = Field(description="the plan digest from nsite.collection.publish.plan")
+    relays: list[str] | None = Field(None, description="publish relays (must match the plan)")
+
+
+class CollectionResolveArgs(_Strict):
+    coordinate: str = Field(description="a 30004:<pubkey>:<d> collection coordinate")
+    relays: list[str] | None = Field(None, description="lookup relays to query")
+    limit: int = Field(5, description="max relays to query (bounded)")
+    timeout: float = Field(8.0, description="per-relay timeout seconds (bounded)")
+
+
+class CollectionDiscoverArgs(_Strict):
+    refresh: bool = Field(False, description="bypass the 5-minute result cache and force a live relay scan")
+
+
 def _safe_nsite_discover(**args: Any) -> dict[str, Any]:
     extra = {k: v for k, v in args.items() if k != "refresh"}
     if extra:
@@ -394,3 +432,53 @@ def _safe_nsite_reachability(relays: list | None = None, servers: list | None = 
     if args:
         raise NostrHostError(f"nsite.reachability does not accept extra args: {sorted(args)}")
     return _service().reachability(relays=relays, servers=servers, timeout=timeout)
+
+
+def _safe_nsite_collection_validate(event: dict | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.collection.validate does not accept extra args: {sorted(args)}")
+    if not event:
+        raise NostrHostError("nsite.collection.validate requires an event")
+    return _service().collection_validate(event)
+
+
+def _safe_nsite_collection_plan(pubkey: str = "", d: str = "", title: str = "", description: str = "", image: str = "", entries: list | None = None, relays: list | None = None, copy_of: str = "", **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.collection.publish.plan does not accept extra args: {sorted(args)}")
+    if not pubkey:
+        raise NostrHostError("nsite.collection.publish.plan requires a pubkey")
+    try:
+        return _service().collection_publish_plan(
+            pubkey, d=d, title=title, description=description, image=image,
+            entries=entries, relays=relays, copy_of=copy_of,
+        )
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_collection_publish(event: dict | None = None, plan_sha256: str = "", relays: list | None = None, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.collection.publish does not accept extra args: {sorted(args)}")
+    if not event:
+        raise NostrHostError("nsite.collection.publish requires a signed event")
+    try:
+        return _service().collection_publish(event, plan_sha256=plan_sha256, relays=relays)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_collection_resolve(coordinate: str = "", relays: list | None = None, limit: int = 5, timeout: float = 8.0, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.collection.get does not accept extra args: {sorted(args)}")
+    if not coordinate:
+        raise NostrHostError("nsite.collection.get requires a coordinate")
+    try:
+        return _service().collection_resolve(coordinate, relays=relays, limit=limit, timeout=timeout)
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_nsite_collection_discover(refresh: bool = False, **args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError(f"nsite.collection.discover does not accept extra args: {sorted(args)}")
+    return _service().collection_discover(refresh=bool(refresh))

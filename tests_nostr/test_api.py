@@ -2399,3 +2399,52 @@ def test_notify_signers_pair_status_is_admin_scoped(monkeypatch):
     assert status == "404"
     status, _, _ = wsgi_request(_admin_app(), "GET", "/package/notify/signers/pair/" + "0" * 32)
     assert status == "404"
+
+
+# --------------------------------------------------------------------------- #
+# A1 typed API contracts: request bodies validate + OpenAPI carries schemas
+
+def test_typed_body_rejects_wrong_types_400(app):
+    # firewall.open's protocol must be a string; a wrong type must map to the
+    # same invalid_body envelope the legacy _json_body raised.
+    status, _, body = wsgi_request(app, "POST", "/package/firewall/open", {"port": 8080, "protocol": 123})
+    assert status == "400"
+    assert json.loads(body)["code"] == "invalid_body"
+
+
+def test_typed_body_tolerates_empty_body(app, monkeypatch):
+    # Routes whose models have all-default fields accept an empty object.
+    calls = []
+    monkeypatch.setattr(api_module, "_run_tool", lambda *a, **k: calls.append(a) or {"ok": True})
+    status, _, _ = wsgi_request(app, "POST", "/package/system/updates/refresh", {})
+    assert status == "200"
+    assert calls and calls[0] == ("updates.refresh", {"target": "apps"})
+
+
+def test_openapi_export_includes_typed_request_bodies():
+    app = api_module.build_app_with_openapi(authorizer=lambda _rule: "admin")
+    schema = app.openapi()
+    paths = schema["paths"]
+    assert "/package/domain/add" in paths
+    op = paths["/package/domain/add"]["post"]
+    assert "requestBody" in op
+    body_schema = op["requestBody"]["content"]["application/json"]["schema"]
+    props = body_schema["properties"]
+    assert props["domain"]["type"] == "string"
+    assert props["provider_type"]["default"] == "manual"
+    # the strict app-lifecycle apply route documents its exact plan_sha256 key
+    apply_op = paths["/package/app/{app_id}/settings/apply"]["post"]
+    assert "plan_sha256" in apply_op["requestBody"]["content"]["application/json"]["schema"]["properties"]
+
+
+def test_openapi_request_bodies_cover_typed_write_routes():
+    app = api_module.build_app_with_openapi(authorizer=lambda _rule: "admin")
+    schema = app.openapi()
+    with_body = sum(
+        1
+        for path in schema["paths"].values()
+        for method in ("post", "put", "patch", "delete")
+        if "requestBody" in path.get(method, {})
+    )
+    # every mapped write route is documented (see _REQUEST_BODY_MODELS)
+    assert with_body == len(api_module._REQUEST_BODY_MODELS())

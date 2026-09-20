@@ -3070,6 +3070,93 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         """List attached custom domains."""
         _forward("nsite.domain.list", {}, output_as)
 
+    # -- curated collections (kind 30004, NSITES-CURATED-LISTS.md) ---------
+
+    @nsite.command("collection-validate")
+    def nsite_collection_validate(
+        event_file: str = typer.Argument(..., help="path to a signed collection JSON"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Validate a candidate kind-30004 collection event; no network."""
+        def run() -> Any:
+            return _run_tool("nsite.collection.validate", {"event": _load_json_file(event_file)})
+        _guard(run, output_as)
+
+    @nsite.command("collection-get")
+    def nsite_collection_get(
+        coordinate: str = typer.Argument(..., help="a 30004:<pubkey>:<d> collection coordinate"),
+        relays: str = typer.Option("", "--relays", help="comma-separated lookup relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Resolve one collection coordinate and its ordered entries (read only, bounded)."""
+        _guard(
+            lambda: _run_tool(
+                "nsite.collection.get",
+                {"coordinate": coordinate, "relays": [r for r in relays.split(",") if r] or None},
+            ),
+            output_as,
+        )
+
+    @nsite.command("collection-discover")
+    def nsite_collection_discover(
+        refresh: bool = typer.Option(False, "--refresh", help="bypass the 5-minute cache and force a live relay scan"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Browse validated kind-30004 t=nsite collections on the catalogue + lookup relays."""
+        _guard(
+            lambda: _run_tool("nsite.collection.discover", {"refresh": refresh}),
+            output_as,
+        )
+
+    @nsite.command("collection-plan")
+    def nsite_collection_plan(
+        pubkey: str = typer.Argument(..., help="curator pubkey (hex or npub)"),
+        d: str = typer.Argument(..., help="collection d identifier"),
+        entries: str = typer.Argument(None, help="path to a JSON ordered-entries file"),
+        title: str = typer.Option("", "--title"),
+        description: str = typer.Option("", "--description"),
+        image: str = typer.Option("", "--image", help="https cover image URL"),
+        relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        copy_of: str = typer.Option("", "--copy-of", help="save a copy: the 30004:<pubkey>:<d> source to re-sign"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Build the unsigned kind-30004 collection + plan_sha256 from an entries file."""
+        def run() -> Any:
+            return _run_tool(
+                "nsite.collection.publish.plan",
+                {
+                    "pubkey": pubkey,
+                    "d": d,
+                    "title": title,
+                    "description": description,
+                    "image": image,
+                    "entries": _load_json_file(entries) if entries else None,
+                    "relays": [r for r in relays.split(",") if r] or None,
+                    "copy_of": copy_of,
+                },
+            )
+        _guard(run, output_as)
+
+    @nsite.command("collection-publish")
+    def nsite_collection_publish(
+        signed_event: str = typer.Argument(..., help="path to the signed collection JSON"),
+        plan: str = typer.Argument(..., help="the plan_sha256 from nsite collection-plan"),
+        relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Verify a signed collection, broadcast to relays, report per-relay results."""
+        def run() -> Any:
+            body = _run_lifecycle(
+                "nsite.collection.publish",
+                {"event": _load_json_file(signed_event), "plan_sha256": plan,
+                 "relays": [r for r in relays.split(",") if r] or None},
+                state=state,
+            )
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.collection.publish rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     # -- logs ---------------------------------------------------------------
 
     logs = typer.Typer(name="logs", help="host logs (journal + nginx)", no_args_is_help=True)

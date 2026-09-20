@@ -25,12 +25,107 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlunsplit
 
+from pydantic import BaseModel, ValidationError
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 
 from nostrhost import problems, web
+
+from .api_models import (
+    AgentContributionSettingsSetBody,
+    AgentContributionShareBody,
+    AgentContributionSubmitBody,
+    AgentExportRunBody,
+    AgentModeSetBody,
+    AgentModelDownloadBody,
+    AgentModelSelectBody,
+    AppChangeUrlApplyBody,
+    AppChangeUrlPlanBody,
+    AppRemoveBody,
+    AppSettingsApplyBody,
+    AppSettingsPlanBody,
+    BackupCreateBody,
+    BackupDeleteBody,
+    BackupPolicySetBody,
+    BackupRestoreBody,
+    CapabilityDelegateBody,
+    CapabilityGrantBody,
+    CapabilityRevokeBody,
+    CatalogAnnounceBody,
+    CatalogAttestBody,
+    CatalogDeclareBody,
+    CatalogProfileSetBody,
+    CatalogPublishBody,
+    CatalogReverifyBody,
+    CatalogVerifyBody,
+    ConnectivityApplyBody,
+    ConnectivityCheckBody,
+    ConnectivityPlanBody,
+    CredentialRemoveBody,
+    CredentialSetBody,
+    DiagnosisIgnoreBody,
+    DiagnosisRunBody,
+    DiagnosisUnignoreBody,
+    DnsApplyBody,
+    DnsSubscribeBody,
+    DnsUnsubscribeBody,
+    DomainAddBody,
+    DomainPrimaryApplyBody,
+    DomainPrimaryPlanBody,
+    DomainRemoveBody,
+    FirewallCloseBody,
+    FirewallOpenBody,
+    FirewallReloadBody,
+    IdentityLinkBody,
+    IdentityRevokeBody,
+    McpEndpointConfigureBody,
+    NsiteBlockAddBody,
+    NsiteBlockRemoveBody,
+    NsiteBlockSetBody,
+    NsiteCollectionPlanBody,
+    NsiteCollectionPublishBody,
+    NsiteCollectionValidateBody,
+    NsiteDomainAttachBody,
+    NsiteDomainDetachBody,
+    NsiteGatewayBody,
+    NsiteMirrorBody,
+    NsitePublishBody,
+    NsitePublishPlanBody,
+    NsiteReachabilityBody,
+    NsiteRegisterBody,
+    NsiteSnapshotBody,
+    NsiteUnregisterBody,
+    NsiteValidateBody,
+    NotifySignersPairStartBody,
+    NotifySignersRegisterBody,
+    OperationDecisionBody,
+    PackageFetchManifestBody,
+    PackagePlanBody,
+    PackageReconcileBody,
+    RollbackApplyBody,
+    ServiceConfigsReconcileBody,
+    ServiceControlBody,
+    ServiceRestartBody,
+    SettingsResetBody,
+    SettingsSetBody,
+    StatePublishBody,
+    StateReconcileBody,
+    StateRollbackPlanBody,
+    UpdatesApplyBody,
+    UpdatesRefreshBody,
+    UserCreateBody,
+    UserDeleteBody,
+    UserGroupCreateBody,
+    UserGroupDeleteBody,
+    UserGroupUpdateBody,
+    UserPermissionAddBody,
+    UserPermissionRemoveBody,
+    UserPermissionUpdateBody,
+    UserUpdateBody,
+)
 
 from .cli import (
     _agent_contribution_settings_get,
@@ -383,6 +478,11 @@ NSITE_ROUTE_SCOPES: dict[str, tuple[str, ...]] = {
     "/package/nsite/publish": ("nsites.publish",),
     "/package/nsite/snapshot": ("nsites.publish",),
     "/package/nsite/mirror": ("nsites.publish",),
+    "/package/nsite/collection/validate": ("nsites.read",),
+    "/package/nsite/collection/get": ("nsites.read",),
+    "/package/nsite/collection/discover": ("nsites.read",),
+    "/package/nsite/collection/publish/plan": ("nsites.read",),
+    "/package/nsite/collection/publish": ("nsites.publish",),
     "/package/nsite/domain/list": ("nsites.read",),
     "/package/nsite/domain/attach": ("nsites.admin",),
     "/package/nsite/domain/detach": ("nsites.admin",),
@@ -585,7 +685,7 @@ def build_app(
     ``event_stream(request_id)`` yields operation chain events for the SSE
     ``/events/<id>`` endpoint (default: live relay subscription).
     """
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url="/package/openapi.json")
     app.router.route_class = _ApiRoute
     app.state.authorizer = authorizer or default_authorizer(
         admin_pubkeys=admin_pubkeys, operator_pubkey=operator_pubkey
@@ -669,14 +769,14 @@ def build_app(
 
     @app.post("/package/system/updates/refresh")
     def system_updates_refresh() -> Any:
-        body = _json_body()
+        body = _body(UpdatesRefreshBody)
         return _run_tool("updates.refresh", {"target": body.get("target", "apps")})
 
     @app.post("/package/system/updates/apply")
     def system_updates_apply() -> Any:
         """Apply pending apt/app upgrades. High-risk/require-approval: routed
         through the signed operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(UpdatesApplyBody)
         return _run_lifecycle("system.upgrade", {"target": body.get("target", "system")}, state=_State())
 
     @app.get("/package/system/migrations")
@@ -703,7 +803,7 @@ def build_app(
         """Register a native domain: plan DNS, apply, stand up Caddy routes,
         record state. High-risk: routed through the signed operation chain
         (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(DomainAddBody)
         return _run_lifecycle(
             "domain.add",
             {
@@ -727,7 +827,7 @@ def build_app(
     def domain_remove() -> Any:
         """Remove a native domain (blocks while apps use it; deletes owned
         DNS only). High-risk: routed through the signed operation chain."""
-        body = _json_body()
+        body = _body(DomainRemoveBody)
         return _run_lifecycle(
             "domain.remove",
             {"domain": body.get("domain", ""), "force": bool(body.get("force", False))},
@@ -739,7 +839,7 @@ def build_app(
     @app.post("/package/nsite/gateway/enable")
     def nsite_gateway_enable() -> Any:
         """Enable the nsite gateway on a dedicated registered domain."""
-        body = _json_body()
+        body = _body(NsiteGatewayBody)
         return _run_lifecycle(
             "nsite.gateway.enable",
             {
@@ -762,7 +862,7 @@ def build_app(
     @app.post("/package/nsite/gateway/configure")
     def nsite_gateway_configure() -> Any:
         """Update the nsite gateway config and reload."""
-        body = _json_body()
+        body = _body(NsiteGatewayBody)
         return _run_lifecycle(
             "nsite.gateway.configure",
             {
@@ -809,13 +909,13 @@ def build_app(
     @app.post("/package/nsite/validate")
     def nsite_validate_manifest() -> Any:
         """Validate a candidate manifest event; no network."""
-        body = _json_body()
+        body = _body(NsiteValidateBody)
         return _run_tool("nsite.validate_manifest", {"event": body.get("event")})
 
     @app.post("/package/nsite/reachability")
     def nsite_reachability() -> Any:
         """Relay/server reachability probes (bounded)."""
-        body = _json_body()
+        body = _body(NsiteReachabilityBody)
         return _run_tool(
             "nsite.reachability",
             {
@@ -829,7 +929,7 @@ def build_app(
     def nsite_publish_plan() -> Any:
         """Blob inventory to an unsigned manifest + plan_sha256 (D7), or a
         copy plan from a source site (Phase 5, ``copy_of``)."""
-        body = _json_body()
+        body = _body(NsitePublishPlanBody)
         return _run_tool(
             "nsite.publish.plan",
             {
@@ -847,7 +947,7 @@ def build_app(
     @app.post("/package/nsite/register")
     def nsite_register() -> Any:
         """Add a hosted-mode allowlist entry. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteRegisterBody)
         return _run_lifecycle(
             "nsite.register",
             {
@@ -862,7 +962,7 @@ def build_app(
     @app.post("/package/nsite/unregister")
     def nsite_unregister() -> Any:
         """Remove a hosted-mode allowlist entry. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteUnregisterBody)
         return _run_lifecycle(
             "nsite.unregister",
             {"pubkey": body.get("pubkey", ""), "d": body.get("d", "")},
@@ -886,7 +986,7 @@ def build_app(
     @app.post("/package/nsite/block/add")
     def nsite_block_add() -> Any:
         """Add one npub to the operator's mute list. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteBlockAddBody)
         return _run_lifecycle(
             "nsite.block.add",
             {"pubkey": body.get("pubkey", "")},
@@ -896,7 +996,7 @@ def build_app(
     @app.post("/package/nsite/block/remove")
     def nsite_block_remove() -> Any:
         """Remove one npub from the operator's mute list. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteBlockRemoveBody)
         return _run_lifecycle(
             "nsite.block.remove",
             {"pubkey": body.get("pubkey", "")},
@@ -906,7 +1006,7 @@ def build_app(
     @app.post("/package/nsite/block/set")
     def nsite_block_set() -> Any:
         """Replace the operator's mute list. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteBlockSetBody)
         return _run_lifecycle(
             "nsite.block.set",
             {"pubkeys": body.get("pubkeys", [])},
@@ -917,7 +1017,7 @@ def build_app(
     def nsite_publish() -> Any:
         """Verify a signed manifest, broadcast to relays, record the site.
         Approval-gated."""
-        body = _json_body()
+        body = _body(NsitePublishBody)
         return _run_lifecycle(
             "nsite.publish",
             {
@@ -931,7 +1031,7 @@ def build_app(
     @app.post("/package/nsite/snapshot")
     def nsite_snapshot() -> Any:
         """Record a client-signed kind-5128 snapshot. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteSnapshotBody)
         return _run_lifecycle(
             "nsite.snapshot",
             {
@@ -946,7 +1046,7 @@ def build_app(
     def nsite_mirror() -> Any:
         """Re-upload a site's missing blobs to the selected servers from the
         draft area. Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteMirrorBody)
         return _run_lifecycle(
             "nsite.mirror",
             {
@@ -963,7 +1063,7 @@ def build_app(
     def nsite_domain_attach() -> Any:
         """Attach a custom FQDN to a registered site (ownership proof via
         CNAME to the gateway domain or a TXT challenge). Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteDomainAttachBody)
         return _run_lifecycle(
             "nsite.domain.attach",
             {
@@ -980,10 +1080,72 @@ def build_app(
     def nsite_domain_detach() -> Any:
         """Detach a custom FQDN (removes the Caddy route and marker only).
         Approval-gated."""
-        body = _json_body()
+        body = _body(NsiteDomainDetachBody)
         return _run_lifecycle(
             "nsite.domain.detach",
             {"fqdn": body.get("fqdn", "")},
+            state=_State(),
+        )
+
+    # -- curated nsite collections (kind 30004, NSITES-CURATED-LISTS.md) ---
+
+    @app.get("/package/nsite/collection/get")
+    def nsite_collection_get(request: Request) -> Any:
+        """Resolve one collection coordinate and its ordered live/pinned
+        entries from public relays (read only, bounded)."""
+        return _run_tool(
+            "nsite.collection.get",
+            {
+                "coordinate": request.query_params.get("coordinate", ""),
+                "relays": _optional_list(request.query_params.get("relays")),
+                "limit": int(request.query_params.get("limit", "5") or "5"),
+                "timeout": float(request.query_params.get("timeout", "8") or "8"),
+            },
+        )
+
+    @app.get("/package/nsite/collection/discover")
+    def nsite_collection_discover(request: Request) -> Any:
+        """Validated kind-30004 t=nsite collections on the catalogue + lookup
+        relays. ``?refresh=1`` bypasses the 5-minute server-side cache."""
+        refresh = request.query_params.get("refresh") in ("1", "true")
+        return _run_tool("nsite.collection.discover", {"refresh": refresh})
+
+    @app.post("/package/nsite/collection/validate")
+    def nsite_collection_validate() -> Any:
+        """Validate a candidate kind-30004 collection event; no network."""
+        body = _body(NsiteCollectionValidateBody)
+        return _run_tool("nsite.collection.validate", {"event": body.get("event", {})})
+
+    @app.post("/package/nsite/collection/publish/plan")
+    def nsite_collection_plan() -> Any:
+        """Ordered entries + metadata to an unsigned collection + plan digest."""
+        body = _body(NsiteCollectionPlanBody)
+        return _run_tool(
+            "nsite.collection.publish.plan",
+            {
+                "pubkey": body.get("pubkey", ""),
+                "d": body.get("d", ""),
+                "title": body.get("title", ""),
+                "description": body.get("description", ""),
+                "image": body.get("image", ""),
+                "entries": body.get("entries"),
+                "relays": body.get("relays"),
+                "copy_of": body.get("copy_of", ""),
+            },
+        )
+
+    @app.post("/package/nsite/collection/publish")
+    def nsite_collection_publish() -> Any:
+        """Verify a signed collection, broadcast it, report per-relay results.
+        Approval-gated."""
+        body = _body(NsiteCollectionPublishBody)
+        return _run_lifecycle(
+            "nsite.collection.publish",
+            {
+                "event": body.get("event", {}),
+                "plan_sha256": body.get("plan_sha256", ""),
+                "relays": body.get("relays"),
+            },
             state=_State(),
         )
 
@@ -991,7 +1153,7 @@ def build_app(
     def dns_apply() -> Any:
         """Apply the DNS plan for a domain through its provider. High-risk:
         routed through the signed operation chain (owner co-signature)."""
-        body = _json_body()
+        body = _body(DnsApplyBody)
         return _run_lifecycle("dns.apply", {"domain": body.get("domain", "")}, state=_State())
 
     @app.post("/package/dns/subscribe")
@@ -999,7 +1161,7 @@ def build_app(
         """Claim a nostr-native free hostname (identity-backed Dynette).
         High-risk: routed through the signed operation chain (owner
         co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(DnsSubscribeBody)
         return _run_lifecycle(
             "dns.subscribe",
             {
@@ -1014,7 +1176,7 @@ def build_app(
     def dns_unsubscribe() -> Any:
         """Release a nostr-native free-hostname subscription and drop its
         broker secret. High-risk: routed through the signed operation chain."""
-        body = _json_body()
+        body = _body(DnsUnsubscribeBody)
         return _run_lifecycle("dns.unsubscribe", {"hostname": body.get("hostname", "")}, state=_State())
 
     # -- network / dns credentials --------------------------------------------
@@ -1023,7 +1185,7 @@ def build_app(
     def credential_set() -> Any:
         """Store a DNS provider token in the credential broker. High-risk:
         routed through the signed operation chain (owner co-signature)."""
-        body = _json_body()
+        body = _body(CredentialSetBody)
         return _run_lifecycle(
             "credential.set",
             {
@@ -1038,7 +1200,7 @@ def build_app(
     def credential_remove() -> Any:
         """Remove a DNS provider token from the credential broker. High-risk:
         routed through the signed operation chain (owner co-signature)."""
-        body = _json_body()
+        body = _body(CredentialRemoveBody)
         return _run_lifecycle(
             "credential.remove",
             {"provider": body.get("provider", ""), "name": body.get("name", "")},
@@ -1073,7 +1235,7 @@ def build_app(
     def backup_create() -> Any:
         """Create a Restic snapshot. Medium-risk: routed through the signed
         operation chain (admin confirmation)."""
-        body = _json_body()
+        body = _body(BackupCreateBody)
         return _run_lifecycle(
             "backup.create",
             {
@@ -1088,7 +1250,7 @@ def build_app(
     def backup_restore() -> Any:
         """Restore a Restic snapshot. High-risk: routed through the signed
         operation chain (admin confirmation)."""
-        body = _json_body()
+        body = _body(BackupRestoreBody)
         return _run_lifecycle(
             "backup.restore",
             {
@@ -1103,7 +1265,7 @@ def build_app(
     def backup_delete() -> Any:
         """Forget Restic snapshots / apply the retention policy. Irreversible:
         routed through the signed operation chain (admin confirmation)."""
-        body = _json_body()
+        body = _body(BackupDeleteBody)
         return _run_lifecycle(
             "backup.delete",
             {
@@ -1117,7 +1279,7 @@ def build_app(
     @app.post("/package/backup/policy")
     def backup_policy_set() -> Any:
         """Set the Restic retention policy and scheduled-backup cadence."""
-        body = _json_body()
+        body = _body(BackupPolicySetBody)
         return _run_lifecycle(
             "backup.policy.set",
             {
@@ -1158,7 +1320,7 @@ def build_app(
 
     @app.post("/package/state/rollback/plan")
     def state_rollback_plan() -> Any:
-        body = _json_body()
+        body = _body(StateRollbackPlanBody)
         return _run_tool(
             "state.rollback.plan",
             {
@@ -1171,19 +1333,19 @@ def build_app(
     @app.post("/package/state/rollback/apply")
     def state_rollback_apply() -> Any:
         """Execute an approved rollback plan (write, admin confirmation)."""
-        body = _json_body()
+        body = _body(RollbackApplyBody)
         return _run_lifecycle("rollback.apply", {"plan": body.get("plan")}, state=_State())
 
     @app.post("/package/state/reconcile")
     def state_reconcile() -> Any:
         """Apply an approved bounded reconciliation plan."""
-        body = _json_body()
+        body = _body(StateReconcileBody)
         return _run_lifecycle("state.reconcile", {"plan": body.get("plan")}, state=_State())
 
     @app.post("/package/state/publish")
     def state_publish() -> Any:
         """Replicate the state repository to relays (disaster recovery)."""
-        body = _json_body()
+        body = _body(StatePublishBody)
         return _run_lifecycle(
             "state.publish",
             {
@@ -1200,7 +1362,7 @@ def build_app(
         """Run diagnosis categories and return the cached report. No-approval,
         but POST since it runs real checks and mutates the diagnosis cache
         (same as /package/system/updates/refresh)."""
-        body = _json_body()
+        body = _body(DiagnosisRunBody)
         return _run_tool(
             "diagnosis.run",
             {
@@ -1214,14 +1376,14 @@ def build_app(
     def diagnosis_ignore() -> Any:
         """Add a diagnosis ignore filter. Routed through the signed operation
         chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(DiagnosisIgnoreBody)
         return _run_lifecycle("diagnosis.ignore", {"filter": body.get("filter", [])}, state=_State())
 
     @app.post("/package/diagnosis/unignore")
     def diagnosis_unignore() -> Any:
         """Remove a diagnosis ignore filter. Routed through the signed
         operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(DiagnosisUnignoreBody)
         return _run_lifecycle("diagnosis.unignore", {"filter": body.get("filter", [])}, state=_State())
 
     # -- firewall ---------------------------------------------------------------
@@ -1236,7 +1398,7 @@ def build_app(
     def firewall_open() -> Any:
         """Open a firewall port. High-risk: routed through the signed
         operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(FirewallOpenBody)
         return _run_lifecycle(
             "firewall.open",
             {
@@ -1252,7 +1414,7 @@ def build_app(
     def firewall_close() -> Any:
         """Close a firewall port. High-risk: routed through the signed
         operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(FirewallCloseBody)
         return _run_lifecycle(
             "firewall.close",
             {
@@ -1267,7 +1429,7 @@ def build_app(
     def firewall_reload() -> Any:
         """Re-apply the current firewall rule set. High-risk: routed through
         the signed operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(FirewallReloadBody)
         return _run_lifecycle("firewall.reload", {"skip_upnp": bool(body.get("skip_upnp", False))}, state=_State())
 
     # -- service ------------------------------------------------------------
@@ -1282,14 +1444,14 @@ def build_app(
         """Restart one named service. A write with real consequences (a bad
         restart can take an app or the control plane down): routed through the
         signed operation chain (policy + approval), not _run_tool."""
-        body = _json_body()
+        body = _body(ServiceRestartBody)
         return _run_lifecycle("service.restart", {"name": body.get("name", "")}, state=_State())
 
     @app.post("/package/service/control")
     def service_control() -> Any:
         """Start/stop/restart one named service. Same write-risk tier as
         service.restart: routed through the signed operation chain."""
-        body = _json_body()
+        body = _body(ServiceControlBody)
         return _run_lifecycle(
             "service.control",
             {"name": body.get("name", ""), "action": body.get("action", "")},
@@ -1326,7 +1488,7 @@ def build_app(
 
     @app.post("/package/agent/models/download")
     def agent_models_download() -> Any:
-        body = _json_body()
+        body = _body(AgentModelDownloadBody)
         return _run_lifecycle(
             "agent.model.download",
             {"model_id": body.get("model_id", ""), "evaluation_only": bool(body.get("evaluation_only", False))},
@@ -1335,7 +1497,7 @@ def build_app(
 
     @app.post("/package/agent/models/select")
     def agent_models_select() -> Any:
-        body = _json_body()
+        body = _body(AgentModelSelectBody)
         return _run_lifecycle("agent.model.select", {"model_id": body.get("model_id", "")}, state=_State())
 
     @app.get("/package/agent/models/status")
@@ -1348,7 +1510,7 @@ def build_app(
 
     @app.post("/package/agent/mode")
     def agent_mode_set() -> Any:
-        body = _json_body()
+        body = _body(AgentModeSetBody)
         return _run_lifecycle(
             "agent.mode.set", {"level": body.get("level", ""), "confirm": bool(body.get("confirm", False))}, state=_State()
         )
@@ -1361,7 +1523,7 @@ def build_app(
 
     @app.post("/package/agent/export/run")
     def agent_export_run() -> Any:
-        body = _json_body()
+        body = _body(AgentExportRunBody)
         return _run_lifecycle("agent.export.run", {"cycle_id": body.get("cycle_id", "")}, state=_State())
 
     @app.get("/package/agent/export/{candidate_file_id}")
@@ -1378,7 +1540,7 @@ def build_app(
         the resident daemon submitting every completed cycle with no click
         needed. Admin-only, and routed through the signed operation chain so
         the toggle and its approval are audited (H5)."""
-        body = _json_body()
+        body = _body(AgentContributionSettingsSetBody)
         return _lifecycle_result(
             _run_lifecycle(
                 "agent.contribution.settings.set",
@@ -1396,7 +1558,7 @@ def build_app(
         """Causes real network egress of exactly one already-prepared candidate
         file the admin explicitly chose. Admin-only, approval-gated via the
         signed operation chain."""
-        body = _json_body()
+        body = _body(AgentContributionSubmitBody)
         return _lifecycle_result(_run_lifecycle("agent.contribution.submit", {"candidate_file_id": body.get("candidate_file_id", "")}, state=_State()))
 
     @app.post("/package/agent/contribution/share")
@@ -1407,7 +1569,7 @@ def build_app(
         sharing; the redaction plus the community repo's own CI validation
         are the safeguards, on this path exactly as on automatic submission.
         Approval-gated via the signed operation chain."""
-        body = _json_body()
+        body = _body(AgentContributionShareBody)
         return _lifecycle_result(_run_lifecycle("agent.contribution.share", {"cycle_id": body.get("cycle_id", "")}, state=_State()))
 
     # -- catalog --------------------------------------------------------------
@@ -1454,7 +1616,7 @@ def build_app(
 
     @app.post("/package/catalog/publish")
     def catalog_publish() -> Any:
-        body = _json_body()
+        body = _body(CatalogPublishBody)
         # H5: catalogue writes go through the signed operation chain (policy /
         # approval / audit), not a direct handler call.
         return _run_lifecycle(
@@ -1463,7 +1625,7 @@ def build_app(
 
     @app.post("/package/catalog/declare")
     def catalog_declare() -> Any:
-        body = _json_body()
+        body = _body(CatalogDeclareBody)
         return _run_lifecycle(
             "catalog.declare",
             {"package": body.get("package"), "repository": body.get("repository", ""), "relays": body.get("relays", "")},
@@ -1472,12 +1634,12 @@ def build_app(
 
     @app.post("/package/catalog/verify")
     def catalog_verify() -> Any:
-        body = _json_body()
+        body = _body(CatalogVerifyBody)
         return _run_tool("catalog.verify", {"event_or_naddr": body.get("event_or_naddr", "")})
 
     @app.post("/package/catalog/attest")
     def catalog_attest() -> Any:
-        body = _json_body()
+        body = _body(CatalogAttestBody)
         return _run_lifecycle(
             "catalog.attest",
             {
@@ -1508,12 +1670,12 @@ def build_app(
 
     @app.post("/package/catalog/reverify")
     def catalog_reverify() -> Any:
-        body = _json_body()
+        body = _body(CatalogReverifyBody)
         return _run_tool("catalog.reverify", {"app_id": body.get("app_id", "")})
 
     @app.post("/package/catalog/profile")
     def catalog_profile_set() -> Any:
-        body = _json_body()
+        body = _body(CatalogProfileSetBody)
         return _run_lifecycle(
             "catalog.profile.set",
             {
@@ -1529,7 +1691,7 @@ def build_app(
 
     @app.post("/package/catalog/announce")
     def catalog_announce() -> Any:
-        body = _json_body()
+        body = _body(CatalogAnnounceBody)
         return _run_lifecycle(
             "catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")}, state=_State()
         )
@@ -1633,7 +1795,7 @@ def build_app(
 
     @app.post("/package/app/{app_id}/settings/plan")
     def app_settings_plan(app_id: str) -> Any:
-        body = _json_body()
+        body = _body(AppSettingsPlanBody)
         if set(body) != {"values"}:
             raise ApiError(400, "invalid_request", "settings plan accepts only a values object")
         try:
@@ -1643,7 +1805,7 @@ def build_app(
 
     @app.post("/package/app/{app_id}/settings/apply")
     def app_settings_apply(app_id: str) -> Any:
-        body = _json_body()
+        body = _body(AppSettingsApplyBody)
         if set(body) != {"values", "plan_sha256"}:
             raise ApiError(400, "invalid_request", "settings apply requires values and plan_sha256")
         try:
@@ -1662,7 +1824,7 @@ def build_app(
 
     @app.post("/package/app/{app_id}/change-url/plan")
     def app_change_url_plan(app_id: str) -> Any:
-        body = _json_body()
+        body = _body(AppChangeUrlPlanBody)
         if set(body) != {"domain", "path"}:
             raise ApiError(400, "invalid_request", "change-url plan requires domain and path")
         try:
@@ -1672,7 +1834,7 @@ def build_app(
 
     @app.post("/package/app/{app_id}/change-url/apply")
     def app_change_url_apply(app_id: str) -> Any:
-        body = _json_body()
+        body = _body(AppChangeUrlApplyBody)
         if set(body) != {"domain", "path", "plan_sha256"}:
             raise ApiError(400, "invalid_request", "change-url apply requires domain, path and plan_sha256")
         try:
@@ -1693,7 +1855,7 @@ def build_app(
     def app_remove() -> Any:
         """Remove one installed app. Data-loss-capable (purge): routed through
         the signed operation chain (policy + approval), not _run_tool."""
-        body = _json_body()
+        body = _body(AppRemoveBody)
         return _run_lifecycle(
             "app.remove",
             {"app": body.get("app", ""), "purge": bool(body.get("purge", False))},
@@ -1707,7 +1869,7 @@ def build_app(
         """Create a YunoHost user account/mailbox. Medium-risk: routed
         through the signed operation chain (owner co-signature), not
         _run_tool (user.create is require_approval=True in the registry)."""
-        body = _json_body()
+        body = _body(UserCreateBody)
         return _run_lifecycle(
             "user.create",
             {
@@ -1726,7 +1888,7 @@ def build_app(
         """Update an existing user. Medium-risk: routed through the signed
         operation chain (owner co-signature), not _run_tool (user.update is
         require_approval=True in the registry)."""
-        body = _json_body()
+        body = _body(UserUpdateBody)
         return _run_lifecycle(
             "user.update",
             {
@@ -1748,7 +1910,7 @@ def build_app(
         """Delete a YunoHost user account. High-risk/irreversible: routed
         through the signed operation chain (owner co-signature), not
         _run_tool."""
-        body = _json_body()
+        body = _body(UserDeleteBody)
         return _run_lifecycle(
             "user.delete",
             {
@@ -1765,7 +1927,7 @@ def build_app(
     def user_group_create() -> Any:
         """Create a new user group. Medium-risk: routed through the signed
         operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(UserGroupCreateBody)
         return _run_lifecycle(
             "user.group.create",
             {"groupname": body.get("groupname", ""), "gid": body.get("gid")},
@@ -1776,7 +1938,7 @@ def build_app(
     def user_group_update() -> Any:
         """Add/remove usernames from a group. Medium-risk: routed through
         the signed operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(UserGroupUpdateBody)
         return _run_lifecycle(
             "user.group.update",
             {
@@ -1791,7 +1953,7 @@ def build_app(
     def user_group_delete() -> Any:
         """Delete a user group. High-risk/irreversible: routed through the
         signed operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(UserGroupDeleteBody)
         return _run_lifecycle(
             "user.group.delete",
             {"groupname": body.get("groupname", ""), "force": bool(body.get("force", False))},
@@ -1810,7 +1972,7 @@ def build_app(
         """Grant users/groups access to a permission. Medium-risk: routed
         through the signed operation chain (owner co-signature), not
         _run_tool."""
-        body = _json_body()
+        body = _body(UserPermissionAddBody)
         return _run_lifecycle(
             "user.permission.add",
             {"permission": body.get("permission", ""), "names": body.get("names", [])},
@@ -1822,7 +1984,7 @@ def build_app(
         """Revoke users/groups access to a permission. Medium-risk: routed
         through the signed operation chain (owner co-signature), not
         _run_tool."""
-        body = _json_body()
+        body = _body(UserPermissionRemoveBody)
         return _run_lifecycle(
             "user.permission.remove",
             {"permission": body.get("permission", ""), "names": body.get("names", [])},
@@ -1834,7 +1996,7 @@ def build_app(
         """Update a permission's label/tile visibility, not membership.
         Medium-risk: routed through the signed operation chain (owner
         co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(UserPermissionUpdateBody)
         return _run_lifecycle(
             "user.permission.update",
             {
@@ -1872,7 +2034,7 @@ def build_app(
     def nostr_connectivity_check() -> Any:
         from .connectivity import ConnectivityError, check_destinations
 
-        body = _json_body()
+        body = _body(ConnectivityCheckBody)
         if set(body) != {"relays", "blossom_servers"}:
             raise ApiError(400, "invalid_request", "connection check requires relays and blossom_servers")
         try:
@@ -1884,7 +2046,7 @@ def build_app(
     def nostr_connectivity_plan() -> Any:
         from .connectivity import ConnectivityError, plan_config
 
-        body = _json_body()
+        body = _body(ConnectivityPlanBody)
         if set(body) != {"configuration"}:
             raise ApiError(400, "invalid_request", "connectivity plan requires a configuration object")
         try:
@@ -1896,7 +2058,7 @@ def build_app(
     def nostr_connectivity_apply() -> Any:
         from .connectivity import ConnectivityError, plan_config
 
-        body = _json_body()
+        body = _body(ConnectivityApplyBody)
         if set(body) != {"configuration", "plan_sha256"}:
             raise ApiError(400, "invalid_request", "connectivity apply requires configuration and plan_sha256")
         try:
@@ -1922,7 +2084,7 @@ def build_app(
     def domain_primary_plan() -> Any:
         from .domains.primary import plan_primary
 
-        body = _json_body()
+        body = _body(DomainPrimaryPlanBody)
         if set(body) != {"domain"}:
             raise ApiError(400, "invalid_request", "server address plan requires a domain")
         try:
@@ -1934,7 +2096,7 @@ def build_app(
     def domain_primary_apply() -> Any:
         from .domains.primary import plan_primary
 
-        body = _json_body()
+        body = _body(DomainPrimaryApplyBody)
         if set(body) != {"domain", "plan_sha256"}:
             raise ApiError(400, "invalid_request", "server address apply requires domain and plan_sha256")
         try:
@@ -1959,7 +2121,7 @@ def build_app(
     def settings_set() -> Any:
         """Set a global YunoHost setting. Medium-risk: routed through the
         signed operation chain (owner co-signature), not _run_tool."""
-        body = _json_body()
+        body = _body(SettingsSetBody)
         return _run_lifecycle(
             "settings.set",
             {"key": body.get("key", ""), "value": body.get("value")},
@@ -1971,7 +2133,7 @@ def build_app(
         """Reset a global YunoHost setting to its default. Medium-risk:
         routed through the signed operation chain (owner co-signature), not
         _run_tool."""
-        body = _json_body()
+        body = _body(SettingsResetBody)
         return _run_lifecycle("settings.reset", {"key": body.get("key", "")}, state=_State())
 
     @app.post("/package/settings/reset_all")
@@ -1989,7 +2151,7 @@ def build_app(
         Low-risk: routed through the signed operation chain so the reconcile
         (per-file source revision, digest, reload outcome) is recorded in the
         ``2200``-series audit history."""
-        body = _json_body()
+        body = _body(ServiceConfigsReconcileBody)
         return _run_lifecycle(
             "service.config.reconcile",
             {"names": body.get("names")},
@@ -2000,7 +2162,7 @@ def build_app(
 
     @app.post("/package/plan")
     def package_plan() -> Any:
-        body = _json_body()
+        body = _body(PackagePlanBody)
         return _run_tool(
             "package.plan",
             {
@@ -2013,7 +2175,7 @@ def build_app(
 
     @app.post("/package/authoring/fetch_manifest")
     def package_fetch_manifest() -> Any:
-        body = _json_body()
+        body = _body(PackageFetchManifestBody)
         return _run_tool(
             "package.fetch_manifest",
             {
@@ -2025,7 +2187,7 @@ def build_app(
 
     @app.post("/package/reconcile")
     def package_reconcile() -> Any:
-        body = _json_body()
+        body = _body(PackageReconcileBody)
         # Applying a caller-supplied reconcile plan is a write that changes
         # machine state: routed through the signed operation chain (which
         # re-validates the plan digest and runs policy/approval), not _run_tool.
@@ -2053,7 +2215,7 @@ def build_app(
 
     @app.post("/package/identity/link")
     def identity_link() -> Any:
-        body = _json_body()
+        body = _body(IdentityLinkBody)
         # H5: identity writes route through the signed operation chain; the
         # operator key never travels in the args (the handler reads config).
         return _run_lifecycle(
@@ -2070,7 +2232,7 @@ def build_app(
 
     @app.post("/package/identity/revoke")
     def identity_revoke() -> Any:
-        body = _json_body()
+        body = _body(IdentityRevokeBody)
         return _run_lifecycle("identity.revoke", {"pubkey_or_npub": body.get("pubkey_or_npub", "")}, state=_State())
 
     # -- capability -----------------------------------------------------------
@@ -2081,7 +2243,7 @@ def build_app(
 
     @app.post("/package/capability/grant")
     def capability_grant() -> Any:
-        body = _json_body()
+        body = _body(CapabilityGrantBody)
         # H5: capability writes route through the signed operation chain; the
         # admin signing key never travels in the args.
         return _run_lifecycle(
@@ -2092,7 +2254,7 @@ def build_app(
 
     @app.post("/package/capability/delegate")
     def capability_delegate() -> Any:
-        body = _json_body()
+        body = _body(CapabilityDelegateBody)
         return _run_lifecycle(
             "capability.delegate",
             {"pubkey": body.get("pubkey", ""), "scopes": body.get("scopes", []), "expires_at": int(body.get("expires_at", 0))},
@@ -2101,7 +2263,7 @@ def build_app(
 
     @app.post("/package/capability/revoke")
     def capability_revoke() -> Any:
-        body = _json_body()
+        body = _body(CapabilityRevokeBody)
         return _run_lifecycle("capability.revoke", {"delegation_id": body.get("delegation_id", "")}, state=_State())
 
     # -- mcp endpoint (Caddy route + CA trust, `nostrhost mcp route`) --------
@@ -2113,7 +2275,7 @@ def build_app(
 
     @app.post("/package/mcp/endpoint")
     def mcp_endpoint_configure() -> Any:
-        body = _json_body()
+        body = _body(McpEndpointConfigureBody)
         raw_domain = body.get("domain")
         if not isinstance(raw_domain, str) or not raw_domain.strip():
             raise ApiError(400, "invalid_body", "domain must be a non-empty string")
@@ -2173,7 +2335,7 @@ def build_app(
 
     @app.post("/package/operations/{request_id}/approve")
     def package_operations_approve(request_id: str) -> Any:
-        body = _json_body()
+        body = _body(OperationDecisionBody)
         signed_event = body.get("event")
         if signed_event is not None:
             if not isinstance(signed_event, dict):
@@ -2195,7 +2357,7 @@ def build_app(
 
     @app.post("/package/operations/{request_id}/reject")
     def package_operations_reject(request_id: str) -> Any:
-        body = _json_body()
+        body = _body(OperationDecisionBody)
         signed_event = body.get("event")
         if signed_event is not None:
             if not isinstance(signed_event, dict):
@@ -2236,7 +2398,7 @@ def build_app(
         from yunohost.nostr_signerd import add_target_from_bunker_uri
 
         admin = _authorized_pubkey().lower()
-        body = _json_body()
+        body = _body(NotifySignersRegisterBody)
         uri = str(body.get("bunker_uri") or "").strip()
         if not uri:
             raise ApiError(400, "invalid_body", "bunker_uri is required")
@@ -2260,7 +2422,7 @@ def build_app(
         the node's own NIP-46 client key.
         """
         admin = _authorized_pubkey().lower()
-        body = _json_body()
+        body = _body(NotifySignersPairStartBody)
         relays = body.get("relays")
         if not isinstance(relays, list) or not [r for r in relays if r]:
             from .cli import _notify_outbound_relays
@@ -2306,6 +2468,178 @@ def build_app(
             raise ApiError(404, "not_found", "no such remote signer is registered")
         return {"removed": True, **_notify_targets_payload(admin)}
 
+    return app
+
+
+def _REQUEST_BODY_MODELS() -> dict[str, type[BaseModel]]:
+    """Route path -> typed request model, used to document request bodies in
+    the exported OpenAPI schema (A1 typed API contracts). The runtime still
+    parses/validates through ``_body``; this mapping only feeds the schema the
+    Orval-generated client is built from."""
+    return {
+        "/package/system/updates/refresh": UpdatesRefreshBody,
+        "/package/system/updates/apply": UpdatesApplyBody,
+        "/package/domain/add": DomainAddBody,
+        "/package/domain/remove": DomainRemoveBody,
+        "/package/nsite/gateway/enable": NsiteGatewayBody,
+        "/package/nsite/gateway/configure": NsiteGatewayBody,
+        "/package/nsite/validate": NsiteValidateBody,
+        "/package/nsite/reachability": NsiteReachabilityBody,
+        "/package/nsite/publish/plan": NsitePublishPlanBody,
+        "/package/nsite/register": NsiteRegisterBody,
+        "/package/nsite/unregister": NsiteUnregisterBody,
+        "/package/nsite/block/add": NsiteBlockAddBody,
+        "/package/nsite/block/remove": NsiteBlockRemoveBody,
+        "/package/nsite/block/set": NsiteBlockSetBody,
+        "/package/nsite/publish": NsitePublishBody,
+        "/package/nsite/snapshot": NsiteSnapshotBody,
+        "/package/nsite/mirror": NsiteMirrorBody,
+        "/package/nsite/domain/attach": NsiteDomainAttachBody,
+        "/package/nsite/domain/detach": NsiteDomainDetachBody,
+        "/package/nsite/collection/validate": NsiteCollectionValidateBody,
+        "/package/nsite/collection/publish/plan": NsiteCollectionPlanBody,
+        "/package/nsite/collection/publish": NsiteCollectionPublishBody,
+        "/package/dns/apply": DnsApplyBody,
+        "/package/dns/subscribe": DnsSubscribeBody,
+        "/package/dns/unsubscribe": DnsUnsubscribeBody,
+        "/package/credential/set": CredentialSetBody,
+        "/package/credential/remove": CredentialRemoveBody,
+        "/package/backup/create": BackupCreateBody,
+        "/package/backup/restore": BackupRestoreBody,
+        "/package/backup/delete": BackupDeleteBody,
+        "/package/backup/policy": BackupPolicySetBody,
+        "/package/state/rollback/plan": StateRollbackPlanBody,
+        "/package/state/rollback/apply": RollbackApplyBody,
+        "/package/state/reconcile": StateReconcileBody,
+        "/package/state/publish": StatePublishBody,
+        "/package/diagnosis/run": DiagnosisRunBody,
+        "/package/diagnosis/ignore": DiagnosisIgnoreBody,
+        "/package/diagnosis/unignore": DiagnosisUnignoreBody,
+        "/package/firewall/open": FirewallOpenBody,
+        "/package/firewall/close": FirewallCloseBody,
+        "/package/firewall/reload": FirewallReloadBody,
+        "/package/service/restart": ServiceRestartBody,
+        "/package/service/control": ServiceControlBody,
+        "/package/agent/models/download": AgentModelDownloadBody,
+        "/package/agent/models/select": AgentModelSelectBody,
+        "/package/agent/mode": AgentModeSetBody,
+        "/package/agent/export/run": AgentExportRunBody,
+        "/package/agent/contribution/settings": AgentContributionSettingsSetBody,
+        "/package/agent/contribution/submit": AgentContributionSubmitBody,
+        "/package/agent/contribution/share": AgentContributionShareBody,
+        "/package/catalog/publish": CatalogPublishBody,
+        "/package/catalog/declare": CatalogDeclareBody,
+        "/package/catalog/verify": CatalogVerifyBody,
+        "/package/catalog/attest": CatalogAttestBody,
+        "/package/catalog/reverify": CatalogReverifyBody,
+        "/package/catalog/profile": CatalogProfileSetBody,
+        "/package/catalog/announce": CatalogAnnounceBody,
+        "/package/app/remove": AppRemoveBody,
+        "/package/app/{app_id}/settings/plan": AppSettingsPlanBody,
+        "/package/app/{app_id}/settings/apply": AppSettingsApplyBody,
+        "/package/app/{app_id}/change-url/plan": AppChangeUrlPlanBody,
+        "/package/app/{app_id}/change-url/apply": AppChangeUrlApplyBody,
+        "/package/user/create": UserCreateBody,
+        "/package/user/update": UserUpdateBody,
+        "/package/user/delete": UserDeleteBody,
+        "/package/user/group/create": UserGroupCreateBody,
+        "/package/user/group/update": UserGroupUpdateBody,
+        "/package/user/group/delete": UserGroupDeleteBody,
+        "/package/user/permission/add": UserPermissionAddBody,
+        "/package/user/permission/remove": UserPermissionRemoveBody,
+        "/package/user/permission/update": UserPermissionUpdateBody,
+        "/package/settings/set": SettingsSetBody,
+        "/package/settings/reset": SettingsResetBody,
+        "/package/nostr/connectivity/check": ConnectivityCheckBody,
+        "/package/nostr/connectivity/plan": ConnectivityPlanBody,
+        "/package/nostr/connectivity/apply": ConnectivityApplyBody,
+        "/package/domain/primary/plan": DomainPrimaryPlanBody,
+        "/package/domain/primary/apply": DomainPrimaryApplyBody,
+        "/package/service/configs/reconcile": ServiceConfigsReconcileBody,
+        "/package/plan": PackagePlanBody,
+        "/package/authoring/fetch_manifest": PackageFetchManifestBody,
+        "/package/reconcile": PackageReconcileBody,
+        "/package/identity/link": IdentityLinkBody,
+        "/package/identity/revoke": IdentityRevokeBody,
+        "/package/capability/grant": CapabilityGrantBody,
+        "/package/capability/delegate": CapabilityDelegateBody,
+        "/package/capability/revoke": CapabilityRevokeBody,
+        "/package/mcp/endpoint": McpEndpointConfigureBody,
+        "/package/operations/{request_id}/approve": OperationDecisionBody,
+        "/package/operations/{request_id}/reject": OperationDecisionBody,
+        "/package/notify/signers": NotifySignersRegisterBody,
+        "/package/notify/signers/pair": NotifySignersPairStartBody,
+    }
+
+
+def _inject_request_bodies(schema: dict[str, Any]) -> dict[str, Any]:
+    """Attach the typed request bodies and path parameters to the exported
+    OpenAPI schema.
+
+    The admin SPA's Orval client is generated from this schema, so every
+    documented write route carries its request model and every ``{param}``
+    route its path parameters. Runtime parsing is unaffected (``_body`` still
+    validates and returns the raw dict); this only makes the contract visible
+    to client generators.
+    """
+    for path, model in _REQUEST_BODY_MODELS().items():
+        for method in ("post", "put", "patch", "delete"):
+            operation = schema.get("paths", {}).get(path, {}).get(method)
+            if operation is None:
+                continue
+            operation["requestBody"] = {
+                "required": False,
+                "content": {
+                    "application/json": {
+                        "schema": model.model_json_schema(ref_template="#/components/schemas/{model}")
+                    }
+                },
+            }
+    for path, path_item in schema.get("paths", {}).items():
+        for param in _path_parameters(path):
+            for operation in path_item.values():
+                if not isinstance(operation, dict) or "operationId" not in operation:
+                    continue
+                existing = operation.get("parameters") or []
+                if not any(p.get("name") == param and p.get("in") == "path" for p in existing):
+                    existing.append({"name": param, "in": "path", "required": True, "schema": {"type": "string"}})
+                    operation["parameters"] = existing
+    return schema
+
+
+def _path_parameters(path: str) -> list[str]:
+    """Extract ``{name}`` path parameters from a route template."""
+    params: list[str] = []
+    start = 0
+    while True:
+        open_brace = path.find("{", start)
+        if open_brace == -1:
+            break
+        close_brace = path.find("}", open_brace)
+        if close_brace == -1:
+            break
+        params.append(path[open_brace + 1 : close_brace])
+        start = close_brace + 1
+    return params
+
+
+def build_app_with_openapi(
+    *,
+    authorizer: Callable[[str], str] | None = None,
+    admin_pubkeys: tuple[str, ...] = (),
+    operator_pubkey: str | None = None,
+    event_stream: Callable[[str], Any] | None = None,
+) -> FastAPI:
+    """Build the native API app with request-body documentation injected into
+    the OpenAPI schema (the exported schema feeds the Orval client generator)."""
+    app = build_app(
+        authorizer=authorizer,
+        admin_pubkeys=admin_pubkeys,
+        operator_pubkey=operator_pubkey,
+        event_stream=event_stream,
+    )
+    original_openapi = app.openapi
+    app.openapi = lambda: _inject_request_bodies(original_openapi())
     return app
 
 
@@ -2365,6 +2699,44 @@ def _json_body() -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ApiError(400, "invalid_body", "request body must be a JSON object")
     return body
+
+
+def _body(model: type[BaseModel]) -> dict[str, Any]:
+    """Parse the request body and validate it against a typed request model.
+
+    Reads the same cached ``request.state.body_bytes`` the NIP-98 signature
+    binds to (so ``sha256(payload)`` verification is unchanged), then validates
+    with the model. The validated model is discarded and the *original* body
+    dict is returned so handlers keep their exact ``body.get(...)`` wire
+    semantics; the model exists to (a) define the OpenAPI request schema the
+    generated client is built from, and (b) reject malformed payloads. Unknown
+    keys are tolerated exactly where the legacy handler tolerated them (see
+    the ``_Tolerant`` / ``_Strict`` model bases). Validation failures map to
+    the same ``ApiError(400, "invalid_body", ...)`` envelope the legacy
+    ``_json_body`` raised.
+    """
+    raw = getattr(_req().state, "body_bytes", b"")
+    try:
+        body = json.loads(raw) if raw else None
+    except (ValueError, TypeError):  # noqa: BLE001 - malformed JSON
+        body = None
+    if not isinstance(body, dict):
+        raise ApiError(400, "invalid_body", "request body must be a JSON object")
+    try:
+        model.model_validate(body)
+    except ValidationError as exc:
+        raise ApiError(400, "invalid_body", _first_validation_error(exc)) from exc
+    return body
+
+
+def _first_validation_error(exc: ValidationError) -> str:
+    try:
+        first = exc.errors()[0]
+    except (IndexError, TypeError):
+        return "request body does not match the expected schema"
+    location = "/".join(str(part) for part in first.get("loc", ()))
+    message = first.get("msg") or "invalid value"
+    return f"{location}: {message}" if location else message
 
 
 def _config_operator_sk() -> str | None:
