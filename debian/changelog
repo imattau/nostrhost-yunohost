@@ -1,3 +1,22 @@
+yunohost (12.1.41.105) stable; urgency=low
+
+  * core-library extraction (docs/CORE-LIBRARY-EXTRACTION-IMPLEMENTATION-PLAN.md):
+    source event-kind constants from the new `nostrhost-protocol` library as
+    one-release deprecated aliases (notify/security/state/list/nip51/chain/
+    identity/capability/nsite blocklist), import the canonical
+    `nostrhost_auth` primitives in the native API (NIP-98 verification, replay
+    protection), and use the `nostrhost-projection` framework for the shared
+    projector lifecycle (identity/permission/capability/list/policy/service/
+    operation projectors) with the operator-key auth default passed explicitly.
+    `yunohost.nostr_projector` remains as a one-release compatibility module
+    re-exporting the extracted package. No wire formats, event kinds, or
+    persisted state change.
+  * pin workflow: forks re-pinned to their current branch tips; the
+    verify-clean component matcher is anchored so `yunohost` does not match
+    the `yunohost-mcp` library entry.
+
+ -- NostrHost <nostrhost@example.com>  Sun, 20 Sep 2026 03:00:00 +0000
+
 yunohost (12.1.41.104) stable; urgency=low
 
   * fix: replay guard now treats a request that already published
