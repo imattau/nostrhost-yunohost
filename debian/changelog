@@ -1,3 +1,15 @@
+yunohost (12.1.41.106) stable; urgency=low
+
+  * fix: python3-nostrhost now Depends on python3-nostrhost-protocol and
+    python3-nostrhost-projection. The core's CLI/API (and the backup /
+    web-reconcile timers) import nostrhost_protocol and nostrhost_projection
+    since the library extraction; the 12.1.41.105 packages only declared
+    python3-nostrhost-auth, so an upgrade could run the core before the new
+    libs were installed (ModuleNotFoundError on first post-install run).
+  * Regenerate the agent operation catalogue for the extracted kind constants.
+
+ -- NostrHost <nostrhost@example.com>  Sun, 20 Sep 2026 03:40:00 +0000
+
 yunohost (12.1.41.105) stable; urgency=low
 
   * core-library extraction (docs/CORE-LIBRARY-EXTRACTION-IMPLEMENTATION-PLAN.md):

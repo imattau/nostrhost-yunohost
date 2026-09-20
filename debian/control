@@ -62,6 +62,8 @@ Section: python
 Depends: python3-all (>= 3.11), nostrhost-core
  , python3-typer
  , python3-nostrhost-auth
+ , python3-nostrhost-protocol
+ , python3-nostrhost-projection
 Description: native nostrhost framework — moulinette replacement
  nostrhost is the native framework layer that replaces the retired
  moulinette in the YunoHost fork: interface primitives (core, i18n, ui,
