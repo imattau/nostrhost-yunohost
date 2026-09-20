@@ -1,3 +1,13 @@
+yunohost (12.1.41.108) stable; urgency=low
+
+  * rename: the user-facing "Nostr network settings" copy is now "Nostr
+    settings". Validation and plan-changed error messages in the native
+    connectivity API (connectivity.py, api.py, native_ops.py) no longer say
+    "Nostr network". Strings only - API routes, setting keys and contracts
+    are unchanged.
+
+ -- NostrHost <nostrhost@example.com>  Mon, 21 Sep 2026 02:00:00 +0000
+
 yunohost (12.1.41.107) stable; urgency=low
 
   * fix: the bin/* venv dispatch now detects the runtime venv via sys.prefix
