@@ -47,7 +47,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
-from yunohost.nostr_projector import _atomic_write
+from nostrhost_projection import _atomic_write
 
 logger = logging.getLogger("nostr-service-projection")
 

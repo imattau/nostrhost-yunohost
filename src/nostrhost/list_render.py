@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from yunohost.nostr_projector import _atomic_write
+from nostrhost_projection import _atomic_write
 
 logger = logging.getLogger("nostr-list-render")
 

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     Projector,
     ProjectionResult,
@@ -448,7 +448,7 @@ def rebuild_from_events(
     cursor_dir: str | Path = DEFAULT_CURSOR_DIR,
 ) -> dict[str, Any]:
     """Refold ``events`` into a fresh projection and persist it (WP3 rebuild)."""
-    from .nostr_projector import rebuild as _rebuild
+    from nostrhost_projection import rebuild as _rebuild
 
     projector = CapabilityProjector(
         projection=CapabilityProjection(),

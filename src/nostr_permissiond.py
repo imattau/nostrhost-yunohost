@@ -24,7 +24,7 @@ from typing import Any, Callable
 from nostrhost.events import _d_tag
 from nostrhost.nip51_permissions import PERMISSION_LIST_KIND, PermissionStore
 from nostrhost.permissions import write_permissions_projection
-from .nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     Projector,
     ProjectionResult,
@@ -36,6 +36,7 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _operator_config,
     _require_bootstrapped,
+    default_auth,
 )
 
 logger = logging.getLogger("nostr-permissiond")
@@ -181,6 +182,7 @@ async def subscribe_loop(
         kinds=[PERMISSION_LIST_KIND],
         on_replay=_notify if on_event else None,
         stop=stop,
+        auth_factory=default_auth,
     )
     await runtime.run()
 
@@ -197,7 +199,7 @@ def rebuild(relay_url: str, *, admin_pubkeys: tuple[str, ...] | list[str], store
 
 
 def rebuild_events_into(projector: Projector, events: list[dict[str, Any]]) -> dict[str, Any]:
-    from .nostr_projector import rebuild as _rebuild
+    from nostrhost_projection import rebuild as _rebuild
 
     return _rebuild(events, projector=projector)
 

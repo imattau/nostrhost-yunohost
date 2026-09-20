@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from yunohost.nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     JsonCoordinateStore,
     ProjectionResult,

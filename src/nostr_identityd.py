@@ -32,8 +32,9 @@ from .nostr_identity import (
     _operator_config,
     _require_bootstrapped,
     _store,
+    default_auth,
 )
-from .nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     Projector,
     ProjectionResult,
@@ -530,6 +531,7 @@ async def subscribe_loop(
         kinds=[IDENTITY_KIND, 0],
         on_replay=_notify if on_event else None,
         stop=stop,
+        auth_factory=default_auth,
     )
     await runtime.run()
 
@@ -548,7 +550,7 @@ def rebuild(
     account provisioning is an execution side-effect, not part of the
     projection, and must not run during a state rebuild.
     """
-    from .nostr_projector import rebuild as _rebuild
+    from nostrhost_projection import rebuild as _rebuild
 
     projector = IdentityProjector(
         store=store if store is not None else _store(),
@@ -568,7 +570,7 @@ def verify(
     store: Any = None,
 ) -> list[str]:
     """Report drift between ``identity.db`` and a relay replay (WP3 verify)."""
-    from .nostr_projector import verify as _verify
+    from nostrhost_projection import verify as _verify
 
     projector = IdentityProjector(
         store=store if store is not None else _store(),

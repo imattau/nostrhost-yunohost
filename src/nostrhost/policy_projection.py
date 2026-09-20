@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 import tomli_w
 
-from yunohost.nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     JsonCoordinateStore,
     ProjectionResult,

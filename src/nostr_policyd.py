@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .nostrhost.policy_projection import POLICY_KINDS, PolicyProjector, PolicyStore, render_entry
-from .nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     ProjectionRuntime,
     REGISTRY,
@@ -27,6 +27,7 @@ from .nostr_identity import (
     _init_headless_yunohost,
     _operator_config,
     _require_bootstrapped,
+    default_auth,
 )
 
 logger = logging.getLogger("nostr-policyd")
@@ -59,13 +60,14 @@ async def subscribe_loop(
         kinds=list(POLICY_KINDS),
         limit=2000,
         stop=stop,
+        auth_factory=default_auth,
     )
     await runtime.run()
 
 
 def rebuild(relay_url: str, *, admin_pubkeys: tuple[str, ...] | list[str]) -> dict[str, Any]:
     """Rebuild the policy projection from the relay (WP6)."""
-    from .nostr_projector import rebuild as _rebuild
+    from nostrhost_projection import rebuild as _rebuild
     from .nostrhost.events import query_chain_events
 
     events: list[dict[str, Any]] = []

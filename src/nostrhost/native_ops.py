@@ -553,7 +553,7 @@ def _safe_projection_status(**args: Any) -> dict[str, Any]:
     name = args.pop("name", None)
     if args:
         raise OperationError(f"projection.status does not accept extra args: {sorted(args)}")
-    from yunohost.nostr_projector import read_status_dir
+    from nostrhost_projection import read_status_dir
 
     rows = read_status_dir()
     if name is not None:

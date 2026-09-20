@@ -39,7 +39,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from yunohost.nostr_projector import (
+from nostrhost_projection import (
     DEFAULT_CURSOR_DIR,
     read_status_dir,
 )
@@ -200,7 +200,7 @@ def _rebuild(name: str, as_json: bool) -> int:
 
 
 def _verify(name: str, as_json: bool) -> int:
-    from yunohost.nostr_projector import verify
+    from nostrhost_projection import verify
     from yunohost.nostrhost.events import query_chain_events
 
     cfg = nostr_identity._operator_config()
@@ -223,7 +223,7 @@ def _verify(name: str, as_json: bool) -> int:
 
 
 def _shadow(name: str, to: str, as_json: bool) -> int:
-    from yunohost.nostr_projector import shadow
+    from nostrhost_projection import shadow
     from yunohost.nostrhost.events import query_chain_events
 
     cfg = nostr_identity._operator_config()

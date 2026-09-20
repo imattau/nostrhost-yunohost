@@ -63,7 +63,7 @@ from .nostr_operations import (
     tool_spec,
 )
 from .nostr_operations_state import InvalidTransition, OpState, next_state
-from .nostr_projector import REGISTRY, ProjectionRuntime
+from nostrhost_projection import REGISTRY, ProjectionRuntime
 from .nostrhost.events import _d_tag, _e_tag, _tag_value, query_chain_events
 
 logger = logging.getLogger("nostr-operationsd")
