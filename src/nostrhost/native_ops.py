@@ -23,6 +23,18 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from nostrhost_protocol import (
+    KindCapability,
+    KindDelegation,
+    KindDelegationRevocation,
+    KindExecutionProgress,
+    KindExecutionResult,
+    KindExecutionStarted,
+    KindOperationApproval,
+    KindOperationRejection,
+    KindOperationRequest,
+)
+
 from yunohost.nostr_operations import (
     OperationError,
     RISK_HIGH,
@@ -2552,7 +2564,20 @@ def _safe_catalog_verify(event_or_naddr: str = "", **extra: Any) -> dict[str, An
 # --------------------------------------------------------------------------- #
 # audit (the signed operation chain on the control relay)
 
-AUDIT_CHAIN_KINDS = (2200, 2201, 2202, 2203, 2204, 2205, 31100, 27236, 27237)
+AUDIT_CHAIN_KINDS = tuple(
+    int(k)
+    for k in (
+        KindOperationRequest,
+        KindOperationApproval,
+        KindOperationRejection,
+        KindExecutionStarted,
+        KindExecutionResult,
+        KindExecutionProgress,
+        KindCapability,
+        KindDelegation,
+        KindDelegationRevocation,
+    )
+)
 AUDIT_MAX_SCAN = 5000
 # The relay REQ ``limit`` counts events across all requested kinds, so a flat
 # limit is dominated by the per-operation 2203/2204 pairs and hides the 2200

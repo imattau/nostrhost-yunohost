@@ -30,12 +30,13 @@ from typing import Any
 from .nostr_identity import _operator_config, _sign_event, publish_to_relay
 from .nostr_operations import _control_relay, _derive_pubkey
 
-logger = getLogger("yunohost.nostr_notify")
+# Must match nostrhost-control's protocol.KindSystemEvent /
+# protocol.KindServiceEvent (EVENT-PROTOCOL.md §2.3). One-release aliases of
+# the canonical nostrhost-protocol constants.
+from nostrhost_protocol import KindSystemEvent as KIND_SYSTEM_EVENT
+from nostrhost_protocol import KindServiceEvent as KIND_SERVICE_EVENT
 
-# Must match nostrhost-control's eventmodel.KindSystemEvent /
-# eventmodel.KindServiceEvent (EVENT-PROTOCOL.md §2.3).
-KIND_SYSTEM_EVENT = 2210
-KIND_SERVICE_EVENT = 2211
+logger = getLogger("yunohost.nostr_notify")
 
 SEVERITY_INFO = "info"
 SEVERITY_WARNING = "warning"

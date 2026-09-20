@@ -27,12 +27,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-# NIP-51 / NIP-65 / NIP-78 kinds the host projects (WP4).
-KIND_MUTE_LIST = 10000  # NIP-51 mute list (blocked site-owner pubkeys)
-KIND_RELAY_LIST = 10002  # NIP-65 relay list (preferred relays)
-KIND_BLOCKED_RELAYS = 10006  # NIP-51 blocked relays
-KIND_PERMISSION_SET = 30000  # NIP-51 people set (permission membership)
-KIND_APP_DATA = 30078  # NIP-78 application data (preferences)
+# NIP-51 / NIP-65 / NIP-78 kinds the host projects (WP4). One-release aliases
+# of the canonical nostrhost-protocol constants.
+from nostrhost_protocol import KindAppData as KIND_APP_DATA
+from nostrhost_protocol import KindBlockedRelays as KIND_BLOCKED_RELAYS
+from nostrhost_protocol import KindMuteList as KIND_MUTE_LIST
+from nostrhost_protocol import KindPermissionSet as KIND_PERMISSION_SET
+from nostrhost_protocol import KindRelayList as KIND_RELAY_LIST
 
 #: Namespace prefix for every host-defined ``d`` coordinate, so a user's
 #: unrelated app-data events can never collide with a host family.

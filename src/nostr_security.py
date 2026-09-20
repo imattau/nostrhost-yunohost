@@ -43,7 +43,8 @@ from .nostr_notify import (
     publish_notice,
 )
 
-KIND_SECURITY_EVENT = 2213
+# One-release alias of the canonical nostrhost-protocol constant.
+from nostrhost_protocol import KindSecurityEvent as KIND_SECURITY_EVENT
 
 DEFAULT_SECURITY_CONFIG = "/etc/nostrhost/security.toml"
 DEFAULT_STATE_FILE = "/var/lib/nostrhost/security.json"

@@ -83,12 +83,13 @@ DEFAULT_STATE_DIR = "/var/lib/nostrhost/state"
 KNOWN_GOOD_TAG = "known-good"
 
 # NIP-34 kind: repository announcement (replaceable, server-authoritative).
-KIND_REPOSITORY_ANNOUNCEMENT = 30617
+# One-release aliases of the canonical nostrhost-protocol constants.
+from nostrhost_protocol import KindRepositoryAnnouncement as KIND_REPOSITORY_ANNOUNCEMENT
 
 # NostrHost kind: state-repository bundle (Stage C DR). A regular kind; each
 # event carries one base64 chunk of a gzip-compressed git bundle. The full set
 # for a given revision is reassembled on restore. Signed by the server key.
-KIND_STATE_BUNDLE = 2214
+from nostrhost_protocol import KindStateBundle as KIND_STATE_BUNDLE
 STATE_BUNDLE_SCHEMA = 1
 # Keep each event's content well under the relay max_content_length (the local
 # relay defaults to 100000); base64 inflates by 4/3, so chunk well below that.

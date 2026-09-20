@@ -42,7 +42,9 @@ from .events import _d_tag
 
 logger = logging.getLogger("nostr-permissiond")
 
-PERMISSION_LIST_KIND = 30000  # NIP-51 "follow sets" (people list)
+# One-release alias of the canonical nostrhost-protocol constant.
+from nostrhost_protocol import KindPermissionSet as PERMISSION_LIST_KIND
+
 DEFAULT_STORE_PATH = Path("/etc/nostrhost/nip51_permissions.json")
 
 
