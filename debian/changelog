@@ -1,3 +1,16 @@
+yunohost (12.1.41.107) stable; urgency=low
+
+  * fix: the bin/* venv dispatch now detects the runtime venv via sys.prefix
+    instead of comparing the executable realpath. A venv's python3 is a
+    symlink to the system interpreter, so the realpath comparison always
+    compared equal and the venv re-exec never fired: running a bin directly
+    (e.g. `nostr-projector status`) fell through to the system python,
+    which lacks nostr-sdk, and failed with ModuleNotFoundError. The daemon
+    bins already used sys.prefix; nostr-projector (and the listd/permissiond/
+    policyd/signerd manual-run fallbacks) now match.
+
+ -- NostrHost <nostrhost@example.com>  Sun, 20 Sep 2026 03:45:00 +0000
+
 yunohost (12.1.41.106) stable; urgency=low
 
   * fix: python3-nostrhost now Depends on python3-nostrhost-protocol and
