@@ -169,8 +169,8 @@ from yunohost.nostr_operations import (
     validate_signed_approval,
     validate_signed_rejection,
 )
-from nostrhost_policy.auth.nip98 import Nip98Error, verify_nip98_request
-from nostrhost_policy.auth.replay import ReplayCache
+from nostrhost_auth.nip98 import Nip98Error, verify_nip98_request
+from nostrhost_auth.replay import ReplayCache
 
 API_VERSION = 1
 
