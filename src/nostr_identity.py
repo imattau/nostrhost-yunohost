@@ -27,7 +27,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-IDENTITY_KIND = 31102
+# One-release aliases of the canonical nostrhost-protocol constants.
+from nostrhost_protocol import KindAuthChallenge as AUTH_KIND
+from nostrhost_protocol import KindIdentityDefinition as IDENTITY_KIND
 
 DEFAULT_IDENTITY_DB = "/etc/nostrhost/identity.db"
 DEFAULT_CONTROL_RELAY = "ws://127.0.0.1:4848"
@@ -621,7 +623,7 @@ def _read_operator_config() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # NIP-42 client auth (kind 22242) for the control relay
 
-AUTH_KIND = 22242
+# (AUTH_KIND is imported from nostrhost_protocol at the top of this module.)
 
 
 def default_auth() -> tuple[str, str] | None:

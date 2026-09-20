@@ -15,7 +15,9 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-BLOCK_KIND = 10000  # NIP-51 mute list
+# One-release alias of the canonical nostrhost-protocol constant.
+from nostrhost_protocol import KindMuteList as BLOCK_KIND
+
 _BLOCK_FETCH_TIMEOUT = 3.0
 
 
