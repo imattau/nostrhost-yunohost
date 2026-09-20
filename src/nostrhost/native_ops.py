@@ -2320,7 +2320,7 @@ def _safe_nostr_connectivity_set(
 
     current_plan = plan_config(configuration)
     if current_plan["plan_sha256"] != plan_sha256:
-        raise OperationError("Nostr network settings changed after review; create and approve a fresh plan")
+        raise OperationError("Nostr settings changed after review; create and approve a fresh plan")
 
     return apply_config(configuration)
 

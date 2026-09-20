@@ -2066,7 +2066,7 @@ def build_app(
         except ConnectivityError as exc:
             raise ApiError(400, "invalid_connectivity", str(exc)) from exc
         if body["plan_sha256"] != plan["plan_sha256"]:
-            raise ApiError(409, "plan_changed", "Nostr network settings changed after review. Review the refreshed plan.")
+            raise ApiError(409, "plan_changed", "Nostr settings changed after review. Review the refreshed plan.")
         result = _run_lifecycle(
             "nostr.connectivity.set",
             {"configuration": body["configuration"], "plan_sha256": body["plan_sha256"]},

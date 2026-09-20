@@ -90,9 +90,9 @@ def validate_config(value: dict[str, Any] | ConnectivityConfig) -> ConnectivityC
     try:
         cfg = value if isinstance(value, ConnectivityConfig) else ConnectivityConfig.model_validate(value)
     except Exception as exc:  # noqa: BLE001 - converted into a stable domain error
-        raise ConnectivityError(f"invalid Nostr network settings: {exc}") from exc
+        raise ConnectivityError(f"invalid Nostr settings: {exc}") from exc
     if cfg.version != 1:
-        raise ConnectivityError("unsupported Nostr network settings version")
+        raise ConnectivityError("unsupported Nostr settings version")
     cfg.default_relays = _normalise_urls(cfg.default_relays, kind="relay")
     cfg.default_blossom_servers = _normalise_urls(cfg.default_blossom_servers, kind="blossom")
     cfg.additional_discovery_relays = _normalise_urls(
@@ -112,7 +112,7 @@ def load_config(state_dir: Path | None = None) -> ConnectivityConfig:
     try:
         return validate_config(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ConnectivityError(f"could not read Nostr network settings: {exc}") from exc
+        raise ConnectivityError(f"could not read Nostr settings: {exc}") from exc
 
 
 def save_config(config: ConnectivityConfig, state_dir: Path | None = None) -> Path:
