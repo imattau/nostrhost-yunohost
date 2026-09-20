@@ -18,10 +18,11 @@ from __future__ import annotations
 
 from enum import Enum
 
-KIND_OPERATION_APPROVAL = 2201
-KIND_OPERATION_REJECTION = 2202
-KIND_EXECUTION_STARTED = 2203
-KIND_EXECUTION_RESULT = 2204
+# One-release aliases of the canonical nostrhost-protocol constants.
+from nostrhost_protocol import KindExecutionResult as KIND_EXECUTION_RESULT
+from nostrhost_protocol import KindExecutionStarted as KIND_EXECUTION_STARTED
+from nostrhost_protocol import KindOperationApproval as KIND_OPERATION_APPROVAL
+from nostrhost_protocol import KindOperationRejection as KIND_OPERATION_REJECTION
 
 
 class OpState(str, Enum):

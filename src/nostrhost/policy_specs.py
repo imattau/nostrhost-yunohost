@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 #: Kind-31101 trust/policy declaration (addressable, schema-versioned).
-KIND_TRUST_POLICY = 31101
+#: One-release alias of the canonical nostrhost-protocol constant.
+from nostrhost_protocol import KindTrustPolicy as KIND_TRUST_POLICY
 
 #: Namespace prefix for every host-defined ``d`` coordinate, so no event can
 #: ever collide with a host policy family.

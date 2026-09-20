@@ -114,16 +114,17 @@ from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models 
     _safe_nsite_validate,
 )
 
-# Chain kinds (must match eventmodel.go / EVENT-PROTOCOL.md).
-KIND_OPERATION_REQUEST = 2200
-KIND_OPERATION_APPROVAL = 2201
-KIND_OPERATION_REJECTION = 2202
-KIND_EXECUTION_STARTED = 2203
-KIND_EXECUTION_RESULT = 2204
-KIND_EXECUTION_PROGRESS = 2205
-KIND_CAPABILITY = 31100
-KIND_DELEGATION = 27236
-KIND_DELEGATION_REVOCATION = 27237
+# Chain kinds (must match nostrhost-protocol / EVENT-PROTOCOL.md). One-release
+# aliases of the canonical constants.
+from nostrhost_protocol import KindCapability as KIND_CAPABILITY
+from nostrhost_protocol import KindDelegation as KIND_DELEGATION
+from nostrhost_protocol import KindDelegationRevocation as KIND_DELEGATION_REVOCATION
+from nostrhost_protocol import KindExecutionProgress as KIND_EXECUTION_PROGRESS
+from nostrhost_protocol import KindExecutionResult as KIND_EXECUTION_RESULT
+from nostrhost_protocol import KindExecutionStarted as KIND_EXECUTION_STARTED
+from nostrhost_protocol import KindOperationApproval as KIND_OPERATION_APPROVAL
+from nostrhost_protocol import KindOperationRejection as KIND_OPERATION_REJECTION
+from nostrhost_protocol import KindOperationRequest as KIND_OPERATION_REQUEST
 DELEGATION_MAX_LIFETIME = 30 * 24 * 3600
 
 CHAIN_KINDS = (
