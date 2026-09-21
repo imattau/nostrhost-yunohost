@@ -65,6 +65,43 @@ def test_plan_envelope_binds_catalogue_provenance():
         package_plan_envelope(example(), catalogue={**provenance, "app_id": "other"})
 
 
+def test_plan_envelope_binds_npack_provenance(tmp_path):
+    payload_root = tmp_path / "payload"
+    (payload_root / ".npack").mkdir(parents=True)
+    (payload_root / ".npack" / "manifest.json").write_text("{}", encoding="utf-8")
+    (payload_root / "var/www/example").mkdir(parents=True)
+    (payload_root / "var/www/example/index.html").write_text("<h1>ok</h1>", encoding="utf-8")
+    provenance = {
+        "publisher": "ab" * 32,
+        "name": "example",
+        "version": "1.2.0",
+        "artifact_sha256": "cd" * 32,
+        "payload_root": str(payload_root),
+    }
+    envelope = package_plan_envelope(example(), npack=provenance)
+    assert envelope["npack"]["artifact_sha256"] == "cd" * 32
+    sync_ops = [op for op in validate_plan_envelope(envelope) if op.name == "payload.sync"]
+    assert len(sync_ops) == 1
+    assert sync_ops[0].args["artifact_sha256"] == "cd" * 32
+
+    with pytest.raises(PackageError, match="provenance"):
+        package_plan_envelope(example(), npack={**provenance, "name": "other"})
+    with pytest.raises(PackageError, match="publisher"):
+        package_plan_envelope(example(), npack={**provenance, "publisher": "not-hex"})
+    with pytest.raises(PackageError, match="staged artifact"):
+        package_plan_envelope(example(), npack={**provenance, "payload_root": str(tmp_path / "missing")})
+
+    envelope["operations"].append({"name": "payload.sync", "resource": "example:payload", "args": {}, "depends_on": [], "risk": "low", "reversible": True})
+    envelope["plan_sha256"] = operation_plan_digest([Operation(
+        item["name"], item["resource"], item["args"],
+        tuple(item.get("depends_on", ())), item.get("risk", "low"),
+        bool(item.get("reversible", True)), item.get("reverse"),
+        item.get("summary", ""),
+    ) for item in envelope["operations"]])
+    with pytest.raises(PackageError, match="exactly one"):
+        validate_plan_envelope(envelope)
+
+
 def test_apply_web_overrides_sets_domain_path_and_syncs_health():
     from nostrhost.package_engine import apply_web_overrides
 

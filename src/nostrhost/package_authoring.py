@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +21,7 @@ except ImportError:  # pragma: no cover - native Pydantic v1 on Debian 12
 from .package_engine import (
     PackageError,
     PackageManifest,
+    _canonical_json,
     plan_package,
     schema as package_schema,
     validate_package,
@@ -24,9 +29,19 @@ from .package_engine import (
 
 app = typer.Typer(
     name="nostrhost-package",
-    help="Scaffold, validate, and explain native NostrHost packages.",
+    help="Scaffold, validate, plan, and package native NostrHost packages.",
     no_args_is_help=True,
 )
+
+# Path inside an .npk archive that carries the canonical native manifest, so
+# the resource engine can reconstruct the plan envelope from a verified
+# artifact without re-fetching the original repository. npack skips the
+# .npack metadata directory when installing, so this never leaks into the
+# staged payload.
+NPK_NATIVE_MANIFEST = ".npack/nostrhost/manifest.json"
+
+# Loose SemVer the way npack expects it; npack rejects non-SemVer versions.
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)($|[+-].*$)")
 
 PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -347,6 +362,175 @@ def explain_plan(package_file: Path = typer.Argument(..., help="Path to package.
         owner = operation.get("resource", "package")
         detail = f"It is {risk} risk and " + ("can be reversed." if reverse else "has no automatic reverse operation.")
         typer.echo(f"- {operation['summary']} (owned by {owner}). {detail}")
+
+
+def _npack_command(npack_bin: str) -> str:
+    """Resolve the npack binary; honour $NPACK_BIN, else use the PATH name."""
+    return npack_bin or os.environ.get("NPACK_BIN", "npack")
+
+
+def _npack_version(npack_bin: str) -> str:
+    try:
+        result = subprocess.run(
+            [_npack_command(npack_bin), "--version"], text=True, capture_output=True, check=False
+        )
+    except OSError as exc:
+        raise PackageError(f"could not run npack: {exc}") from exc
+    return result.stdout.strip() or result.stderr.strip()
+
+
+def build_npk_artifact(
+    package_data: dict[str, Any],
+    *,
+    payload_dir: Path | None,
+    output: Path,
+    publisher: str,
+    name: str | None = None,
+    version: str | None = None,
+    os_name: str | None = None,
+    arch: str | None = None,
+    npack_bin: str = "",
+) -> dict[str, Any]:
+    """Build a deterministic .npk artifact from a validated native manifest.
+
+    The payload directory is copied into the archive root at host-relative
+    paths (the same layout the resource engine expects when it stages a
+    verified artifact). The canonical native manifest is embedded under
+    ``.npack/nostrhost/manifest.json`` so a later install can reconstruct the
+    plan envelope from the artifact alone; npack skips the ``.npack`` metadata
+    directory when installing, so the manifest never becomes part of the
+    staged payload.
+
+    Returns ``{artifact, sha256, publisher, name, version, os, arch,
+    npack, embedded_manifest}``. Requires the ``npack`` binary (see
+    ``_npack_command``) and produces its sha256 via ``npack hash``.
+    """
+    if publisher.startswith("npub1") or re.fullmatch(r"[0-9a-fA-F]{64}", publisher):
+        pass
+    else:
+        raise PackageError("publisher must be an npub or a 64-character hexadecimal public key")
+    package = validate_package(PackageManifest.parse_obj(package_data))
+    artifact_name = name or package.app.id
+    artifact_version = version or package.app.version
+    if not SEMVER.fullmatch(artifact_version):
+        raise PackageError(
+            f"npk version must be SemVer, got {artifact_version!r}; "
+            "pass --version with a valid version (for example 1.0.0)"
+        )
+    if payload_dir is not None and not payload_dir.is_dir():
+        raise PackageError(f"payload directory not found: {payload_dir}")
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    bin_path = _npack_command(npack_bin)
+    try:
+        npack_version = _npack_version(bin_path)
+    except PackageError:
+        raise
+    init_args = ["init"]
+    pack_args = ["pack"]
+    for extra, where in ((init_args, "init"), (pack_args, "pack")):
+        if not subprocess.run([bin_path, *extra, "--help"], text=True, capture_output=True, check=False).returncode == 0:
+            raise PackageError(f"npack does not support `npack {extra[0]}`; update the bundled npack binary")
+
+    with tempfile.TemporaryDirectory(prefix="nostrhost-npk-") as temporary:
+        staging = Path(temporary)
+        if payload_dir is not None:
+            shutil.copytree(payload_dir, staging / "payload", symlinks=True)
+        else:
+            (staging / "payload").mkdir()
+        metadata = staging / "payload" / ".npack"
+        metadata.mkdir(parents=True, exist_ok=True)
+
+        init = subprocess.run(
+            [
+                bin_path,
+                "init",
+                str(staging / "payload"),
+                "--name",
+                artifact_name,
+                "--version",
+                artifact_version,
+                "--publisher",
+                publisher,
+                *(("--os", os_name) if os_name else ()),
+                *(("--arch", arch) if arch else ()),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if init.returncode != 0:
+            raise PackageError(f"npack init failed: {init.stderr.strip() or init.stdout.strip()}")
+
+        embedded = metadata / "nostrhost" / "manifest.json"
+        embedded.parent.mkdir(parents=True, exist_ok=True)
+        embedded.write_bytes(_canonical_json(package_data))
+
+        pack = subprocess.run(
+            [bin_path, "pack", str(staging / "payload"), "--output", str(output)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if pack.returncode != 0:
+            raise PackageError(f"npack pack failed: {pack.stderr.strip() or pack.stdout.strip()}")
+
+        digest = subprocess.run(
+            [bin_path, "hash", str(output)], text=True, capture_output=True, check=False
+        )
+        if digest.returncode != 0:
+            raise PackageError(f"npack hash failed: {digest.stderr.strip() or digest.stdout.strip()}")
+        artifact_sha256 = digest.stdout.strip()
+
+    return {
+        "artifact": str(output),
+        "sha256": artifact_sha256,
+        "publisher": publisher,
+        "name": artifact_name,
+        "version": artifact_version,
+        "os": os_name,
+        "arch": arch,
+        "npack": npack_version,
+        "embedded_manifest": NPK_NATIVE_MANIFEST,
+    }
+
+
+@app.command("build-npk")
+def build_npk(
+    package_file: Path = typer.Argument(..., help="Path to package.toml."),
+    payload: Optional[Path] = typer.Option(None, "--payload", "-p", help="Directory copied into the archive at host-relative paths (web/app payload)."),
+    output: Path = typer.Option(Path("package.npk"), "--output", "-o", help="Output .npk artifact path."),
+    publisher: str = typer.Option(..., "--publisher", help="Publisher npub or 64-character hex public key."),
+    name: Optional[str] = typer.Option(None, "--name", help="npack package name (default: the manifest app id)."),
+    version: Optional[str] = typer.Option(None, "--version", help="SemVer release version (default: the manifest app version)."),
+    os_name: Optional[str] = typer.Option(None, "--os", help="Target OS override (default: host)."),
+    arch: Optional[str] = typer.Option(None, "--arch", help="Target architecture override (default: host)."),
+    npack_bin: str = typer.Option("", "--npack", help="Path to the npack binary (default: $NPACK_BIN or npack on PATH)."),
+) -> None:
+    """Build a deterministic, content-addressed .npk artifact for a package."""
+    package, diagnostics = _load_and_validate(package_file)
+    if diagnostics or package is None:
+        typer.echo(json.dumps({"schema": 1, "valid": False, "diagnostics": diagnostics}, indent=2, sort_keys=True), err=True)
+        raise typer.Exit(1)
+    try:
+        with package_file.open("rb") as stream:
+            package_data = tomllib.load(stream)
+        result = build_npk_artifact(
+            package_data,
+            payload_dir=payload,
+            output=output,
+            publisher=publisher,
+            name=name,
+            version=version,
+            os_name=os_name,
+            arch=arch,
+            npack_bin=npack_bin,
+        )
+    except PackageError as exc:
+        typer.echo(json.dumps({"schema": 1, "valid": False, "error": str(exc)}, indent=2, sort_keys=True))
+        raise typer.Exit(1)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
 def main() -> None:

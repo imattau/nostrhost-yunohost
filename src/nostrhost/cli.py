@@ -77,6 +77,10 @@ from yunohost.nostr_operations import (
     _safe_nsite_gateway_enable,
     _safe_nsite_gateway_disable,
     _safe_nsite_gateway_configure,
+    _safe_nsite_blossom_status,
+    _safe_nsite_blossom_enable,
+    _safe_nsite_blossom_disable,
+    _safe_nsite_blossom_configure,
     _safe_nsite_inspect,
     _safe_nsite_list,
     _safe_nsite_discover,
@@ -161,6 +165,10 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "nsite.gateway.enable": _safe_nsite_gateway_enable,
     "nsite.gateway.disable": _safe_nsite_gateway_disable,
     "nsite.gateway.configure": _safe_nsite_gateway_configure,
+    "nsite.blossom.status": _safe_nsite_blossom_status,
+    "nsite.blossom.enable": _safe_nsite_blossom_enable,
+    "nsite.blossom.disable": _safe_nsite_blossom_disable,
+    "nsite.blossom.configure": _safe_nsite_blossom_configure,
     "nsite.list": _safe_nsite_list,
     "nsite.discover": _safe_nsite_discover,
     "nsite.inspect": _safe_nsite_inspect,
@@ -413,10 +421,10 @@ def _apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, pa
         raise NostrHostError(str(exc)) from exc
 
 
-def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None) -> dict[str, Any]:
+def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None, *, npack: dict[str, Any] | None = None) -> dict[str, Any]:
     from nostrhost.package_engine import package_plan_envelope
 
-    return package_plan_envelope(package_data, catalogue=coordinate)
+    return package_plan_envelope(package_data, catalogue=coordinate, npack=npack)
 
 
 def _run_lifecycle(tool: str, args: dict[str, Any], *, state: _State) -> dict[str, Any]:
@@ -2303,6 +2311,38 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return _lifecycle_report("installed", envelope, body)
         _guard(run, output_as)
 
+    @app_group.command("install-npk")
+    def app_install_npk(
+        coordinate: str = typer.Argument(..., help="npack coordinate: <publisher>/<name>[@<version>]"),
+        relay: str = typer.Option(None, "--relay", help="relay to resolve the release from (default: configured npack relays)"),
+        store: Path = typer.Option(None, "--store", help="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)"),
+        domain: str = typer.Option(None, "--domain", help="install-time override for [web].domain"),
+        path: str = typer.Option(None, "--path", help="install-time override for [web].path"),
+        npack_bin: str = typer.Option("", "--npack", help="path to the npack binary (default: $NPACK_BIN or npack on PATH)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Install a native app from a verified npack artifact.
+
+        Resolves the publisher-signed release (kind-9900) with ``npack
+        resolve``, stages the verified payload into an isolated ``--store``
+        prefix (hybrid staged store), reads the embedded native manifest, plans
+        the resource-engine operations (binding artifact_sha256 into the
+        envelope) and runs them through the signed request -> policy ->
+        approval -> execute chain.
+        """
+        def run() -> Any:
+            from nostrhost.npk import load_embedded_manifest, provenance, stage
+
+            staged = stage(coordinate, store=store or Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin=npack_bin)
+            package_data = load_embedded_manifest(staged["payload_root"])
+            package_data = _apply_web_overrides(package_data, domain=domain, path=path)
+            envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"install rejected: {body.get('reason') or body.get('state')}")
+            return _lifecycle_report("installed", envelope, body)
+        _guard(run, output_as)
+
     @app_group.command("upgrade")
     def app_upgrade(
         coordinate: str = typer.Argument(..., help="catalogue app id (coordinate)"),
@@ -2815,6 +2855,71 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return body.get("result") or body
         _guard(run, output_as)
 
+    @nsite.command("blossom-status")
+    def nsite_blossom_status(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Local Blossom server (D4) status: enabled, listener, quota, health."""
+        _forward("nsite.blossom.status", {}, output_as)
+
+    @nsite.command("blossom-enable")
+    def nsite_blossom_enable(
+        listen: str = typer.Option("127.0.0.1:8197", "--listen", help="loopback-only listener (host:port)"),
+        data_dir: str = typer.Option("/var/lib/nostrhost-nsite/blossom", "--data-dir"),
+        quota_bytes: int = typer.Option(1 << 30, "--quota-bytes"),
+        max_blob_bytes: int = typer.Option(33554432, "--max-blob-bytes"),
+        retention_days: int = typer.Option(30, "--retention-days"),
+        allow_pubkeys: str = typer.Option("", "--allow-pubkeys", help="comma-separated hex pubkeys admitted to upload (empty = any valid kind-24242 auth)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Enable the optional local Blossom server on the running gateway."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.blossom.enable", {
+                "listen": listen,
+                "data_dir": data_dir,
+                "quota_bytes": quota_bytes,
+                "max_blob_bytes": max_blob_bytes,
+                "retention_days": retention_days,
+                "allow_pubkeys": [k.strip() for k in allow_pubkeys.split(",") if k.strip()],
+            }, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.blossom.enable rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("blossom-configure")
+    def nsite_blossom_configure(
+        listen: str = typer.Option("127.0.0.1:8197", "--listen", help="loopback-only listener (host:port)"),
+        data_dir: str = typer.Option("/var/lib/nostrhost-nsite/blossom", "--data-dir"),
+        quota_bytes: int = typer.Option(1 << 30, "--quota-bytes"),
+        max_blob_bytes: int = typer.Option(33554432, "--max-blob-bytes"),
+        retention_days: int = typer.Option(30, "--retention-days"),
+        allow_pubkeys: str = typer.Option("", "--allow-pubkeys", help="comma-separated hex pubkeys admitted to upload (empty = any valid kind-24242 auth)"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Update the local Blossom server's quota/per-blob/retention contract."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.blossom.configure", {
+                "listen": listen,
+                "data_dir": data_dir,
+                "quota_bytes": quota_bytes,
+                "max_blob_bytes": max_blob_bytes,
+                "retention_days": retention_days,
+                "allow_pubkeys": [k.strip() for k in allow_pubkeys.split(",") if k.strip()],
+            }, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.blossom.configure rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
+    @nsite.command("blossom-disable")
+    def nsite_blossom_disable(output_as: str = typer.Option(None, "--output-as")) -> None:
+        """Disable the local Blossom server (stop the listener via SIGHUP)."""
+        def run() -> Any:
+            body = _run_lifecycle("nsite.blossom.disable", {}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"nsite.blossom.disable rejected: {body.get('reason') or body.get('error') or body.get('state')}")
+            return body.get("result") or body
+        _guard(run, output_as)
+
     @nsite.command("list")
     def nsite_list(output_as: str = typer.Option(None, "--output-as")) -> None:
         """Registered sites and the gateway mode."""
@@ -2951,6 +3056,10 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         site: str = typer.Option("", "--site", help="Phase 3b: read the inventory from the server-side draft area"),
         servers: str = typer.Option("", "--servers", help="comma-separated blossom servers"),
         relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        copy_of: str = typer.Option("", "--copy-of", help="Phase 5: copy the site at 'kind:pubkey:d' — the plan carries a (parent) and A (origin) tags"),
+        app: str = typer.Option("", "--app", help="Phase 5: link this site to a kind-32267 catalogue declaration ('kind:pubkey:d')"),
+        npk: bool = typer.Option(False, "--npk", help="Phase 3c: also pack the draft into a deterministic .npk and return the release template"),
+        npk_version: str = typer.Option("0.1.0", "--npk-version", help="SemVer version for the npk release"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Build the unsigned manifest + plan_sha256 from a blob inventory (or a draft site)."""
@@ -2965,6 +3074,10 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                     "site": site,
                     "servers": [r for r in servers.split(",") if r] or None,
                     "relays": [r for r in relays.split(",") if r] or None,
+                    "copy_of": copy_of,
+                    "app": app,
+                    "npk": npk,
+                    "npk_version": npk_version,
                 },
             )
         _guard(run, output_as)
@@ -2974,6 +3087,8 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         signed_event: str = typer.Argument(..., help="path to the signed manifest JSON"),
         plan: str = typer.Argument(..., help="the plan_sha256 from nsite publish-plan"),
         relays: str = typer.Option("", "--relays", help="comma-separated publish relays"),
+        npk_release: str = typer.Option("", "--npk-release", help="path to the signed kind-9900 release event JSON (Phase 3c)"),
+        npk_sha256: str = typer.Option("", "--npk-sha256", help="the artifact sha256 the npk release commits to"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Verify a signed manifest, broadcast to relays, record the site."""
@@ -2981,7 +3096,9 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             body = _run_lifecycle(
                 "nsite.publish",
                 {"event": _load_json_file(signed_event), "plan_sha256": plan,
-                 "relays": [r for r in relays.split(",") if r] or None},
+                 "relays": [r for r in relays.split(",") if r] or None,
+                 "npk_release_event": _load_json_file(npk_release) if npk_release else None,
+                 "npk_sha256": npk_sha256},
                 state=state,
             )
             if not body.get("ok"):

@@ -794,6 +794,105 @@ class SourceProvider(InspectVerifiedProvider):
             raise ProviderError("source is not a supported tar or zip archive")
 
 
+class PayloadSyncProvider(InspectVerifiedProvider):
+    """Copy a verified staged payload into the host root (hybrid staged store).
+
+    The npack binary installs an artifact into an isolated ``--store`` prefix
+    with the payload at host-relative paths (``var/www/...``, ``opt/...``).
+    This provider copies exactly that tree into the target root, skipping the
+    ``.npack`` metadata directory, and records a state marker keyed by the
+    artifact SHA-256 so a reconcile converges and removal can reverse the
+    copy. Paths are validated against traversal before any write.
+    """
+
+    resource_type = "payload"
+
+    def __init__(self, *, root: Path = Path("/"), state_dir: Path = Path("/var/lib/nostrhost/state/payloads")) -> None:
+        self.root = root
+        self.state_dir = state_dir
+
+    def _marker(self, app_id: str) -> Path:
+        return self.state_dir / f"{_safe_name(app_id)}.json"
+
+    def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
+        marker = self._marker(desired["app"])
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"synced": False, "app": desired["app"]}
+        return {
+            "synced": data.get("synced") is True,
+            "app": desired["app"],
+            "artifact_sha256": data.get("artifact_sha256"),
+            "files": data.get("files", []),
+            "state": str(marker),
+        }
+
+    def plan(self, desired: dict[str, Any], actual: Any = None) -> list[Operation]:
+        return [Operation("payload.sync", f"{desired['app']}:payload", desired, risk="medium", reverse="payload.remove", summary=f"sync staged payload for {desired['app']}")]
+
+    def apply(self, operation: Operation) -> dict[str, Any]:
+        args = operation.args
+        if operation.name == "payload.remove":
+            return self._remove(args)
+        payload_root = Path(args["payload_root"]).expanduser().resolve()
+        artifact_sha256 = args["artifact_sha256"]
+        app = args["app"]
+        if not payload_root.is_dir():
+            raise ProviderError(f"staged payload root does not exist: {payload_root}")
+        if not (payload_root / ".npack" / "manifest.json").is_file():
+            raise ProviderError(f"staged payload root is not an npack artifact: {payload_root}")
+        copied: list[str] = []
+        for source in sorted(payload_root.rglob("*")):
+            relative = source.relative_to(payload_root)
+            if relative.parts and relative.parts[0] == ".npack":
+                continue
+            if source.is_dir():
+                continue
+            target = self._safe_target(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied.append(str(relative))
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        marker = self._marker(app)
+        temporary = marker.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"app": app, "artifact_sha256": artifact_sha256, "synced": True, "files": sorted(copied)}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o640)
+        temporary.replace(marker)
+        return {"app": app, "synced": True, "artifact_sha256": artifact_sha256, "copied": len(copied), "changed": True}
+
+    def _remove(self, args: dict[str, Any]) -> dict[str, Any]:
+        marker = self._marker(args["app"])
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"app": args["app"], "synced": False, "changed": False}
+        removed: list[str] = []
+        for raw_path in data.get("files", []):
+            target = self._safe_target(Path(raw_path))
+            try:
+                target.unlink()
+                removed.append(str(target))
+            except FileNotFoundError:
+                continue
+        marker.unlink(missing_ok=True)
+        return {"app": args["app"], "synced": False, "removed": len(removed), "changed": bool(removed)}
+
+    def _safe_target(self, relative: Path) -> Path:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ProviderError(f"staged payload contains a path traversal entry: {relative}")
+        target = (self.root / relative).resolve()
+        if target != self.root and self.root not in target.parents:
+            raise ProviderError(f"staged payload escapes the target root: {relative}")
+        return target
+
+    def remove(self, desired: dict[str, Any]) -> list[Operation]:
+        return [Operation("payload.remove", f"{desired['app']}:payload", {"app": desired["app"]}, reverse="payload.sync", summary=f"remove staged payload for {desired['app']}")]
+
+
 class RuntimeProvider(InspectVerifiedProvider):
     """Validate a declared runtime through its version command.
 
@@ -2076,6 +2175,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "permission": PermissionProvider(),
         "config": ConfigFileProvider(root=root, template_root=template_root),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
+        "payload": PayloadSyncProvider(root=root, state_dir=(root / "var/lib/nostrhost/state/payloads") if root != Path("/") else Path("/var/lib/nostrhost/state/payloads")),
         "runtime": RuntimeProvider(command=command, installer=runtime_installer),
         "fpm": FpmProvider(root=root, command=command),
         "service": ServiceProvider(unit_dir=unit_dir, command=command),

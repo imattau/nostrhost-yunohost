@@ -674,12 +674,37 @@ def apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, pat
     return package_data
 
 
-def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build the control-plane envelope for one validated native package."""
+def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, Any] | None = None, npack: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build the control-plane envelope for one validated native package.
+
+    ``catalogue`` and ``npack`` are optional provenance blocks. ``npack``
+    binds an install to a specific verified artifact: it must carry the
+    publisher (hex), name, version, and ``artifact_sha256`` of the release
+    whose payload is staged in the isolated npack store. When present, a
+    ``payload.sync`` operation is appended so the staged payload is copied
+    into the host root (hybrid staged store); the reconcile executor reads
+    the store root from the envelope.
+    """
     if not isinstance(package_data, dict):
         raise PackageError("package plan requires an object")
     package = validate_package(PackageManifest.parse_obj(package_data))
     plan = plan_package(package)
+    if npack is not None:
+        if not isinstance(npack, dict):
+            raise PackageError("npack provenance must be an object")
+        _validate_npack_provenance(npack, package)
+        payload_root = Path(str(npack["payload_root"])).expanduser().resolve()
+        if not payload_root.is_dir() or not (payload_root / ".npack" / "manifest.json").is_file():
+            raise PackageError(f"npack payload root is not a staged artifact: {payload_root}")
+        plan.append(_op(
+            "payload.sync",
+            f"{package.app.id}:payload",
+            {"app": package.app.id, "artifact_sha256": npack["artifact_sha256"], "payload_root": str(payload_root)},
+            deps=(f"{package.app.id}:manifest",),
+            risk="medium",
+            reverse="payload.remove",
+            summary=f"sync staged payload from {payload_root}",
+        ))
     envelope = {
         "schema": PLAN_SCHEMA,
         "package": {"id": package.app.id, "version": package.app.version},
@@ -698,7 +723,31 @@ def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, 
             for key in ("app_id", "version", "repository", "revision", "manifest_sha256", "content_sha256", "architectures", "package_path", "event_id")
             if key in native
         }
+    if npack is not None:
+        envelope["npack"] = {
+            key: npack[key]
+            for key in ("publisher", "name", "version", "artifact_sha256", "payload_root")
+            if key in npack
+        }
     return envelope
+
+
+def _validate_npack_provenance(npack: dict[str, Any], package: PackageManifest) -> None:
+    """Check that an npack provenance block matches the package identity and
+    carries the fields the reconcile executor relies on."""
+    publisher = npack.get("publisher")
+    name = npack.get("name")
+    version = npack.get("version")
+    artifact_sha256 = npack.get("artifact_sha256")
+    payload_root = npack.get("payload_root")
+    if not publisher or not re.fullmatch(r"[0-9a-fA-F]{64}", str(publisher)):
+        raise PackageError("npack provenance requires a 64-character hex publisher")
+    if name != package.app.id or version != package.app.version:
+        raise PackageError("npack provenance does not match package identity")
+    if not artifact_sha256 or not re.fullmatch(r"[0-9a-fA-F]{64}", str(artifact_sha256)):
+        raise PackageError("npack provenance requires a 64-character hex artifact_sha256")
+    if not payload_root:
+        raise PackageError("npack provenance requires a payload_root")
 
 
 def validate_plan_envelope(envelope: dict[str, Any]) -> list[Operation]:
@@ -718,6 +767,23 @@ def validate_plan_envelope(envelope: dict[str, Any]) -> list[Operation]:
     if catalogue is not None:
         if not isinstance(catalogue, dict) or catalogue.get("app_id") != package["id"] or catalogue.get("version") != package["version"]:
             raise PackageError("native package plan catalogue provenance does not match package identity")
+    npack = envelope.get("npack")
+    if npack is not None:
+        if not isinstance(npack, dict):
+            raise PackageError("native package plan npack provenance must be an object")
+        if (
+            npack.get("name") != package["id"]
+            or npack.get("version") != package["version"]
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", str(npack.get("publisher", "")))
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", str(npack.get("artifact_sha256", "")))
+            or not npack.get("payload_root")
+        ):
+            raise PackageError("native package plan npack provenance does not match package identity or is incomplete")
+        sync_ops = [op for op in plan if op.name == "payload.sync"]
+        if len(sync_ops) != 1:
+            raise PackageError("npack-backed plan requires exactly one payload.sync operation")
+        if sync_ops[0].args.get("artifact_sha256", "").lower() != str(npack["artifact_sha256"]).lower():
+            raise PackageError("npack payload.sync artifact does not match plan provenance")
     return plan
 
 
@@ -1103,6 +1169,13 @@ def _operation_satisfied(operation: Operation, actual: Any) -> bool:
             actual.get("exists") is True
             and actual.get("sha256", "").lower() == operation.args.get("sha256", "").lower()
             and (operation.args.get("destination") is None or actual.get("url") == operation.args.get("url"))
+        )
+    if operation.name == "payload.sync":
+        # A payload sync is satisfied when the recorded marker matches the
+        # staged artifact's digest (see PayloadSyncProvider.apply).
+        return (
+            actual.get("synced") is True
+            and actual.get("artifact_sha256", "").lower() == operation.args.get("artifact_sha256", "").lower()
         )
     if operation.name == "secret.ensure":
         return actual.get("exists") is True

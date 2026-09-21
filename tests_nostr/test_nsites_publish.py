@@ -724,3 +724,143 @@ def _sha256_of(data: bytes) -> str:
     import hashlib as _hashlib
 
     return _hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3c: npk single-artifact publish
+# ---------------------------------------------------------------------------
+
+NPACK_BIN = Path(__file__).resolve().parents[3] / "forks" / "npack" / "target" / "release" / "npack"
+NEEDS_NPACK = pytest.mark.skipif(
+    not NPACK_BIN.is_file(), reason="npack binary not built (cargo build --release in forks/npack)"
+)
+
+
+def _signed_manifest(plan: dict, *, sk: str = "3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d") -> dict:
+    """Sign a publish plan's unsigned manifest template with the site key."""
+    from nostr_identity import _sign_event
+
+    tpl = plan["plan"]["unsigned_event"]
+    return _sign_event(sk, TEST_PUBKEY, tpl["kind"], tpl["content"], tpl["tags"])
+
+
+def _write_site_draft(tmp_path: Path, d: str = "") -> Path:
+    from nostrhost.nsites import service as svc_mod
+
+    service.DRAFT_ROOT = tmp_path / "drafts"
+    root = svc_mod.draft_dir(TEST_PUBKEY, d)
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"<h1>npk site</h1>\n")
+    (root / "style.css").write_bytes(b"body{}\n")
+    return root
+
+
+def _ok_upload(monkeypatch):
+    monkeypatch.setattr(service, "_blossom_has", lambda server, sha, **kw: False)
+    monkeypatch.setattr(
+        service,
+        "_blossom_upload",
+        lambda server, sha, data, auth, **kw: (True, "200"),
+    )
+
+
+@NEEDS_NPACK
+def test_publish_plan_with_npk_packs_draft_and_returns_release(tmp_path: Path, monkeypatch):
+    from nostrhost.nsites import service as svc_mod
+
+    svc = make_service(tmp_path)
+    register_root(svc)
+    monkeypatch.setattr(svc_mod, "_NPACK_BIN", str(NPACK_BIN))
+    monkeypatch.setattr(svc_mod, "_npack_available", lambda: True)
+    _write_site_draft(tmp_path)
+
+    plan = svc.publish_plan(TEST_PUBKEY, kind=15128, d="", site=TEST_PUBKEY, npk=True, npk_version="1.0.0")
+    npk = plan["npk"]
+    assert npk["name"] == "root"
+    assert npk["version"] == "1.0.0"
+    assert len(npk["artifact_sha256"]) == 64
+    release = npk["release_event"]
+    assert release["kind"] == 9900
+    assert release["pubkey"] == TEST_PUBKEY
+    assert {"name", "version", "x"} <= {t[0] for t in release["tags"]}
+    assert plan["plan"]["plan_sha256"]
+
+
+@NEEDS_NPACK
+def test_publish_with_npk_uploads_and_broadcasts_release(tmp_path: Path, monkeypatch):
+    from nostr_identity import _sign_event
+    from nostrhost.nsites import service as svc_mod
+
+    svc = make_service(tmp_path)
+    register_root(svc)
+    monkeypatch.setattr(svc_mod, "_NPACK_BIN", str(NPACK_BIN))
+    monkeypatch.setattr(svc_mod, "_npack_available", lambda: True)
+    monkeypatch.setattr(service, "_broadcast", ok_broadcast())
+    _ok_upload(monkeypatch)
+    _write_site_draft(tmp_path)
+
+    plan = svc.publish_plan(TEST_PUBKEY, kind=15128, d="", site=TEST_PUBKEY, servers=["https://blossom.test"], npk=True, npk_version="1.0.0")
+    npk = plan["npk"]
+    # TEST_PUBKEY is the corpus generator's key; this is its secret key.
+    sk = "3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d3f4f6b8d"
+    tpl = npk["release_event"]
+    signed = _sign_event(sk, TEST_PUBKEY, tpl["kind"], tpl["content"], tpl["tags"])
+    manifest = _signed_manifest(plan)
+
+    result = svc.publish(
+        manifest,
+        plan_sha256=plan["plan"]["plan_sha256"],
+        npk_release_event=signed,
+        npk_sha256=npk["artifact_sha256"],
+    )
+    assert result["ok"] is True
+    assert result["npk"]["name"] == "root"
+    assert result["npk"]["artifact_sha256"] == npk["artifact_sha256"]
+    assert result["npk"]["release_event_id"] == signed["id"]
+    assert result["npk"]["uploaded"][0]["uploaded"] is True
+
+
+@NEEDS_NPACK
+def test_publish_with_npk_rejects_release_mismatch_before_upload(tmp_path: Path, monkeypatch):
+    from nostrhost.nsites import service as svc_mod
+
+    svc = make_service(tmp_path)
+    register_root(svc)
+    monkeypatch.setattr(svc_mod, "_NPACK_BIN", str(NPACK_BIN))
+    monkeypatch.setattr(svc_mod, "_npack_available", lambda: True)
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError("upload must not run after a rejected npk release")
+
+    monkeypatch.setattr(service, "_blossom_upload", explode)
+    _write_site_draft(tmp_path)
+
+    plan = svc.publish_plan(TEST_PUBKEY, kind=15128, d="", site=TEST_PUBKEY, servers=["https://blossom.test"], npk=True)
+    npk = plan["npk"]
+    manifest = _signed_manifest(plan)
+    with pytest.raises(service.NsiteError, match="requires both"):
+        svc.publish(manifest, plan_sha256=plan["plan"]["plan_sha256"], npk_release_event=None, npk_sha256=npk["artifact_sha256"])
+    with pytest.raises(service.NsiteError, match="requires both"):
+        svc.publish(manifest, plan_sha256=plan["plan"]["plan_sha256"], npk_release_event=npk["release_event"], npk_sha256="")
+
+
+@NEEDS_NPACK
+def test_npk_publish_requires_draft_area(tmp_path: Path, monkeypatch):
+    from nostrhost.nsites import service as svc_mod
+
+    svc = make_service(tmp_path)
+    register_root(svc)
+    monkeypatch.setattr(svc_mod, "_NPACK_BIN", str(NPACK_BIN))
+    monkeypatch.setattr(svc_mod, "_npack_available", lambda: True)
+    # Isolate from earlier tests that mutated the module-global DRAFT_ROOT.
+    service.DRAFT_ROOT = tmp_path / "empty-drafts"
+    # The manifest plan builds from items; the npk pack then requires the draft
+    # area (pack_site_npk raises).
+    with pytest.raises(service.NsiteError, match="draft area"):
+        svc.publish_plan(
+            TEST_PUBKEY,
+            kind=15128,
+            d="",
+            items=[{"path": "/index.html", "sha256": "aa" * 32}],
+            npk=True,
+        )

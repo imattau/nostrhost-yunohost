@@ -91,6 +91,7 @@ from .api_models import (
     NsiteDomainAttachBody,
     NsiteDomainDetachBody,
     NsiteGatewayBody,
+    NsiteBlossomBody,
     NsiteMirrorBody,
     NsitePublishBody,
     NsitePublishPlanBody,
@@ -262,6 +263,8 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/domain/{domain}/inspect", "domain.inspect", {"domain": "domain"}),
     # Nsite gateway status: enabled, mode, domain, service health.
     ("/package/nsite/gateway/status", "nsite.gateway.status", {}),
+    # Local Blossom server (D4) status: enabled, listener, quota/retention.
+    ("/package/nsite/blossom/status", "nsite.blossom.status", {}),
     # Registered sites and the gateway mode.
     ("/package/nsite/list", "nsite.list", {}),
     # Validated nsite manifests on the catalogue + lookup relays. Served by an
@@ -462,6 +465,10 @@ NSITE_ROUTE_SCOPES: dict[str, tuple[str, ...]] = {
     "/package/nsite/gateway/enable": ("nsites.admin",),
     "/package/nsite/gateway/disable": ("nsites.admin",),
     "/package/nsite/gateway/configure": ("nsites.admin",),
+    "/package/nsite/blossom/status": ("nsites.read",),
+    "/package/nsite/blossom/enable": ("nsites.admin",),
+    "/package/nsite/blossom/configure": ("nsites.admin",),
+    "/package/nsite/blossom/disable": ("nsites.admin",),
     "/package/nsite/list": ("nsites.read",),
     "/package/nsite/discover": ("nsites.read",),
     "/package/nsite/block/list": ("nsites.read",),
@@ -877,6 +884,34 @@ def build_app(
             state=_State(),
         )
 
+    # -- local Blossom server (Phase 5, D4) ----------------------------------
+
+    def _blossom_body() -> dict[str, Any]:
+        body = _body(NsiteBlossomBody)
+        return {
+            "listen": body.get("listen", "127.0.0.1:8197"),
+            "data_dir": body.get("data_dir", "/var/lib/nostrhost-nsite/blossom"),
+            "quota_bytes": body.get("quota_bytes", 1 << 30),
+            "max_blob_bytes": body.get("max_blob_bytes", 33554432),
+            "retention_days": body.get("retention_days", 30),
+            "allow_pubkeys": body.get("allow_pubkeys", []),
+        }
+
+    @app.post("/package/nsite/blossom/enable")
+    def nsite_blossom_enable() -> Any:
+        """Enable the optional local Blossom server on the running gateway."""
+        return _run_lifecycle("nsite.blossom.enable", _blossom_body(), state=_State())
+
+    @app.post("/package/nsite/blossom/configure")
+    def nsite_blossom_configure() -> Any:
+        """Update the local Blossom server's quota/per-blob/retention contract."""
+        return _run_lifecycle("nsite.blossom.configure", _blossom_body(), state=_State())
+
+    @app.post("/package/nsite/blossom/disable")
+    def nsite_blossom_disable() -> Any:
+        """Disable the local Blossom server (stop the listener via SIGHUP)."""
+        return _run_lifecycle("nsite.blossom.disable", {}, state=_State())
+
     # -- nsite sites / publishing (Phase 3a) --------------------------------
 
     @app.get("/package/nsite/inspect")
@@ -941,6 +976,8 @@ def build_app(
                 "servers": body.get("servers"),
                 "relays": body.get("relays"),
                 "copy_of": body.get("copy_of", ""),
+                "npk": bool(body.get("npk", False)),
+                "npk_version": body.get("npk_version", "0.1.0"),
             },
         )
 
@@ -1024,6 +1061,8 @@ def build_app(
                 "event": body.get("event"),
                 "plan_sha256": body.get("plan_sha256", ""),
                 "relays": body.get("relays"),
+                "npk_release_event": body.get("npk_release_event"),
+                "npk_sha256": body.get("npk_sha256", ""),
             },
             state=_State(),
         )
@@ -1751,6 +1790,52 @@ def build_app(
     @app.post("/package/app/{app_id}/install/apply")
     def app_install_apply(app_id: str) -> Any:
         return apply_catalogue_lifecycle(app_id, "install", _json_body())
+
+    @app.post("/package/npk/install/plan")
+    def npk_install_plan() -> Any:
+        from pathlib import Path
+
+        body = _json_body()
+        coordinate = body.get("coordinate") if isinstance(body, dict) else None
+        if not coordinate:
+            raise ApiError(400, "invalid_request", "npk install plan requires an npack coordinate <publisher>/<name>[@version]")
+        from nostrhost.npk import load_embedded_manifest, provenance, stage
+        from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
+
+        try:
+            staged = stage(coordinate, store=Path(body.get("store") or "/var/lib/nostrhost/npack-store"), relay=body.get("relay") or "", npack_bin="")
+            package_data = load_embedded_manifest(staged["payload_root"])
+            package_data = apply_web_overrides(package_data, domain=body.get("domain"), path=body.get("path"))
+            envelope = package_plan_envelope(package_data, npack=provenance(staged))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_npk_release", str(exc)) from exc
+        return {"coordinate": coordinate, "envelope": envelope, "payload_root": staged["payload_root"], "artifact_sha256": staged["artifact_sha256"]}
+
+    @app.post("/package/npk/install/apply")
+    def npk_install_apply() -> Any:
+        from pathlib import Path
+
+        body = _json_body()
+        if set(body) != {"coordinate", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "npk install apply requires coordinate and plan_sha256")
+        from nostrhost.npk import load_embedded_manifest, provenance, stage
+        from nostrhost.package_engine import package_plan_envelope
+
+        try:
+            staged = stage(body["coordinate"], store=Path("/var/lib/nostrhost/npack-store"), relay="", npack_bin="")
+            package_data = load_embedded_manifest(staged["payload_root"])
+            envelope = package_plan_envelope(package_data, npack=provenance(staged))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_npk_release", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "The release or store changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
+        if not result.get("ok"):
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or "install was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
+            )
+        return {"operation": result, "action": "install", "package": envelope.get("package")}
 
     @app.post("/package/app/{app_id}/upgrade/plan")
     def app_upgrade_plan(app_id: str) -> Any:
@@ -2496,6 +2581,8 @@ def _REQUEST_BODY_MODELS() -> dict[str, type[BaseModel]]:
         "/package/nsite/mirror": NsiteMirrorBody,
         "/package/nsite/domain/attach": NsiteDomainAttachBody,
         "/package/nsite/domain/detach": NsiteDomainDetachBody,
+        "/package/nsite/blossom/enable": NsiteBlossomBody,
+        "/package/nsite/blossom/configure": NsiteBlossomBody,
         "/package/nsite/collection/validate": NsiteCollectionValidateBody,
         "/package/nsite/collection/publish/plan": NsiteCollectionPlanBody,
         "/package/nsite/collection/publish": NsiteCollectionPublishBody,

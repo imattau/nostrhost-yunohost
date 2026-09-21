@@ -185,6 +185,58 @@ def test_gateway_configure_requires_enabled(tmp_path: Path):
     assert "kill -s HUP" in " ".join(systemctl.calls)
 
 
+def test_gateway_enable_rejects_oversize_blob(tmp_path: Path, monkeypatch):
+    caddy, systemctl = FakeCaddy(), FakeSystemctl(active=False)
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    big = cfg()
+    big.limits.max_blob_bytes = service.MAX_ALLOWED_BLOB_BYTES + 1
+    with pytest.raises(service.NsiteError, match="128 MiB"):
+        svc.enable(big)
+    assert not caddy.ensured
+    assert systemctl.active is False
+
+
+def test_gateway_enable_rejects_nonpositive_blob(tmp_path: Path):
+    caddy, systemctl = FakeCaddy(), FakeSystemctl(active=False)
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    bad = cfg()
+    bad.limits.max_blob_bytes = 0
+    with pytest.raises(service.NsiteError, match="must be positive"):
+        svc.enable(bad)
+
+
+def test_gateway_enable_rejects_quota_over_free_space(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(service.NsiteService, "_free_space_bytes", staticmethod(lambda: 1 << 30))
+    caddy, systemctl = FakeCaddy(), FakeSystemctl(active=False)
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    over = cfg()
+    over.limits.cache_quota_bytes = 3 * (1 << 29)  # 1.5 GiB > 50% of 1 GiB
+    with pytest.raises(service.NsiteError, match="50%"):
+        svc.enable(over)
+    assert not caddy.ensured
+
+
+def test_gateway_enable_accepts_quota_within_free_space(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(service.NsiteService, "_free_space_bytes", staticmethod(lambda: 1 << 30))
+    caddy, systemctl = FakeCaddy(), FakeSystemctl(active=False)
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    ok = cfg()
+    ok.limits.cache_quota_bytes = 1 << 29  # 512 MiB ≤ 50% of 1 GiB
+    result = svc.enable(ok)
+    assert result["ok"] is True
+    assert caddy.ensured == ["sites.example.org"]
+
+
+def test_gateway_configure_rejects_oversize_blob(tmp_path: Path):
+    caddy, systemctl = FakeCaddy(), FakeSystemctl()
+    svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)
+    svc.enable(cfg())
+    big = cfg()
+    big.limits.max_blob_bytes = service.MAX_ALLOWED_BLOB_BYTES + 1
+    with pytest.raises(service.NsiteError, match="128 MiB"):
+        svc.configure(big)
+
+
 def test_gateway_status_disabled(tmp_path: Path):
     caddy, systemctl = FakeCaddy(), FakeSystemctl(active=False)
     svc = make_service(tmp_path, caddy=caddy, systemctl=systemctl)

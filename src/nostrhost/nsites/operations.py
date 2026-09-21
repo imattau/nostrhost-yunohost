@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core import NostrHostError
-from .models import GatewayBlossom, GatewayConfig, GatewayLimits, GatewayRelays
+from .models import GatewayBlossom, GatewayConfig, GatewayLimits, GatewayNpk, GatewayRelays
 from .service import NsiteError, NsiteService
 
 
@@ -38,6 +38,9 @@ class GatewayArgs(_Strict):
         None, description="fallback Blossom servers when a manifest has no hints (D4)"
     )
     allow_http: bool = False
+    npk_enabled: bool = Field(
+        False, description="serve sites from their publisher's npack release bundle when available (Phase 3)"
+    )
     max_blob_bytes: int | None = Field(
         None, description="per-blob cap in bytes (default 32 MiB, max 128 MiB)"
     )
@@ -51,6 +54,38 @@ class GatewayDisableArgs(_Strict):
     approval-gated tool to advertise an input model)."""
 
     confirm: bool = Field(True, description="acknowledge disabling the gateway")
+
+
+class BlossomLocalArgs(_Strict):
+    """Shared arguments for nsite.blossom.enable/configure (Phase 5, D4)."""
+
+    listen: str = Field(
+        "127.0.0.1:8197", description="loopback-only listener (host:port)"
+    )
+    data_dir: str = Field(
+        "/var/lib/nostrhost-nsite/blossom",
+        description="content-addressed blob directory",
+    )
+    quota_bytes: int = Field(
+        1073741824, description="total store quota in bytes (default 1 GiB)"
+    )
+    max_blob_bytes: int = Field(
+        33554432, description="per-blob cap in bytes (default 32 MiB, max 128 MiB)"
+    )
+    retention_days: int = Field(
+        30, description="blob retention in days (0 = keep forever)"
+    )
+    allow_pubkeys: list[str] = Field(
+        default_factory=list,
+        description="admit uploads signed by exactly these pubkeys (empty = any valid kind-24242 auth)",
+    )
+
+
+class BlossomDisableArgs(_Strict):
+    """nsite.blossom.disable takes no arguments (the registry requires every
+    approval-gated tool to advertise an input model)."""
+
+    confirm: bool = Field(True, description="acknowledge disabling the local Blossom server")
 
 
 class SiteArgs(_Strict):
@@ -85,6 +120,17 @@ class PublishPlanArgs(_Strict):
     copy_of: str = Field(
         default="",
         description="Phase 5: copy the site at 'kind:pubkey:d' — the plan carries a (parent) and A (origin) tags",
+    )
+    app: str = Field(
+        default="",
+        description="Phase 5: the 'kind:pubkey:d' address of the kind-32267 catalogue app this site links to — the plan carries an app tag",
+    )
+    npk: bool = Field(
+        default=False,
+        description="Phase 3c: also pack the site draft into a deterministic .npk and return the release template",
+    )
+    npk_version: str = Field(
+        default="0.1.0", description="SemVer version for the npk release (default 0.1.0)"
     )
 
 
@@ -124,6 +170,12 @@ class PublishArgs(_Strict):
     event: dict = Field(description="the signed manifest event to verify/broadcast/record")
     plan_sha256: str = Field(description="the plan digest from nsite.publish.plan")
     relays: list[str] | None = Field(None, description="publish relays (must match the plan)")
+    npk_release_event: dict | None = Field(
+        None, description="Phase 3c: the signed kind-9900 release event to verify, upload and broadcast"
+    )
+    npk_sha256: str = Field(
+        default="", description="Phase 3c: the artifact sha256 the release commits to"
+    )
 
 
 class ResolveArgs(_Strict):
@@ -271,6 +323,7 @@ def _config(args: dict[str, Any]) -> GatewayConfig:
     if args.get("fallback_servers") is not None:
         base.blossom = GatewayBlossom(fallback_servers=args["fallback_servers"])
     base.blossom.allow_http = bool(args.get("allow_http", False))
+    base.npk = GatewayNpk(enabled=bool(args.get("npk_enabled", False)))
     if args.get("max_blob_bytes") is not None:
         base.limits = GatewayLimits(max_blob_bytes=args["max_blob_bytes"])
     if args.get("cache_quota_bytes") is not None:
@@ -304,6 +357,41 @@ def _safe_gateway_configure(**args: Any) -> dict[str, Any]:
         raise NostrHostError("nsite.gateway.configure requires a domain")
     try:
         return _service().configure(_config(args))
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _local_model(args: dict[str, Any]):
+    from .models import GatewayBlossomLocal
+
+    return GatewayBlossomLocal(**args)
+
+
+def _safe_blossom_status(**args: Any) -> dict[str, Any]:
+    if args:
+        raise NostrHostError("nsite.blossom.status takes no arguments")
+    return _service().blossom_status()
+
+
+def _safe_blossom_enable(**args: Any) -> dict[str, Any]:
+    try:
+        return _service().blossom_enable(_local_model(args))
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_blossom_configure(**args: Any) -> dict[str, Any]:
+    try:
+        return _service().blossom_configure(_local_model(args))
+    except NsiteError as exc:
+        raise NostrHostError(str(exc)) from exc
+
+
+def _safe_blossom_disable(**args: Any) -> dict[str, Any]:
+    if set(args) - {"confirm"}:
+        raise NostrHostError("nsite.blossom.disable takes only confirm")
+    try:
+        return _service().blossom_disable()
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 
@@ -349,11 +437,11 @@ def _safe_nsite_validate(event: dict | None = None, **args: Any) -> dict[str, An
     return _service().validate_manifest(event)
 
 
-def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, site: str = "", servers: list | None = None, relays: list | None = None, copy_of: str = "", **args: Any) -> dict[str, Any]:
+def _safe_nsite_publish_plan(pubkey: str = "", kind: int = 15128, d: str = "", items: list | None = None, site: str = "", servers: list | None = None, relays: list | None = None, copy_of: str = "", app: str = "", npk: bool = False, npk_version: str = "0.1.0", **args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError(f"nsite.publish.plan does not accept extra args: {sorted(args)}")
     try:
-        return _service().publish_plan(pubkey, kind=kind, d=d, items=items, site=site, servers=servers, relays=relays, copy_of=copy_of)
+        return _service().publish_plan(pubkey, kind=kind, d=d, items=items, site=site, servers=servers, relays=relays, copy_of=copy_of, app=app, npk=npk, npk_version=npk_version)
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 
@@ -397,13 +485,13 @@ def _safe_nsite_domain_detach(fqdn: str = "", **args: Any) -> dict[str, Any]:
         raise NostrHostError(str(exc)) from exc
 
 
-def _safe_nsite_publish(event: dict | None = None, plan_sha256: str = "", relays: list | None = None, **args: Any) -> dict[str, Any]:
+def _safe_nsite_publish(event: dict | None = None, plan_sha256: str = "", relays: list | None = None, npk_release_event: dict | None = None, npk_sha256: str = "", **args: Any) -> dict[str, Any]:
     if args:
         raise NostrHostError(f"nsite.publish does not accept extra args: {sorted(args)}")
     if not event:
         raise NostrHostError("nsite.publish requires a signed event")
     try:
-        return _service().publish(event, plan_sha256=plan_sha256, relays=relays)
+        return _service().publish(event, plan_sha256=plan_sha256, relays=relays, npk_release_event=npk_release_event, npk_sha256=npk_sha256)
     except NsiteError as exc:
         raise NostrHostError(str(exc)) from exc
 

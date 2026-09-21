@@ -74,6 +74,8 @@ from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models 
     DiscoverArgs,
     DomainAttachArgs,
     DomainDetachArgs,
+    BlossomDisableArgs,
+    BlossomLocalArgs,
     GatewayArgs,
     GatewayDisableArgs,
     MirrorArgs,
@@ -84,6 +86,10 @@ from .nostrhost.nsites.operations import (  # noqa: E402 - nsite.* input models 
     SiteArgs,
     SiteRegisterArgs,
     ValidateManifestArgs,
+    _safe_blossom_configure as _safe_nsite_blossom_configure,
+    _safe_blossom_disable as _safe_nsite_blossom_disable,
+    _safe_blossom_enable as _safe_nsite_blossom_enable,
+    _safe_blossom_status as _safe_nsite_blossom_status,
     _safe_gateway_configure as _safe_nsite_gateway_configure,
     _safe_gateway_disable as _safe_nsite_gateway_disable,
     _safe_gateway_enable as _safe_nsite_gateway_enable,
@@ -378,6 +384,14 @@ class PackageReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the signed native package plan envelope (from package.plan)")
 
 
+class PackageInstallNpkArgs(_Strict):
+    coordinate: str = Field(description="npack coordinate: <publisher>/<name>[@<version>]")
+    relay: str = Field(default="", description="relay to resolve the release from (default: configured npack relays)")
+    store: str = Field(default="", description="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)")
+    domain: str | None = Field(default=None, description="install-time override for [web].domain")
+    path: str | None = Field(default=None, description="install-time override for [web].path")
+
+
 class RollbackApplyArgs(_Strict):
     plan: dict[str, Any] = Field(description="the rollback plan produced by the rollback planner")
 
@@ -563,6 +577,37 @@ def _safe_package_fetch_manifest(repository: str = "", revision: str = "", packa
         return fetch_manifest_from_repository(repository, revision=revision, package_path=package_path)
     except ValueError as exc:
         raise OperationError(str(exc)) from exc
+
+
+def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str = "", domain: str | None = None, path: str | None = None, **args: Any) -> dict[str, Any]:
+    """Stage a verified npack release and build the plan envelope.
+
+    Read-only with respect to the host: npack resolve verifies the release
+    signature/revocation/hash and npack install writes only into the isolated
+    --store prefix. The returned envelope is submitted to the approval-gated
+    package.reconcile path for the actual resource changes.
+    """
+    if args or not coordinate:
+        raise OperationError("package.install requires an npack coordinate <publisher>/<name>[@version]")
+    from pathlib import Path
+
+    from nostrhost.npk import load_embedded_manifest, provenance, stage
+
+    try:
+        staged = stage(coordinate, store=Path(store) if store else Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin="")
+        package_data = load_embedded_manifest(staged["payload_root"])
+        from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
+
+        package_data = apply_web_overrides(package_data, domain=domain, path=path)
+        envelope = package_plan_envelope(package_data, npack=provenance(staged))
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"cannot stage npack release: {exc}") from exc
+    return {
+        "coordinate": coordinate,
+        "envelope": envelope,
+        "payload_root": staged["payload_root"],
+        "artifact_sha256": staged["artifact_sha256"],
+    }
 
 
 def _safe_package_reconcile(
@@ -1102,6 +1147,12 @@ TOOLS: dict[str, ToolSpec] = {
         input_model=PackageReconcileArgs,
         description="apply an approved native package operation plan",
     ),
+    "package.install": ToolSpec(
+        name="package.install", handler=_safe_package_install_npk, scope=SCOPE_APPS_READ,
+        require_approval=False,
+        input_model=PackageInstallNpkArgs,
+        description="stage a verified npack release and build the native plan envelope (submit to package.reconcile to apply)",
+    ),
     "system.version": ToolSpec(
         name="system.version",
         handler=_safe_system_version,
@@ -1268,6 +1319,40 @@ TOOLS: dict[str, ToolSpec] = {
         risk=RISK_MEDIUM,
         reversibility=REVERSIBLE,
         description="update gateway config (relays, blossom servers, limits) and reload",
+    ),
+    "nsite.blossom.status": ToolSpec(
+        name="nsite.blossom.status",
+        handler=_safe_nsite_blossom_status,
+        scope=SCOPE_NSITES_READ,
+        require_approval=False,
+        description="local Blossom server (D4) status: enabled, listener, quota/retention contract, health",
+    ),
+    "nsite.blossom.enable": ToolSpec(
+        name="nsite.blossom.enable",
+        handler=_safe_nsite_blossom_enable,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=BlossomLocalArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="enable the optional local Blossom server on the running gateway (loopback listener + quota/retention contract)",
+    ),
+    "nsite.blossom.configure": ToolSpec(
+        name="nsite.blossom.configure",
+        handler=_safe_nsite_blossom_configure,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=BlossomLocalArgs,
+        risk=RISK_MEDIUM,
+        reversibility=REVERSIBLE,
+        description="update the local Blossom server's quota/per-blob/retention contract and reload",
+    ),
+    "nsite.blossom.disable": ToolSpec(
+        name="nsite.blossom.disable",
+        handler=_safe_nsite_blossom_disable,
+        scope=SCOPE_NSITES_ADMIN,
+        input_model=BlossomDisableArgs,
+        risk=RISK_LOW,
+        reversibility=REVERSIBLE,
+        description="disable the local Blossom server: stop the listener (SIGHUP), keep state",
     ),
     "nsite.list": ToolSpec(
         name="nsite.list",

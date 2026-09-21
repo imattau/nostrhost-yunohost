@@ -33,6 +33,23 @@ class GatewayBlossom(BaseModel):
         default_factory=lambda: ["https://blossom.primal.net", "https://blossom.band"]
     )
     allow_http: bool = False
+    local: "GatewayBlossomLocal" = Field(default_factory=lambda: GatewayBlossomLocal())
+
+
+class GatewayBlossomLocal(BaseModel):
+    """The optional local Blossom server (Phase 5, D4): a content-addressed
+    store served by the gateway binary on a loopback-only listener, with its
+    own quota/per-blob/retention contract. ``enabled`` is derived state
+    (nsite.blossom.enable/disable), not part of the rendered toml section.
+    """
+
+    enabled: bool = False
+    listen: str = "127.0.0.1:8197"
+    data_dir: str = "/var/lib/nostrhost-nsite/blossom"
+    quota_bytes: int = 1073741824  # 1 GiB
+    max_blob_bytes: int = 33554432  # 32 MiB (cap 128 MiB)
+    retention_days: int = 30  # 0 = keep forever
+    allow_pubkeys: list[str] = Field(default_factory=list)
 
 
 class GatewayLimits(BaseModel):
@@ -46,6 +63,15 @@ class GatewayLimits(BaseModel):
     max_paths_per_manifest: int = 5000
     requests_per_second: int = 50
     requests_burst: int = 200
+
+
+class GatewayNpk(BaseModel):
+    """Single-artifact nsite distribution (Phase 3): serve a site from its
+    publisher's npack release bundle instead of per-path Blossom blobs."""
+
+    enabled: bool = False
+    cache_path: str = "/var/cache/nostrhost-nsite/npk"
+    release_ttl_seconds: int = 300
 
 
 class GatewayConfig(BaseModel):
@@ -63,6 +89,7 @@ class GatewayConfig(BaseModel):
     cache_path: str = "/var/cache/nostrhost-nsite"
     relays: GatewayRelays = Field(default_factory=GatewayRelays)
     blossom: GatewayBlossom = Field(default_factory=GatewayBlossom)
+    npk: GatewayNpk = Field(default_factory=GatewayNpk)
     limits: GatewayLimits = Field(default_factory=GatewayLimits)
 
     def to_toml(self) -> str:
@@ -83,6 +110,25 @@ class GatewayConfig(BaseModel):
             "[blossom]",
             "fallback_servers = " + _str_list(self.blossom.fallback_servers),
             f"allow_http = {str(self.blossom.allow_http).lower()}",
+        ]
+        local = self.blossom.local
+        lines += [
+            "",
+            "[blossom.local]",
+            f"enabled = {str(local.enabled).lower()}",
+            f'listen = "{local.listen}"',
+            f'data_dir = "{local.data_dir}"',
+            f"quota_bytes = {local.quota_bytes}",
+            f"max_blob_bytes = {local.max_blob_bytes}",
+            f"retention_days = {local.retention_days}",
+            "allow_pubkeys = " + _str_list(local.allow_pubkeys),
+        ]
+        lines += [
+            "",
+            "[npk]",
+            f"enabled = {str(self.npk.enabled).lower()}",
+            f'cache_path = "{self.npk.cache_path}"',
+            f"release_ttl_seconds = {self.npk.release_ttl_seconds}",
             "",
             "[limits]",
             f"max_blob_bytes = {self.limits.max_blob_bytes}",
@@ -211,3 +257,8 @@ class CollectionRequest(BaseModel):
 
 def _str_list(values: list[str]) -> str:
     return "[" + ", ".join(f'"{v}"' for v in values) + "]"
+
+
+# Resolve the forward reference GatewayBlossom -> GatewayBlossomLocal so the
+# v1 model is usable without an explicit update at each construction.
+GatewayBlossom.update_forward_refs()

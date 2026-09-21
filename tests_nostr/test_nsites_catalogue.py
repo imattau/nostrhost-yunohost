@@ -207,6 +207,57 @@ def test_publish_records_app_and_surfaces_in_list(tmp_path: Path, monkeypatch):
     assert any(s["app"] == f"32267:{pubkey}:mysite" for s in listing["sites"])
 
 
+def test_publish_plan_carries_app_tag(tmp_path: Path):
+    _, pubkey = new_keys()
+    svc = make_service(tmp_path)
+    svc.enable(GatewayConfig(domain=GATEWAY))
+    plan = svc.publish_plan(
+        pubkey,
+        kind=15128,
+        d="",
+        items=[{"path": "/index.html", "sha256": "a" * 64}],
+        app=f"32267:{pubkey}:main",
+    )["plan"]
+    tags = plan["unsigned_event"]["tags"]
+    assert ["app", f"32267:{pubkey}:main"] in tags
+    # The app tag is not part of the plan digest (it carries no
+    # content-integrity meaning), so a plan with and without it digests equal.
+    assert plan["plan_sha256"] == plan_digest_from(plan)
+
+    # A signed event carrying the planned app tag validates and publishes.
+    sk, signer = new_keys()
+    app_event = sign_event(
+        signer,
+        15128,
+        [t for t in plan["unsigned_event"]["tags"]],
+    )
+    verdict = validate_manifest(app_event)
+    assert verdict.valid, verdict.errors
+    assert verdict.app == f"32267:{pubkey}:main"
+
+
+def test_publish_plan_rejects_bad_app_address(tmp_path: Path):
+    _, pubkey = new_keys()
+    svc = make_service(tmp_path)
+    svc.enable(GatewayConfig(domain=GATEWAY))
+    with pytest.raises(service.NsiteError, match="invalid app address"):
+        svc.publish_plan(
+            pubkey,
+            kind=15128,
+            d="",
+            items=[{"path": "/index.html", "sha256": "a" * 64}],
+            app="not-an-address",
+        )
+    with pytest.raises(service.NsiteError, match="invalid app address"):
+        svc.publish_plan(
+            pubkey,
+            kind=15128,
+            d="",
+            items=[{"path": "/index.html", "sha256": "a" * 64}],
+            app=f"32267:{pubkey[:8]}",
+        )
+
+
 def test_catalogue_nsite_links(tmp_path: Path):
     _, pubkey = new_keys()
     svc = make_service(tmp_path)

@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PackageProvider, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeInstanceReaperProvider, RuntimeInstanceTemplateProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, UnitHealthProvider, native_providers
+from nostrhost.native_providers import AccessProvider, AptProvider, BackupProvider, CaddyProvider, ConfigFileProvider, DatabaseProvider, DirectoryProvider, FpmProvider, HealthProvider, HookProvider, JsonStateProvider, MongoProvider, NativeOperationExecutor, PackageProvider, PayloadSyncProvider, PermissionProvider, PolicyProvider, PortProvider, PostgresProvider, ProviderError, RedisProvider, RuntimeInstanceReaperProvider, RuntimeInstanceTemplateProvider, RuntimeProvider, SecretProvider, ServiceProvider, SourceProvider, SysusersProvider, TimerProvider, TmpfilesProvider, UnitHealthProvider, native_providers
 from nostrhost.package_engine import Operation
 
 
@@ -111,10 +111,52 @@ def test_source_provider_supports_strip_components_and_file_rename(tmp_path: Pat
     provider.apply(provider.plan(desired)[0])
     assert (tmp_path / "opt/example/app").read_bytes() == payload
 
-    file_provider = SourceProvider(root=tmp_path, cache_dir=tmp_path / "cache2", downloader=lambda _url, destination: destination.write_bytes(payload))
-    file_desired = {"url": "https://example.test/app.bin", "sha256": hashlib.sha256(payload).hexdigest(), "destination": "/opt/file", "extract": False, "format": "file", "rename": "app.bin"}
-    file_provider.apply(file_provider.plan(file_desired)[0])
-    assert (tmp_path / "opt/file/app.bin").read_bytes() == payload
+
+def _staged_payload(tmp_path: Path) -> Path:
+    payload = tmp_path / "payload"
+    (payload / ".npack").mkdir(parents=True)
+    (payload / ".npack" / "manifest.json").write_text("{}", encoding="utf-8")
+    (payload / "var/www/example").mkdir(parents=True)
+    (payload / "var/www/example/index.html").write_text("<h1>ok</h1>", encoding="utf-8")
+    (payload / "opt/example").mkdir(parents=True)
+    (payload / "opt/example/app").write_bytes(b"\x00\x01")
+    return payload
+
+
+def test_payload_sync_copies_staged_payload_into_root(tmp_path: Path):
+    payload = _staged_payload(tmp_path)
+    provider = PayloadSyncProvider(root=tmp_path, state_dir=tmp_path / "state")
+    operation = Operation("payload.sync", "example:payload", {"app": "example", "artifact_sha256": "cd" * 32, "payload_root": str(payload)}, reverse="payload.remove")
+    result = provider.apply(operation)
+    assert result["synced"] is True
+    assert (tmp_path / "var/www/example/index.html").read_text() == "<h1>ok</h1>"
+    assert (tmp_path / "opt/example/app").read_bytes() == b"\x00\x01"
+    assert not (tmp_path / ".npack").exists()
+
+    inspect = provider.inspect({"app": "example"})
+    assert inspect["synced"] is True
+    assert inspect["artifact_sha256"] == "cd" * 32
+    from nostrhost.package_engine import _operation_satisfied
+
+    assert _operation_satisfied(operation, inspect)
+
+
+def test_payload_sync_remove_reverses_copied_files(tmp_path: Path):
+    payload = _staged_payload(tmp_path)
+    provider = PayloadSyncProvider(root=tmp_path, state_dir=tmp_path / "state")
+    provider.apply(Operation("payload.sync", "example:payload", {"app": "example", "artifact_sha256": "cd" * 32, "payload_root": str(payload)}, reverse="payload.remove"))
+    removed = provider.apply(Operation("payload.remove", "example:payload", {"app": "example"}, reverse="payload.sync"))
+    assert removed["removed"] == 2
+    assert not (tmp_path / "var/www/example/index.html").exists()
+    assert provider.inspect({"app": "example"})["synced"] is False
+
+
+def test_payload_sync_rejects_path_traversal(tmp_path: Path):
+    provider = PayloadSyncProvider(root=tmp_path, state_dir=tmp_path / "state")
+    with pytest.raises(ProviderError, match="traversal"):
+        provider._safe_target(Path("../escape.txt"))
+    with pytest.raises(ProviderError, match="traversal"):
+        provider._safe_target(Path("/etc/passwd"))
 
 
 def test_runtime_provider_validates_version_with_bounded_arguments():

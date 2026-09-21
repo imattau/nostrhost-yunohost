@@ -22,8 +22,10 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -34,7 +36,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .manifest import KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT
-from .models import CustomDomainRecord, GatewayConfig, SiteRecord
+from .models import CustomDomainRecord, GatewayBlossomLocal, GatewayConfig, SiteRecord
 
 CONFIG_PATH = Path("/etc/nostrhost/nsite.toml")
 CADDY_TEMPLATE_DIR = Path("/usr/share/yunohost/conf/caddy")
@@ -43,6 +45,13 @@ GATEWAY_UPSTREAM = "127.0.0.1:8195"
 SERVICE = "nostrhost-nsite.service"
 
 _LIVE = object()
+
+# Gateway limit caps (implementation plan §4.4), mirrored from the gateway's
+# own config checker (libs/nostrhost-nsite/internal/config/config.go) so an
+# out-of-range plan is rejected here, before approval, instead of only at
+# gateway startup.
+MAX_ALLOWED_BLOB_BYTES = 128 * 1024 * 1024  # 128 MiB
+MAX_CACHE_QUOTA_FRACTION = 0.5  # cache_quota_bytes ≤ 50% of free space
 
 # Host defaults for publishing when the owner's NIP-65 list is unavailable
 # (implementation plan §D5).
@@ -127,6 +136,26 @@ def custom_domain_path(state_dir: Path, fqdn: str) -> Path:
 
 
 _HOSTNAME_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def _split_listen(listen: str) -> tuple[str, str]:
+    """Split a host:port listen address into (host, port).
+
+    Accepts ``127.0.0.1:8197`` and ``[::1]:8197`` (the Go gateway's
+    ``net.SplitHostPort`` format). Raises NsiteError on a malformed value.
+    """
+    if listen.startswith("["):
+        end = listen.find("]")
+        if end < 0 or end + 1 >= len(listen) or listen[end + 1] != ":":
+            raise NsiteError(f"malformed listen address {listen!r}")
+        host, port = listen[1:end], listen[end + 2 :]
+    else:
+        if ":" not in listen:
+            raise NsiteError(f"malformed listen address {listen!r}")
+        host, port = listen.rsplit(":", 1)
+    if not port or not port.isdigit():
+        raise NsiteError(f"malformed listen address {listen!r}")
+    return host, port
 
 
 def _valid_fqdn(fqdn: str) -> bool:
@@ -667,6 +696,124 @@ def _blossom_auth_event(hashes: list[str]) -> dict[str, Any] | None:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# npk single-artifact distribution (Phase 3c): pack a site root into a
+# deterministic .npk and publish its kind-9900 release alongside the manifest.
+
+_NPACK_BIN = os.environ.get("NPACK_BIN", "npack")
+_RELEASE_KIND = 9900
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+def _npack_available() -> bool:
+    try:
+        result = subprocess.run([_NPACK_BIN, "--version"], text=True, capture_output=True, check=False, timeout=10)
+        return result.returncode == 0
+    except Exception:  # noqa: BLE001 - absence just disables the npk option
+        return False
+
+
+def pack_site_npk(pubkey: str, *, d: str = "", version: str = "0.1.0") -> dict[str, Any]:
+    """Pack a site's server-side draft into a deterministic .npk artifact.
+
+    The site root (index.html, assets…) sits at the archive root, so the
+    gateway's bundle store can serve paths straight from the unpacked tree.
+    Requires the ``npack`` binary ($NPACK_BIN). Returns the artifact path,
+    its sha256, and the npk package name (``root`` for root sites, the ``d``
+    identifier for named sites).
+    """
+    if not _SEMVER.fullmatch(version):
+        raise NsiteError(f"npk version must be SemVer, got {version!r}")
+    pubkey = _pubkey_hex(pubkey)
+    root = draft_dir(pubkey, d)
+    if not root.is_dir():
+        raise NsiteError("npk publish requires the server-side draft area (nsite.publish.plan with --site)")
+    name = "root" if not d else d
+
+    with tempfile.TemporaryDirectory(prefix="nostrhost-nsite-npk-") as temporary:
+        staging = Path(temporary)
+        shutil.copytree(root, staging / "site", symlinks=False)
+        site_root = staging / "site"
+        init = subprocess.run(
+            [_NPACK_BIN, "init", str(site_root), "--name", name, "--version", version, "--publisher", pubkey],
+            text=True, capture_output=True, check=False, timeout=60,
+        )
+        if init.returncode != 0:
+            raise NsiteError(f"npack init failed: {(init.stderr or init.stdout).strip()}")
+        artifact = staging / f"{name}-{version}.npk"
+        pack = subprocess.run(
+            [_NPACK_BIN, "pack", str(site_root), "--output", str(artifact)],
+            text=True, capture_output=True, check=False, timeout=120,
+        )
+        if pack.returncode != 0:
+            raise NsiteError(f"npack pack failed: {(pack.stderr or pack.stdout).strip()}")
+        digest = subprocess.run(
+            [_NPACK_BIN, "hash", str(artifact)], text=True, capture_output=True, check=False, timeout=30
+        )
+        if digest.returncode != 0 or not _SHA256_RE.fullmatch(digest.stdout.strip()):
+            raise NsiteError("npack hash failed: " + (digest.stderr or digest.stdout).strip())
+        artifact_bytes = artifact.read_bytes()
+    return {
+        "name": name,
+        "version": version,
+        "sha256": digest.stdout.strip(),
+        "bytes": artifact_bytes,
+        "publisher": pubkey,
+    }
+
+
+def release_event_template(pubkey: str, *, name: str, version: str, artifact_sha256: str) -> dict[str, Any]:
+    """The unsigned kind-9900 release template a site owner signs alongside the
+    manifest, so the gateway can resolve publisher/<name> and serve the bundle."""
+    return {
+        "kind": _RELEASE_KIND,
+        "pubkey": pubkey,
+        "created_at": 0,
+        "tags": [
+            ["d", f"{name}/{version}/any"],
+            ["v", "1"],
+            ["name", name],
+            ["version", version],
+            ["os", "any"],
+            ["arch", "any"],
+            ["format", "npk"],
+            ["x", artifact_sha256],
+        ],
+        "content": "",
+    }
+
+
+def release_version(event: dict[str, Any]) -> str:
+    """Return the SemVer version a signed release event commits to."""
+    for t in event.get("tags", []):
+        if isinstance(t, list) and len(t) > 1 and t[0] == "version":
+            return str(t[1])
+    raise NsiteError("npk release has no version tag")
+
+
+def verify_release_event(event: dict[str, Any], *, pubkey: str, name: str, artifact_sha256: str) -> None:
+    """Reject a signed kind-9900 release that is not a release for this site's
+    publisher/name and artifact. The release author must be the manifest author
+    (the gateway resolves releases by the site pubkey)."""
+    from .manifest import verify_event as _verify
+
+    if not isinstance(event, dict) or event.get("kind") != _RELEASE_KIND:
+        raise NsiteError("npk release must be a kind-9900 event")
+    if str(event.get("pubkey", "")).lower() != str(pubkey).lower():
+        raise NsiteError("npk release publisher does not match the site owner")
+    id_ok, sig_ok = _verify(event)
+    if not id_ok or not sig_ok:
+        raise NsiteError("npk release signature is invalid")
+    tags = {str(t[0]): (t[1] if len(t) > 1 else "") for t in event.get("tags", []) if isinstance(t, list) and t}
+    if tags.get("name") != name:
+        raise NsiteError(f"npk release name does not match the site ({name})")
+    if not _SEMVER.fullmatch(str(tags.get("version", ""))):
+        raise NsiteError("npk release version is not valid SemVer")
+    if str(tags.get("x", "")).lower() != str(artifact_sha256).lower():
+        raise NsiteError("npk release artifact sha256 does not match the packed site")
+
+
 def _default_dns_lookup(qname: str, rtype: str) -> list[str]:
     """Resolve ``qname`` via the host's DNS (best-effort, empty on failure).
 
@@ -1056,7 +1203,184 @@ class NsiteService:
                 "acme_dns_provider and acme_dns_api_token in /etc/nostrhost/operator.toml"
             )
 
+    def _validate_limits(self, config: GatewayConfig) -> None:
+        """Reject out-of-range gateway limits before the plan is approved
+        (implementation plan §4.4). Mirrors the gateway's own config checker:
+        ``max_blob_bytes`` may not exceed 128 MiB and ``cache_quota_bytes``
+        may not exceed 50% of the filesystem's free space.
+        """
+        if config.limits.max_blob_bytes > MAX_ALLOWED_BLOB_BYTES:
+            raise NsiteError(
+                f"max_blob_bytes {config.limits.max_blob_bytes} exceeds "
+                f"{MAX_ALLOWED_BLOB_BYTES} (128 MiB)"
+            )
+        if config.limits.max_blob_bytes <= 0:
+            raise NsiteError("max_blob_bytes must be positive")
+        if config.limits.cache_quota_bytes <= 0:
+            raise NsiteError("cache_quota_bytes must be positive")
+        if config.limits.cache_quota_bytes > MAX_CACHE_QUOTA_FRACTION * self._free_space_bytes():
+            raise NsiteError(
+                f"cache_quota_bytes {config.limits.cache_quota_bytes} exceeds 50% of "
+                "the filesystem's free space"
+            )
+
+    @staticmethod
+    def _free_space_bytes() -> int:
+        """Free bytes on the filesystem holding the config/cache directory.
+
+        Best-effort: when the directory or ``shutil.disk_usage`` is
+        unavailable the cap check is skipped rather than failing a plan on an
+        environment the gateway itself would not run in.
+        """
+        try:
+            return shutil.disk_usage("/var/lib/nostrhost")[2]
+        except OSError:  # pragma: no cover - exotic host layout
+            return 1 << 63
+
+    # -- local Blossom server (Phase 5, D4) -------------------------------
+
+    @staticmethod
+    def _validate_blossom_local(local: Any, *, enabled: bool) -> None:
+        """Validate the [blossom.local] config before it is rendered.
+
+        Mirrors the gateway's own checker: a loopback-only listener, a data
+        dir, per-blob cap ≤ 128 MiB, and 64-hex admitted pubkeys. The local
+        component is a separate quota/retention contract (D4), so its caps are
+        validated independently of the gateway fetch limits.
+        """
+        from yunohost.nostr_identity import _parse_pubkey
+
+        if enabled:
+            if not local.listen:
+                raise NsiteError("blossom.local.listen is required when enabled")
+            host, _ = _split_listen(local.listen)
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                raise NsiteError(
+                    f"blossom.local.listen {local.listen!r} must be a loopback address (D4)"
+                )
+            if not local.data_dir:
+                raise NsiteError("blossom.local.data_dir is required when enabled")
+        if local.max_blob_bytes > MAX_ALLOWED_BLOB_BYTES:
+            raise NsiteError(
+                f"blossom.local.max_blob_bytes {local.max_blob_bytes} exceeds "
+                f"{MAX_ALLOWED_BLOB_BYTES} (128 MiB)"
+            )
+        if local.max_blob_bytes <= 0:
+            raise NsiteError("blossom.local.max_blob_bytes must be positive")
+        if local.quota_bytes <= 0:
+            raise NsiteError("blossom.local.quota_bytes must be positive")
+        for key in local.allow_pubkeys:
+            try:
+                _parse_pubkey(key)
+            except Exception as exc:  # noqa: BLE001
+                raise NsiteError(f"blossom.local.allow_pubkeys: bad pubkey {key!r}") from exc
+
+    def blossom_status(self) -> dict[str, Any]:
+        """Status of the optional local Blossom server (D4)."""
+        state = self._state()
+        config = state.get("config") or {}
+        local = config.get("blossom", {}).get("local", {})
+        enabled = bool(local.get("enabled"))
+        listen = local.get("listen", "127.0.0.1:8197")
+        data_dir = local.get("data_dir", "/var/lib/nostrhost-nsite/blossom")
+        detail = "component disabled"
+        reachable = False
+        used_bytes: int | None = None
+        blob_count: int | None = None
+        if enabled:
+            try:
+                with urllib.request.urlopen(
+                    f"http://{listen}/status", timeout=2
+                ) as resp:
+                    reachable = resp.status == 200
+                    if reachable:
+                        payload = json.loads(resp.read().decode("utf-8", "replace"))
+                        used_bytes = payload.get("used_bytes")
+                        blob_count = payload.get("blobs")
+                detail = "reachable" if reachable else "unreachable"
+            except Exception as exc:  # noqa: BLE001
+                detail = f"unreachable: {exc}"
+        return {
+            "blossom": {
+                "enabled": enabled,
+                "listen": listen,
+                "data_dir": data_dir,
+                "quota_bytes": local.get("quota_bytes"),
+                "max_blob_bytes": local.get("max_blob_bytes"),
+                "retention_days": local.get("retention_days"),
+                "allow_pubkeys": local.get("allow_pubkeys") or [],
+                "used_bytes": used_bytes,
+                "blobs": blob_count,
+                "health": "ok" if reachable else "degraded",
+                "health_detail": detail,
+            }
+        }
+
+    def blossom_enable(self, local: Any) -> dict[str, Any]:
+        """Enable the local Blossom server on the running gateway.
+
+        The gateway must already be enabled (the local server is a listener of
+        the same ``nostrhost-nsite`` unit). Rendering the ``[blossom.local]``
+        section and SIGHUP starts it; disabling flips the flag and SIGHUPs.
+        """
+        self._require_gateway()
+        model = local if isinstance(local, GatewayBlossomLocal) else GatewayBlossomLocal(**local.dict())
+        model = model.copy(update={"enabled": True})
+        self._validate_blossom_local(model, enabled=True)
+        state = self._state()
+        config = state.get("config") or {}
+        config.setdefault("blossom", {})["local"] = model.dict()
+        self.render_config(GatewayConfig(**config))
+        self._set_state({"enabled": True, "config": config})
+        self._reload()
+        return {
+            "action": "nsite.blossom.enable",
+            "listen": model.listen,
+            "data_dir": model.data_dir,
+            "reloaded": SERVICE,
+            "ok": True,
+        }
+
+    def blossom_configure(self, local: Any) -> dict[str, Any]:
+        """Update the local Blossom server's quota/retention/cap contract."""
+        self._require_gateway()
+        model = local if isinstance(local, GatewayBlossomLocal) else GatewayBlossomLocal(**local.dict())
+        model = model.copy(update={"enabled": True})
+        self._validate_blossom_local(model, enabled=True)
+        state = self._state()
+        config = state.get("config") or {}
+        config.setdefault("blossom", {})["local"] = model.dict()
+        self.render_config(GatewayConfig(**config))
+        self._set_state({"enabled": True, "config": config})
+        self._reload()
+        return {
+            "action": "nsite.blossom.configure",
+            "listen": model.listen,
+            "data_dir": model.data_dir,
+            "reloaded": SERVICE,
+            "ok": True,
+        }
+
+    def blossom_disable(self) -> dict[str, Any]:
+        """Disable the local Blossom server (stops the listener via SIGHUP)."""
+        self._require_gateway()
+        state = self._state()
+        config = state.get("config") or {}
+        config.setdefault("blossom", {}).setdefault("local", {})
+        local = config["blossom"]["local"]
+        try:
+            model = GatewayBlossomLocal(**local)
+        except Exception as exc:  # noqa: BLE001 - a corrupt stored config must not block disable
+            raise NsiteError(f"stored blossom.local config is invalid: {exc}") from exc
+        self._validate_blossom_local(model, enabled=False)
+        config["blossom"]["local"] = {**model.dict(), "enabled": False}
+        self.render_config(GatewayConfig(**config))
+        self._set_state({"enabled": True, "config": config})
+        self._reload()
+        return {"action": "nsite.blossom.disable", "reloaded": SERVICE, "ok": True}
+
     def enable(self, config: GatewayConfig) -> dict[str, Any]:
+        self._validate_limits(config)
         if not config.domain:
             raise NsiteError("gateway enable requires a domain")
         self._require_acme_dns(config.mode)
@@ -1100,6 +1424,7 @@ class NsiteService:
         state = self._state()
         if not state.get("enabled"):
             raise NsiteError("gateway is not enabled; run nsite.gateway.enable first")
+        self._validate_limits(config)
         if not config.domain:
             raise NsiteError("gateway configure requires a domain")
         self._require_acme_dns(config.mode)
@@ -1441,6 +1766,9 @@ class NsiteService:
         servers: list[str] | None = None,
         relays: list[str] | None = None,
         copy_of: str = "",
+        app: str = "",
+        npk: bool = False,
+        npk_version: str = "0.1.0",
     ) -> dict[str, Any]:
         """Build the unsigned manifest and the plan digest (D7, §6 step 2/5).
 
@@ -1460,6 +1788,12 @@ class NsiteService:
         from a relay resolution. ``a``/``A`` are not part of the plan digest
         (they carry no content-integrity meaning), so the signed copy matches
         ``plan_sha256`` exactly like a fresh plan.
+
+        ``app`` (Phase 5) is the optional ``kind:pubkey:d`` address of the
+        kind-32267 catalogue declaration this site links to. Like ``a``/``A``
+        it is emitted as an ``app`` tag on the unsigned event but excluded from
+        the plan digest: the signed event's ``app`` tag is validated
+        independently by ``nsite.publish``.
         """
         from .manifest import is_sha256_hex, is_valid_d
 
@@ -1538,12 +1872,18 @@ class NsiteService:
             if not url.startswith(("https://", "wss://")):
                 raise NsiteError(f"refusing non-TLS server/relay URL: {url!r}")
 
-        from .manifest import aggregate_hash
+        from .manifest import aggregate_hash, is_valid_ref
 
         tags: list[list[str]] = []
         if kind == KIND_NAMED:
             tags.append(["d", d])
         tags.extend(copy_tags)
+        if app:
+            if not is_valid_ref(app):
+                raise NsiteError(
+                    f"invalid app address {app!r} (expect 'kind:pubkey:d' linking to a kind-32267 declaration)"
+                )
+            tags.append(["app", app])
         for path, blob_hash in sorted(paths):
             tags.append(["path", path, blob_hash])
         if servers:
@@ -1568,7 +1908,27 @@ class NsiteService:
             },
             "plan_sha256": plan_digest(kind=kind, d=d, paths=paths, servers=servers, relays=relays),
         }
-        return {"plan": plan}
+        result = {"plan": plan}
+        if npk:
+            result["npk"] = self._npk_plan(pubkey, d=d, kind=kind, version=npk_version, servers=servers)
+        return result
+
+    def _npk_plan(self, pubkey: str, *, d: str, kind: int, version: str, servers: list[str]) -> dict[str, Any]:
+        """Pack the site draft into a deterministic .npk and build the release
+        template the owner signs alongside the manifest (Phase 3c)."""
+        if not _npack_available():
+            raise NsiteError("npk publish requires the npack binary ($NPACK_BIN); build forks/npack first")
+        packed = pack_site_npk(pubkey, d=d, version=version)
+        name = packed["name"]
+        return {
+            "name": name,
+            "version": packed["version"],
+            "artifact_sha256": packed["sha256"],
+            "release_event": release_event_template(pubkey, name=name, version=packed["version"], artifact_sha256=packed["sha256"]),
+            "kind": kind,
+            "d": d,
+            "servers": servers,
+        }
 
     def publish(
         self,
@@ -1576,6 +1936,8 @@ class NsiteService:
         *,
         plan_sha256: str = "",
         relays: list[str] | None = None,
+        npk_release_event: dict[str, Any] | None = None,
+        npk_sha256: str = "",
     ) -> dict[str, Any]:
         """Verify a signed manifest, broadcast it and record the site.
 
@@ -1584,6 +1946,12 @@ class NsiteService:
         event's signed content, or (hosted mode) the pubkey is unregistered.
         A publish that reaches at least one relay succeeds with a warning list;
         one that reaches none fails (implementation plan §D5).
+
+        ``npk_release_event`` + ``npk_sha256`` (Phase 3c): when both are given,
+        the release is verified (kind-9900, site-owner signed, matching
+        publisher/name/artifact), the site's draft is re-packed deterministically
+        and uploaded to the manifest's Blossom servers, and the release is
+        broadcast alongside the manifest.
         """
         from .manifest import validate_manifest as _validate
         from .signer_guard import forbidden_signer_pubkeys
@@ -1625,6 +1993,18 @@ class NsiteService:
         from ..connectivity import effective as effective_connectivity
 
         broadcast_relays = [r for r in (relays or []) if r] or list(effective_connectivity()["relays"]["nsite"])
+
+        npk_result: dict[str, Any] = {}
+        if npk_release_event is not None or npk_sha256:
+            npk_result = self._publish_npk_release(
+                verdict.pubkey,
+                d=d,
+                release_event=npk_release_event,
+                artifact_sha256=npk_sha256,
+                servers=servers,
+                relays=broadcast_relays,
+            )
+
         broadcast = _broadcast(event, broadcast_relays)
         if not broadcast["succeeded"]:
             raise NsiteError(
@@ -1654,7 +2034,71 @@ class NsiteService:
             "site_url": site_url,
             "plan_matched": True,
             "relays": broadcast,
+            "npk": npk_result or None,
             "ok": True,
+        }
+
+    def _publish_npk_release(
+        self,
+        pubkey: str,
+        *,
+        d: str,
+        release_event: dict[str, Any] | None,
+        artifact_sha256: str,
+        servers: list[str],
+        relays: list[str],
+    ) -> dict[str, Any]:
+        """Verify a signed kind-9900 release, upload the site bundle and
+        broadcast the release (Phase 3c). The bundle is re-packed from the
+        draft deterministically, so its sha256 must match the signed release.
+        """
+        if not release_event or not artifact_sha256:
+            raise NsiteError("npk publish requires both the signed release event and its artifact sha256")
+        if not _SHA256_RE.fullmatch(artifact_sha256):
+            raise NsiteError("npk artifact sha256 must be 64 lowercase hex characters")
+        if not servers:
+            raise NsiteError("npk publish requires Blossom server hints in the manifest")
+        if not _npack_available():
+            raise NsiteError("npk publish requires the npack binary ($NPACK_BIN); build forks/npack first")
+
+        name = "root" if not d else d
+        verify_release_event(release_event, pubkey=pubkey, name=name, artifact_sha256=artifact_sha256)
+
+        # Deterministic re-pack: the same draft yields the same archive sha256.
+        packed = pack_site_npk(pubkey, d=d, version=release_version(release_event))
+        if packed["sha256"] != artifact_sha256:
+            raise NsiteError("npk bundle no longer matches the signed release; rebuild the plan and re-sign")
+        if packed["name"] != name:
+            raise NsiteError("npk bundle name does not match the site")
+
+        auth = _blossom_auth_event([artifact_sha256])
+        uploads: list[dict[str, Any]] = []
+        failed: list[str] = []
+        for server in servers:
+            if _blossom_has(server, artifact_sha256):
+                uploads.append({"server": server, "skipped": True})
+                continue
+            ok, detail = _blossom_upload(server, artifact_sha256, packed["bytes"], auth or {})
+            if ok:
+                uploads.append({"server": server, "uploaded": True})
+            else:
+                failed.append(f"{server}: {detail}")
+        if failed:
+            raise NsiteError("npk bundle upload failed for: " + "; ".join(failed))
+
+        release_broadcast = _broadcast(release_event, relays)
+        if not release_broadcast["succeeded"]:
+            raise NsiteError(
+                "npk release reached no relay: " + ", ".join(
+                    f"{r['relay']}: {r.get('error', 'rejected')}" for r in release_broadcast["results"]
+                )
+            )
+        return {
+            "name": name,
+            "artifact_sha256": artifact_sha256,
+            "uploaded": uploads,
+            "release_event_id": release_event.get("id", ""),
+            "release_broadcast": release_broadcast,
         }
 
     def _record_site(

@@ -110,6 +110,17 @@ class NsiteGatewayBody(_Tolerant):
     cache_quota_bytes: int | None = None
 
 
+class NsiteBlossomBody(_Tolerant):
+    """Local Blossom server (Phase 5, D4) enable/configure body."""
+
+    listen: str = ""
+    data_dir: str = ""
+    quota_bytes: int | None = None
+    max_blob_bytes: int | None = None
+    retention_days: int | None = None
+    allow_pubkeys: list[str] | None = None
+
+
 # -- nsite sites / publishing -------------------------------------------------
 
 class NsiteValidateBody(_Tolerant):
@@ -131,6 +142,9 @@ class NsitePublishPlanBody(_Tolerant):
     servers: list[str] | None = None
     relays: list[str] | None = None
     copy_of: str = ""
+    app: str = ""
+    npk: bool = False
+    npk_version: str = "0.1.0"
 
 
 class NsiteRegisterBody(_Tolerant):
@@ -161,6 +175,8 @@ class NsitePublishBody(_Tolerant):
     event: Any = None
     plan_sha256: str = ""
     relays: list[str] | None = None
+    npk_release_event: Any = None
+    npk_sha256: str = ""
 
 
 class NsiteSnapshotBody(_Tolerant):
