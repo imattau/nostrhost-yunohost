@@ -1,3 +1,28 @@
+yunohost (12.1.41.109) stable; urgency=low
+
+  * nsites Phase 5 (catalogue + ecosystem): `nsite.publish.plan`/`nsite.publish`
+    accept an `app` tag linking the site to its kind-32267 catalogue
+    declaration (validated, excluded from the plan digest, recorded on the
+    site) and `--copy-of <kind:pubkey:d>` copies with `a`/`A` provenance tags;
+    the catalogue listing annotates matching kind-32267 entries with an "open
+    nsite" URL. Gateway `open` mode is operator-gated via the Admin mode
+    selector (wildcard DNS-01 through the operator's ACME token).
+  * nsites D4: optional local Blossom component (`nsite.blossom.status` /
+    enable / configure / disable) — a loopback-only BUD-01/BUD-02 store with
+    its own quota/per-blob/retention contract, rendered into `[blossom.local]`
+    in nsite.toml and SIGHUP-reloaded; the gateway grants its SSRF fetch
+    boundary an explicit allowance for that exact listener.
+  * npk distribution (Phase 3c): `nsite.publish.plan --npk` / `nsite.publish
+    --npk-release` pack the site draft into a deterministic .npk and publish
+    the kind-9900 release alongside the manifest; `package.install` stages a
+    verified npack release and builds the native plan envelope. The bundled
+    npack binary is updated to 0.3.0 (local package catalogue
+    refresh/search/info).
+  * package authoring: `nostrhost-package build-npk` builds deterministic
+    .npk artifacts from validated native manifests.
+
+ -- NostrHost <nostrhost@example.com>  Mon, 21 Sep 2026 07:40:00 +0000
+
 yunohost (12.1.41.108) stable; urgency=low
 
   * rename: the user-facing "Nostr network settings" copy is now "Nostr
