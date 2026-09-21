@@ -1,3 +1,20 @@
+yunohost (12.1.41.110) stable; urgency=low
+
+  * operations read-path performance: `list_operations` and `get_operation`
+    no longer replay the whole operation chain for every request.
+    `list_operations` reads a bounded window (the newest `limit` kind-2200
+    requests plus their follow-ons, matched by `#e`) with a 3-second server
+    cache, so the admin console's ~15s polling and Home-overview load are
+    deduped and the relay REQ cost tracks the requested page size instead of
+    the chain length. `get_operation` fetches one request's chain by
+    `ids`/`#e` instead of the entire list. Kind-2205 progress events are
+    excluded from these reads (the state reduction never transitions on
+    them). `query_chain_events` gains `ids`/`e_tags` filter support. This
+    fixes the console's operations screen timing out after 30s ("Failed to
+    load operations") on a grown chain.
+
+ -- NostrHost <nostrhost@example.com>  Mon, 21 Sep 2026 09:30:00 +0000
+
 yunohost (12.1.41.109) stable; urgency=low
 
   * nsites Phase 5 (catalogue + ecosystem): `nsite.publish.plan`/`nsite.publish`

@@ -36,6 +36,7 @@ from yunohost.nostr_operations import (
     validate_signed_approval,
     validate_signed_rejection,
 )
+from yunohost.nostr_operations import KIND_EXECUTION_PROGRESS
 
 
 class FakeTransport:
@@ -755,7 +756,11 @@ def test_list_operations_reduces_chain_to_state(monkeypatch):
     approval = build_approval(admin_sk, admin_pk, request["id"])
 
     monkeypatch.setattr(
-        "yunohost.nostr_operations.fetch_chain_events",
+        "yunohost.nostr_operations._operations_cache",
+        {},
+    )
+    monkeypatch.setattr(
+        "yunohost.nostrhost.events.query_chain_events",
         lambda relay, **kw: [request, approval],
     )
 
@@ -772,8 +777,9 @@ def test_list_operations_marks_failed_result(monkeypatch):
     started = build_execution_started(sk, pk, request["id"])
     result = build_execution_result(sk, pk, request["id"], ok=False, error="boom")
 
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
     monkeypatch.setattr(
-        "yunohost.nostr_operations.fetch_chain_events",
+        "yunohost.nostrhost.events.query_chain_events",
         lambda relay, **kw: [request, started, result],
     )
 
@@ -793,8 +799,9 @@ def test_list_operations_marks_immediate_rejection_without_execution(monkeypatch
     )
     approval = build_approval(admin_sk, admin_pk, request["id"])
 
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
     monkeypatch.setattr(
-        "yunohost.nostr_operations.fetch_chain_events",
+        "yunohost.nostrhost.events.query_chain_events",
         lambda relay, **kw: [request, rejection, approval],
     )
 
@@ -812,8 +819,9 @@ def test_list_operations_orders_same_second_events_by_chain_position(monkeypatch
     result = build_execution_result(sk, pk, request["id"], ok=True, result={})
 
     # Deliberately hand the snapshot back in the wrong order (result first).
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
     monkeypatch.setattr(
-        "yunohost.nostr_operations.fetch_chain_events",
+        "yunohost.nostrhost.events.query_chain_events",
         lambda relay, **kw: [result, started, request],
     )
 
@@ -827,8 +835,9 @@ def test_list_operations_ignores_orphaned_followon(monkeypatch):
     admin_sk, admin_pk = new_key()
     orphan_approval = build_approval(admin_sk, admin_pk, "a" * 64)
 
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
     monkeypatch.setattr(
-        "yunohost.nostr_operations.fetch_chain_events",
+        "yunohost.nostrhost.events.query_chain_events",
         lambda relay, **kw: [orphan_approval],
     )
 
@@ -836,7 +845,8 @@ def test_list_operations_ignores_orphaned_followon(monkeypatch):
 
 
 def test_get_operation_returns_none_when_missing(monkeypatch):
-    monkeypatch.setattr("yunohost.nostr_operations.fetch_chain_events", lambda relay, **kw: [])
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", lambda relay, **kw: [])
     assert get_operation("a" * 64) is None
 
 
@@ -850,7 +860,105 @@ def test_list_operations_respects_limit(monkeypatch):
         for _ in range(3)
     ]
 
-    monkeypatch.setattr("yunohost.nostr_operations.fetch_chain_events", lambda relay, **kw: requests)
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", lambda relay, **kw: requests)
 
     assert len(list_operations(limit=2)) == 2
     assert len(list_operations()) == 3
+
+
+def test_list_operations_reads_bounded_window_not_whole_chain(monkeypatch):
+    """The list read must push the limit down to the relay and fetch only the
+    newest requests plus their follow-ons, never replay the full chain."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+
+    captured: dict[str, list] = {"calls": []}
+
+    def fake_query(relay, **kw):
+        captured["calls"].append(kw)
+        # First call (requests) returns the request; follow-on call returns [].
+        if kw.get("kinds") == (KIND_OPERATION_REQUEST,):
+            return [request]
+        return []
+
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", fake_query)
+
+    entries = list_operations(limit=7)
+    assert len(entries) == 1
+    assert entries[0]["request_id"] == request["id"]
+    # The request REQ carries the caller's limit.
+    assert captured["calls"][0]["limit"] == 7
+    # The follow-on REQ filters by the request's #e tag and excludes progress.
+    assert captured["calls"][1]["e_tags"] == (request["id"],)
+    assert KIND_EXECUTION_PROGRESS not in captured["calls"][1]["kinds"]
+
+
+def test_list_operations_ignores_progress_events(monkeypatch):
+    """Kind-2205 progress is noise for the reduction and must not be fetched
+    nor change the reported state."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    started = build_execution_started(sk, pk, request["id"])
+    result = build_execution_result(sk, pk, request["id"], ok=True, result={})
+
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr(
+        "yunohost.nostrhost.events.query_chain_events",
+        lambda relay, **kw: [request, started, result],
+    )
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "SUCCEEDED"
+
+
+def test_list_operations_serves_from_cache(monkeypatch):
+    """A repeated list within the TTL must not re-read the relay."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+
+    reads = []
+
+    def fake_query(relay, **kw):
+        reads.append(kw)
+        if kw.get("kinds") == (KIND_OPERATION_REQUEST,):
+            return [request]
+        return []
+
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", fake_query)
+
+    first = list_operations(limit=3)
+    second = list_operations(limit=3)
+    assert first == second
+    # Two request fetches (one per call, cache not shared across different
+    # limits would differ) — here same key, so only one relay read happened.
+    request_reads = [c for c in reads if c.get("kinds") == (KIND_OPERATION_REQUEST,)]
+    assert len(request_reads) == 1
+
+
+def test_get_operation_fetches_only_its_chain(monkeypatch):
+    """get_operation must narrow the read to the one request's chain (ids + #e)
+    instead of replaying the whole list."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    approval = build_approval(new_key()[0], new_key()[1], request["id"])
+
+    captured: dict[str, list] = {"calls": []}
+
+    def fake_query(relay, **kw):
+        captured["calls"].append(kw)
+        if kw.get("ids") == (request["id"],):
+            return [request]
+        return [approval]
+
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", fake_query)
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "APPROVED"
+    assert captured["calls"][0]["ids"] == (request["id"],)
+    assert captured["calls"][1]["e_tags"] == (request["id"],)

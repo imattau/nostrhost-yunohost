@@ -2500,10 +2500,87 @@ def _read_authority() -> tuple[tuple[str, ...], str | None]:
         return (), None
 
 
+# Follow-on kinds that advance an operation's state. Kind-2205 progress
+# events are deliberately excluded from list/get reads: they are pure noise
+# for the reduction (the state machine never transitions on them), so reading
+# them back just bloats the request and slows every poll.
+_FOLLOW_ON_KINDS = (
+    KIND_OPERATION_APPROVAL,
+    KIND_OPERATION_REJECTION,
+    KIND_EXECUTION_STARTED,
+    KIND_EXECUTION_RESULT,
+)
+
+# Server-side TTL cache for list_operations. The admin console polls the
+# operations list every ~15s (useOperationsList refetchInterval) and the Home
+# overview calls it on every load; without a cache each request re-reads and
+# re-reduces the whole chain, which is what pushed a single request past the
+# browser's 30s timeout as the chain grew. A short TTL dedupes concurrent and
+# near-identical reads (15s poll + Home load overlap) while still reflecting
+# a decision within seconds.
+_OPERATIONS_CACHE_TTL = 3.0
+_operations_cache: dict[tuple[int | None, str], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _list_operations_cache(limit: int | None, relay: str) -> list[dict[str, Any]] | None:
+    hit = _operations_cache.get((limit, relay))
+    if hit is not None and time.time() - hit[0] < _OPERATIONS_CACHE_TTL:
+        return hit[1]
+    return None
+
+
+def _cache_list_operations(limit: int | None, relay: str, entries: list[dict[str, Any]]) -> None:
+    _operations_cache[(limit, relay)] = (time.time(), entries)
+
+
+def _fetch_operations_window(
+    relay_url: str,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Read the newest ``limit`` operations' chain events, bounded.
+
+    Two narrow REQs instead of one whole-chain REQ: the newest ``limit``
+    kind-2200 requests, then only their follow-ons (matched by ``#e``). The
+    follow-on kinds exclude progress (2205), which the reduction ignores.
+    Both reads are single-REQ (bounded by ``limit``), so the cost tracks the
+    number of operations requested, not the size of the chain.
+    """
+    from .nostrhost.events import query_chain_events
+
+    requests = query_chain_events(
+        relay_url,
+        kinds=(KIND_OPERATION_REQUEST,),
+        limit=limit,
+    )
+    if not requests:
+        return []
+    request_ids = [event["id"] for event in requests]
+    follow_ons = query_chain_events(
+        relay_url,
+        kinds=_FOLLOW_ON_KINDS,
+        e_tags=tuple(request_ids),
+        limit=max(limit * 8, 1000),
+    )
+    return list(requests) + list(follow_ons)
+
+
 def list_operations(*, limit: int | None = None, control_relay: str | None = None) -> list[dict[str, Any]]:
-    """Every operation on the control relay, newest request first."""
+    """Every operation on the control relay, newest request first.
+
+    The read is bounded to the newest ``limit`` operations (plus their
+    follow-ons) rather than replaying the whole chain, and the result is
+    cached for a few seconds so the console's polling doesn't re-read the
+    relay every tick. ``limit`` is also applied to the relay REQ, so a large
+    chain no longer makes a small ``limit`` request expensive.
+    """
     relay = _control_relay(control_relay)
-    events = fetch_chain_events(relay)
+    want = 200 if limit is None else max(1, int(limit))
+    cached = _list_operations_cache(want, relay)
+    if cached is not None:
+        return cached
+
+    events = _fetch_operations_window(relay, limit=want)
     admins, server_pubkey = _read_authority()
     by_request: dict[str, list[dict[str, Any]]] = {}
     for event in events:
@@ -2518,15 +2595,27 @@ def list_operations(*, limit: int | None = None, control_relay: str | None = Non
         if entry is not None:
             entries.append(entry)
     entries.sort(key=lambda e: e["created_at"], reverse=True)
-    return entries[:limit] if limit else entries
+    result = entries[:want]
+    _cache_list_operations(want, relay, result)
+    return result
 
 
 def get_operation(request_id: str, *, control_relay: str | None = None) -> dict[str, Any] | None:
-    """One operation's current summary, or None if it isn't on the relay."""
-    for entry in list_operations(control_relay=control_relay):
-        if entry["request_id"] == request_id:
-            return entry
-    return None
+    """One operation's current summary, or None if it isn't on the relay.
+
+    Fetches only that request's chain (the request by id, its follow-ons by
+    ``#e``) instead of replaying the whole operations list.
+    """
+    from .nostrhost.events import query_chain_events
+
+    relay = _control_relay(control_relay)
+    requests = query_chain_events(relay, kinds=(KIND_OPERATION_REQUEST,), ids=(request_id,))
+    if not requests:
+        return None
+    follow_ons = query_chain_events(relay, kinds=_FOLLOW_ON_KINDS, e_tags=(request_id,))
+    chain = list(requests) + list(follow_ons)
+    admins, server_pubkey = _read_authority()
+    return _operation_entry(chain, admins=admins, server_pubkey=server_pubkey)
 
 
 # --------------------------------------------------------------------------- #

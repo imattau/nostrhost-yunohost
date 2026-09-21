@@ -150,6 +150,8 @@ def query_chain_events(
     *,
     kinds: tuple[int, ...] | None = None,
     authors: tuple[str, ...] | None = None,
+    ids: tuple[str, ...] | None = None,
+    e_tags: tuple[str, ...] | None = None,
     limit: int = 100,
     since: int | None = None,
     auth: tuple[str, str] | None = None,
@@ -175,6 +177,11 @@ def query_chain_events(
     at ``limit`` events, when a page comes back short, or when ``since`` is
     reached — whichever comes first. When False this is a single REQ (the
     legacy behaviour), for callers that only want a bounded recent window.
+
+    ``ids`` filters to specific event ids and ``e_tags`` to events carrying an
+    ``#e`` tag matching one of the given values (e.g. one operation request's
+    follow-ons) — both narrow the read so a caller never has to pull the whole
+    chain for a single operation.
     """
     from yunohost.nostr_operations import CHAIN_KINDS
 
@@ -186,6 +193,10 @@ def query_chain_events(
         filters: dict[str, Any] = {"kinds": event_kinds, "limit": limit}
         if authors:
             filters["authors"] = list(authors)
+        if ids:
+            filters["ids"] = list(ids)
+        if e_tags:
+            filters["#e"] = list(e_tags)
         if since is not None:
             filters["since"] = int(since)
         deadline = time.time() + timeout
@@ -227,6 +238,10 @@ def query_chain_events(
                 obj: dict[str, Any] = {"kinds": event_kinds, "limit": page_limit}
                 if authors:
                     obj["authors"] = list(authors)
+                if ids:
+                    obj["ids"] = list(ids)
+                if e_tags:
+                    obj["#e"] = list(e_tags)
                 if since is not None:
                     obj["since"] = int(since)
                 if until is not None:

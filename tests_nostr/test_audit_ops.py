@@ -181,7 +181,8 @@ def test_audit_and_operations_folds_agree_on_same_second_chain(monkeypatch):
     admin_sk, admin_pk = new_key()
     chain = _real_chain(sk, pk, admin_sk, admin_pk, ok=True)
     # Force the started/result to share a second and hand them over reversed.
-    monkeypatch.setattr(nostr_operations, "fetch_chain_events", lambda relay, **kw: [chain[3], chain[2], chain[1], chain[0]])
+    monkeypatch.setattr(nostr_operations, "_operations_cache", {})
+    monkeypatch.setattr("yunohost.nostrhost.events.query_chain_events", lambda relay, **kw: [chain[3], chain[2], chain[1], chain[0]])
     ops_entry = nostr_operations.get_operation(chain[0]["id"])
 
     monkeypatch.setattr(native_ops, "_audit_raw_events", lambda **kw: [chain[3], chain[2], chain[1], chain[0]])

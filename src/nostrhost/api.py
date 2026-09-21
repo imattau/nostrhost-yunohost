@@ -2385,8 +2385,11 @@ def build_app(
     #
     # The admin console's OperationsView lists pending/past operations and
     # approves/rejects them. There is no separate operations database - the
-    # control relay's own event store is authoritative, so list/get replay
-    # the chain (see nostr_operations.list_operations/get_operation).
+    # control relay's own event store is authoritative. list/get read a
+    # bounded window (newest `limit` requests + their follow-ons, cached for a
+    # few seconds) instead of replaying the whole chain, so the console's
+    # polling stays fast as the chain grows (see
+    # nostr_operations.list_operations/get_operation).
     #
     # Approve/reject accept an optional pre-signed `event`: the browser signs
     # it itself via a connected NIP-46 bunker (build_approval_template /
