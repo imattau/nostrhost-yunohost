@@ -336,3 +336,48 @@ def test_attest_release_passes_when_required_and_verified(monkeypatch):
     monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", lambda **_: {"verified": True, "accepted": True})
     result = cli_module._attest_release(STAGED, relay="", require=True, trusted_verifiers=["cd" * 32])
     assert result == {"verified": True, "accepted": True}
+
+
+def test_upgrade_npk_reads_staged_app_id_and_defaults_domain_path(app, monkeypatch):
+    """app upgrade-npk must look up the installed manifest by the *staged*
+    release's own app.id (not the coordinate argument), default domain/path
+    to what's currently installed, and carry forward compatible settings -
+    the same rules app upgrade (catalogue) already documents."""
+    staged = {"publisher": "ab" * 32, "name": "myapp", "version": "2.0.0", "payload_root": "/tmp/staged", "artifact_sha256": "cd" * 32}
+    package_data = {"app": {"id": "myapp", "version": "2.0.0"}, "web": {"domain": "new.example", "path": "/"}}
+    installed = {"app": {"id": "myapp", "version": "1.0.0"}, "web": {"domain": "old.example", "path": "/old"}}
+
+    monkeypatch.setattr("nostrhost.npk.stage", lambda coordinate, **kw: staged)
+    monkeypatch.setattr("nostrhost.npk.load_embedded_manifest", lambda payload_root: package_data)
+    monkeypatch.setattr("nostrhost.native_ops.trusted_publisher_list", lambda: [])
+    monkeypatch.setattr(cli_module, "_installed_manifest", lambda app_id: installed if app_id == "myapp" else (_ for _ in ()).throw(AssertionError(app_id)))
+
+    carry_calls = []
+
+    def fake_carry(inst, cand):
+        carry_calls.append(inst)
+        return cand
+
+    monkeypatch.setattr("nostrhost.app_management.carry_forward_compatible_settings", fake_carry)
+
+    bind_calls = {}
+
+    def fake_bind(data, *, set_values=None, domain=None, path=None):
+        bind_calls["domain"] = domain
+        bind_calls["path"] = path
+        return data
+
+    monkeypatch.setattr(cli_module, "_bind_install_values", fake_bind)
+
+    envelope = {"package": {"id": "myapp", "version": "2.0.0"}, "plan_sha256": "x", "operations": []}
+    monkeypatch.setattr(cli_module, "_plan_envelope", lambda pd, catalogue=None, npack=None: envelope)
+    monkeypatch.setattr(cli_module, "_run_lifecycle", lambda tool, args, *, state: {"ok": True, "result": {}})
+
+    result = _invoke(app, ["app", "upgrade-npk", "myapp-coordinate", "--output-as", "json"])
+
+    assert result.exit_code == 0, result.stdout
+    assert bind_calls["domain"] == "old.example"
+    assert bind_calls["path"] == "/old"
+    assert carry_calls == [installed]
+    data = json.loads(result.stdout)
+    assert data["previous_version"] == "1.0.0"

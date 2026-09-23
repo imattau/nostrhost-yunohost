@@ -1869,6 +1869,83 @@ def build_app(
             )
         return {"operation": result, "action": "install", "package": envelope.get("package")}
 
+    @app.post("/package/npk/upgrade/plan")
+    def npk_upgrade_plan() -> Any:
+        """The npk counterpart to /package/npk/install/plan: coordinate
+        identifies the *new* release, not the app being upgraded - the app
+        is identified by that release's own [app].id once staged."""
+        from pathlib import Path
+
+        body = _json_body()
+        coordinate = body.get("coordinate") if isinstance(body, dict) else None
+        if not coordinate:
+            raise ApiError(400, "invalid_request", "npk upgrade plan requires an npack coordinate <publisher>/<name>[@version]")
+        from nostrhost.app_management import carry_forward_compatible_settings
+        from nostrhost.native_ops import trusted_publisher_list
+        from nostrhost.native_providers import installed_package_manifest
+        from nostrhost.npk import load_embedded_manifest, provenance, stage
+        from nostrhost.package_engine import bind_install_values, package_plan_envelope
+
+        try:
+            staged = stage(
+                coordinate,
+                store=Path(body.get("store") or "/var/lib/nostrhost/npack-store"),
+                relay=body.get("relay") or "",
+                npack_bin="",
+                trusted_publishers=trusted_publisher_list(),
+            )
+            package_data = load_embedded_manifest(staged["payload_root"])
+            app_id = (package_data.get("app") or {}).get("id")
+            if not app_id:
+                raise PackageError("staged release has no [app].id")
+            installed = installed_package_manifest(app_id)
+            if installed is None:
+                raise PackageError(f"{app_id} is not installed as a native app (no recorded manifest)")
+            installed_web = installed.get("web") or {}
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            package_data = bind_install_values(
+                package_data, values,
+                domain=body.get("domain") or installed_web.get("domain"),
+                path=body.get("path") or installed_web.get("path"),
+            )
+            package_data = carry_forward_compatible_settings(installed, package_data)
+            envelope = package_plan_envelope(package_data, npack=provenance(staged))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_npk_release", str(exc)) from exc
+        return {"coordinate": coordinate, "envelope": envelope, "payload_root": staged["payload_root"], "artifact_sha256": staged["artifact_sha256"]}
+
+    @app.post("/package/npk/upgrade/apply")
+    def npk_upgrade_apply() -> Any:
+        from pathlib import Path
+
+        body = _json_body()
+        if set(body) != {"coordinate", "plan_sha256"}:
+            raise ApiError(400, "invalid_request", "npk upgrade apply requires coordinate and plan_sha256")
+        from nostrhost.app_management import carry_forward_compatible_settings
+        from nostrhost.native_providers import installed_package_manifest
+        from nostrhost.npk import load_embedded_manifest, provenance, stage
+        from nostrhost.package_engine import package_plan_envelope
+
+        try:
+            staged = stage(body["coordinate"], store=Path("/var/lib/nostrhost/npack-store"), relay="", npack_bin="")
+            package_data = load_embedded_manifest(staged["payload_root"])
+            app_id = (package_data.get("app") or {}).get("id")
+            installed = installed_package_manifest(app_id) if app_id else None
+            if installed is not None:
+                package_data = carry_forward_compatible_settings(installed, package_data)
+            envelope = package_plan_envelope(package_data, npack=provenance(staged))
+        except PackageError as exc:
+            raise ApiError(400, "invalid_npk_release", str(exc)) from exc
+        if body.get("plan_sha256") != envelope["plan_sha256"]:
+            raise ApiError(409, "plan_changed", "The release or store changed after this plan was reviewed. Review the refreshed plan before applying.")
+        result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
+        if not result.get("ok"):
+            return JSONResponse(
+                {"error": result.get("reason") or result.get("state") or "upgrade was rejected", "code": "operation_rejected", "operation": result},
+                status_code=409,
+            )
+        return {"operation": result, "action": "upgrade", "package": envelope.get("package")}
+
     @app.post("/package/app/{app_id}/upgrade/plan")
     def app_upgrade_plan(app_id: str) -> Any:
         if _json_body():

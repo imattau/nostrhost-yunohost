@@ -392,6 +392,14 @@ class PackageInstallNpkArgs(_Strict):
     path: str | None = Field(default=None, description="install-time override for [web].path")
 
 
+class PackageUpgradeNpkArgs(_Strict):
+    coordinate: str = Field(description="npack coordinate: <publisher>/<name>[@<version>]")
+    relay: str = Field(default="", description="relay to resolve the release from (default: configured npack relays)")
+    store: str = Field(default="", description="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)")
+    domain: str | None = Field(default=None, description="override [web].domain for this upgrade (default: keep the currently installed domain)")
+    path: str | None = Field(default=None, description="override [web].path for this upgrade (default: keep the currently installed path)")
+
+
 class RollbackApplyArgs(_Strict):
     plan: dict[str, Any] = Field(description="the rollback plan produced by the rollback planner")
 
@@ -615,6 +623,62 @@ def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str 
         "envelope": envelope,
         "payload_root": staged["payload_root"],
         "artifact_sha256": staged["artifact_sha256"],
+    }
+
+
+def _safe_package_upgrade_npk(coordinate: str = "", relay: str = "", store: str = "", values: dict[str, Any] | None = None, domain: str | None = None, path: str | None = None, **args: Any) -> dict[str, Any]:
+    """Stage a verified npack release for an already-installed app and build
+    the upgrade plan envelope.
+
+    Unlike package.install, ``coordinate`` identifies the *new* release, not
+    the app being upgraded - the app is identified by that release's own
+    [app].id once staged (see cli.py's app upgrade-npk for the same
+    reordering, with the reasoning). Read-only with respect to the host,
+    same as package.install: the returned envelope is submitted to the
+    approval-gated package.reconcile path for the actual resource changes.
+    """
+    if args or not coordinate:
+        raise OperationError("package.upgrade_npk requires an npack coordinate <publisher>/<name>[@version]")
+    from pathlib import Path
+
+    from nostrhost.app_management import carry_forward_compatible_settings
+    from nostrhost.native_ops import trusted_publisher_list
+    from nostrhost.native_providers import installed_package_manifest
+    from nostrhost.npk import load_embedded_manifest, provenance, stage
+
+    try:
+        staged = stage(
+            coordinate,
+            store=Path(store) if store else Path("/var/lib/nostrhost/npack-store"),
+            relay=relay or "",
+            npack_bin="",
+            trusted_publishers=trusted_publisher_list(),
+        )
+        package_data = load_embedded_manifest(staged["payload_root"])
+        app_id = (package_data.get("app") or {}).get("id")
+        if not app_id:
+            raise OperationError("staged release has no [app].id")
+        installed = installed_package_manifest(app_id)
+        if installed is None:
+            raise OperationError(f"{app_id} is not installed as a native app (no recorded manifest)")
+        installed_web = installed.get("web") or {}
+        from nostrhost.package_engine import bind_install_values, package_plan_envelope
+
+        package_data = bind_install_values(
+            package_data, values or {},
+            domain=domain or installed_web.get("domain"),
+            path=path or installed_web.get("path"),
+        )
+        package_data = carry_forward_compatible_settings(installed, package_data)
+        envelope = package_plan_envelope(package_data, npack=provenance(staged))
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"cannot stage npack release: {exc}") from exc
+    return {
+        "coordinate": coordinate,
+        "envelope": envelope,
+        "payload_root": staged["payload_root"],
+        "artifact_sha256": staged["artifact_sha256"],
+        "previous_version": (installed.get("app") or {}).get("version"),
     }
 
 
@@ -1160,6 +1224,12 @@ TOOLS: dict[str, ToolSpec] = {
         require_approval=False,
         input_model=PackageInstallNpkArgs,
         description="stage a verified npack release and build the native plan envelope (submit to package.reconcile to apply)",
+    ),
+    "package.upgrade_npk": ToolSpec(
+        name="package.upgrade_npk", handler=_safe_package_upgrade_npk, scope=SCOPE_APPS_READ,
+        require_approval=False,
+        input_model=PackageUpgradeNpkArgs,
+        description="stage a verified npack release for an installed app and build the upgrade plan envelope (submit to package.reconcile to apply)",
     ),
     "system.version": ToolSpec(
         name="system.version",

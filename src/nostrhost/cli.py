@@ -2442,6 +2442,79 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             return report
         _guard(run, output_as)
 
+    @app_group.command("upgrade-npk")
+    def app_upgrade_npk(
+        coordinate: str = typer.Argument(..., help="npack coordinate <publisher>/<name>[@<version>], or a path to a local .npk file"),
+        relay: str = typer.Option(None, "--relay", help="relay to resolve the release from (default: configured npack relays)"),
+        store: Path = typer.Option(None, "--store", help="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)"),
+        domain: str = typer.Option(None, "--domain", help="override [web].domain for this upgrade (default: keep the currently installed domain)"),
+        path: str = typer.Option(None, "--path", help="override [web].path for this upgrade (default: keep the currently installed path)"),
+        set_values: list[str] = typer.Option(None, "--set", help="install-time value as id=value (see the package's install_inputs); repeatable"),
+        npack_bin: str = typer.Option("", "--npack", help="path to the npack binary (default: $NPACK_BIN or npack on PATH)"),
+        require_attestation: bool = typer.Option(False, "--require-attestation", help="refuse to upgrade unless a trusted CI verifier's attestation confirms this exact release (requires --trusted-verifier)"),
+        trusted_verifier: list[str] = typer.Option(None, "--trusted-verifier", help="attestation verifier hex pubkey trusted for --require-attestation; repeatable"),
+        output_as: str = typer.Option(None, "--output-as"),
+    ) -> None:
+        """Upgrade a native app to a verified npack release - the npack
+        counterpart to ``app upgrade`` (catalogue).
+
+        ``coordinate`` identifies the *new* release the same way
+        ``install-npk``'s does (a coordinate or a local ``.npk`` file); the
+        app being upgraded is identified by that release's own ``app.id``
+        once staged, not by a separate argument - unlike ``app upgrade``,
+        where ``coordinate`` already *is* the app_id.
+
+        Conservative by construction, same as ``app upgrade``: the resource
+        engine re-applies only the operations whose current state no longer
+        satisfies the new manifest. --domain/--path default to the
+        currently installed values (an upgrade must never silently move the
+        app - see ``app upgrade --help``); pass them explicitly only to
+        combine an upgrade with a deliberate move.
+        """
+        def run() -> Any:
+            from nostrhost.app_management import carry_forward_compatible_settings
+            from nostrhost.native_ops import trusted_publisher_list
+            from nostrhost.npk import load_embedded_manifest, provenance, stage, stage_local
+
+            store_path = store or Path("/var/lib/nostrhost/npack-store")
+            from_local = Path(coordinate).is_file()
+            if from_local:
+                staged = stage_local(coordinate, store=store_path, npack_bin=npack_bin)
+            else:
+                staged = stage(
+                    coordinate,
+                    store=store_path,
+                    relay=relay or "",
+                    npack_bin=npack_bin,
+                    trusted_publishers=trusted_publisher_list(),
+                )
+            attestation = None
+            if not from_local:
+                attestation = _attest_release(staged, relay=relay or "", require=require_attestation, trusted_verifiers=trusted_verifier)
+            package_data = load_embedded_manifest(staged["payload_root"])
+            app_id = (package_data.get("app") or {}).get("id")
+            if not app_id:
+                raise NostrHostError("staged release has no [app].id")
+            installed = _installed_manifest(app_id)
+            installed_web = installed.get("web") or {}
+            package_data = _bind_install_values(
+                package_data,
+                set_values=set_values,
+                domain=domain or installed_web.get("domain"),
+                path=path or installed_web.get("path"),
+            )
+            package_data = carry_forward_compatible_settings(installed, package_data)
+            envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
+            body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
+            if not body.get("ok"):
+                raise NostrHostError(f"upgrade rejected: {body.get('reason') or body.get('state')}")
+            previous = (installed.get("app") or {}).get("version")
+            report = _lifecycle_report("upgraded", envelope, body, previous=previous)
+            if attestation is not None:
+                report["attestation"] = attestation
+            return report
+        _guard(run, output_as)
+
     @app_group.command("upgrade")
     def app_upgrade(
         coordinate: str = typer.Argument(..., help="catalogue app id (coordinate)"),
