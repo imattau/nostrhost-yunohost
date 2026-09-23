@@ -147,6 +147,18 @@ do_configure() {
         # the previous version when nostrhost-core is configured first in a
         # cyclic upgrade; a stale or absent CLI must never fail the install.
         nostrhost system regen-conf --output-as none || true
+
+        # nostr-operationsd is deliberately excluded from dh_installsystemd's
+        # synchronous restart-after-upgrade (see debian/rules): it is the
+        # daemon that runs system.upgrade itself (apt-get dist-upgrade is
+        # its own subprocess), so restarting it here, synchronously, while
+        # THIS very upgrade is running inside it, kills our own parent
+        # process mid-transaction -- aborting this postinst and leaving the
+        # package half-configured. Schedule the restart for just after this
+        # transaction actually finishes instead. Best-effort: a missing
+        # `at` daemon must never fail the install (it's a hard Depends, but
+        # atd could still be down).
+        at -M now >/dev/null 2>&1 <<< "sleep 60; systemctl try-restart nostr-operationsd.service" || true
     fi
 }
 

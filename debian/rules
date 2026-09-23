@@ -21,3 +21,18 @@ override_dh_install:
 	ln -s ../vendor debian/nostrhost-core/usr/share/yunohost/helpers.v2.1.d/vendor
 	rm -rf debian/nostrhost-core/usr/share/yunohost/helpers.v2.d
 	ln -s helpers.v1.d debian/nostrhost-core/usr/share/yunohost/helpers.v2.d
+
+override_dh_installsystemd:
+	# nostr-operationsd runs the signed operation executor -- including
+	# system.upgrade itself (apt-get dist-upgrade is its own subprocess).
+	# dh_installsystemd's default "restart-after-upgrade" would have
+	# nostrhost-core's postinst synchronously restart nostr-operationsd as
+	# part of upgrading nostrhost-core -- killing its own parent process
+	# mid-transaction when the upgrade running it is itself an
+	# nostrhost-core upgrade, aborting the postinst and leaving the package
+	# half-configured (exactly what dpkg_is_broken() then blocks every
+	# later upgrade attempt on). Exclude it from the synchronous restart;
+	# nostrhost-core.postinst schedules a deferred restart instead, after
+	# this transaction has actually finished.
+	dh_installsystemd --no-restart-after-upgrade --name=nostr-operationsd
+	dh_installsystemd --remaining-packages

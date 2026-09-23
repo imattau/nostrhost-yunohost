@@ -1,3 +1,22 @@
+yunohost (12.1.41.115) stable; urgency=low
+
+  * nostrhost-core.postinst / debian/rules: stop restarting
+    nostr-operationsd synchronously on package upgrade. That daemon runs
+    the signed operation executor, which is what runs system.upgrade
+    itself (apt-get dist-upgrade as its own subprocess) -- so the
+    dh_installsystemd-generated restart-after-upgrade was killing its
+    own parent process mid-transaction on every nostrhost-core upgrade
+    triggered through the normal API/CLI path, aborting the postinst
+    and leaving the package half-configured (reproduced live on the
+    clean7 testbed: confirmed via journalctl that nostr-operationsd was
+    stopped/restarted ~39s into the postinst, exactly when it was the
+    one running the upgrade). nostr-operationsd is now excluded from
+    the synchronous restart and the postinst instead schedules a
+    `systemctl try-restart` 60s out via `at`, after the transaction has
+    actually finished.
+
+ -- NostrHost <nostrhost@example.com>  Wed, 23 Sep 2026 21:37:21 +0000
+
 yunohost (12.1.41.114) stable; urgency=low
 
   * tools_upgrade: serialize the system dist-upgrade against app
