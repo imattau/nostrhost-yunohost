@@ -2306,7 +2306,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 attestation = _attest_release(staged, relay=relay or "", require=require_attestation, trusted_verifiers=trusted_verifier)
             package_data = load_embedded_manifest(staged["payload_root"])
             package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
-            envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
+            envelope = _plan_envelope(package_data, None, npack=provenance(staged))
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"install rejected: {body.get('reason') or body.get('state')}")
@@ -2375,7 +2375,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                 path=path or installed_web.get("path"),
             )
             package_data = carry_forward_compatible_settings(installed, package_data)
-            envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
+            envelope = _plan_envelope(package_data, None, npack=provenance(staged))
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"upgrade rejected: {body.get('reason') or body.get('state')}")
