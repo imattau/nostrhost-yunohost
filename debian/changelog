@@ -1,3 +1,13 @@
+yunohost (12.1.41.113) stable; urgency=low
+
+  * install-npk / upgrade-npk: pass the empty catalogue positionally to
+    `_plan_envelope` (it was passed as `catalogue=None`, an argument the
+    function does not accept), which aborted every npk install/upgrade
+    with "unexpected keyword argument 'catalogue'" before the plan was
+    ever built.
+
+ -- NostrHost <nostrhost@example.com>  Wed, 23 Sep 2026 11:25:00 +0000
+
 yunohost (12.1.41.112) stable; urgency=low
 
   * nostrhost-backup.service: set `XDG_CACHE_HOME` (via a systemd
