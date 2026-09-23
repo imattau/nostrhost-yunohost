@@ -377,6 +377,13 @@ class CatalogAnnounceBody(_Tolerant):
     relays: str = ""
 
 
+# -- list (WP4 operator-owned people-sets / URL lists) ------------------------
+
+class ListPublishBody(_Tolerant):
+    family: str = ""
+    values: list[str] = Field(default_factory=list)
+
+
 # -- app ----------------------------------------------------------------------
 
 class LifecyclePlanBody(_Strict):

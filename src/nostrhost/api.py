@@ -77,6 +77,7 @@ from .api_models import (
     FirewallReloadBody,
     IdentityLinkBody,
     IdentityRevokeBody,
+    ListPublishBody,
     McpEndpointConfigureBody,
     NsiteBlockAddBody,
     NsiteBlockRemoveBody,
@@ -280,6 +281,10 @@ _SIMPLE_GET_FORWARDS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("/package/catalog/candidates", "catalog.candidates", {}),
     ("/package/catalog/history", "catalog.history", {}),
     ("/package/catalog/profile", "catalog.profile.get", {}),
+    # WP4 operator-owned people-sets / URL lists (trusted-publishers,
+    # approved-repositories, blocked-relays, blocked-site-owners,
+    # preferred-relays, portal-settings) - the effective projected view.
+    ("/package/list/{family}", "list.read", {"family": "family"}),
     ("/package/catalog/announcements", "catalog.announcements", {}),
     ("/package/app/list", "app.list", {}),
     ("/package/user/list", "user.list", {}),
@@ -1726,6 +1731,23 @@ def build_app(
             "catalog.announce", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")}, state=_State()
         )
 
+    # -- list (WP4 operator-owned people-sets / URL lists) -------------------
+
+    @app.post("/package/list/publish")
+    def list_publish() -> Any:
+        """Publish the full replacement value of one operator-owned WP4
+        list/preference family (e.g. the trusted-publishers people-set that
+        gates which npack publishers this node will install .npk releases
+        from). The caller sends the complete desired member list, not a
+        delta - matching how the underlying kind-30000 people-set event
+        itself is republished wholesale."""
+        body = _body(ListPublishBody)
+        return _run_lifecycle(
+            "list.publish",
+            {"family": body.get("family", ""), "values": body.get("values") or []},
+            state=_State(),
+        )
+
     # -- app ----------------------------------------------------------------
 
     @app.get("/package/app/management")
@@ -2641,6 +2663,7 @@ def _REQUEST_BODY_MODELS() -> dict[str, type[BaseModel]]:
         "/package/catalog/attest": CatalogAttestBody,
         "/package/catalog/profile": CatalogProfileSetBody,
         "/package/catalog/announce": CatalogAnnounceBody,
+        "/package/list/publish": ListPublishBody,
         "/package/app/remove": AppRemoveBody,
         "/package/app/{app_id}/settings/plan": AppSettingsPlanBody,
         "/package/app/{app_id}/settings/apply": AppSettingsApplyBody,
