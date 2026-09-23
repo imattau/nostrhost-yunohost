@@ -1,3 +1,14 @@
+yunohost (12.1.41.112) stable; urgency=low
+
+  * nostrhost-backup.service: set `XDG_CACHE_HOME` (via a systemd
+    `StateDirectory`) so restic has a cache directory to open. A bare
+    systemd unit gives root no `$HOME`/`$XDG_CACHE_HOME`, so every
+    scheduled backup's `forget --prune` step failed with "unable to
+    locate cache directory", which in turn left the repository locked
+    for the next run.
+
+ -- NostrHost <nostrhost@example.com>  Wed, 23 Sep 2026 10:15:00 +0000
+
 yunohost (12.1.41.111) stable; urgency=low
 
   * package_engine: install-time overrides (`install_inputs`) generalized

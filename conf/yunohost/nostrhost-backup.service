@@ -6,6 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# restic needs a cache directory and falls back to $HOME/.cache (via
+# $XDG_CACHE_HOME); a bare systemd unit has neither set, even for root, so
+# point it at a dedicated state directory instead of relying on root's HOME.
+Environment=XDG_CACHE_HOME=/var/lib/nostrhost/restic-cache
+StateDirectory=nostrhost/restic-cache
 ExecStart=/usr/bin/nostrhost backup run
 Nice=10
 IOSchedulingClass=idle
