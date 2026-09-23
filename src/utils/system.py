@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 from collections.abc import Generator
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import Any, Literal
@@ -203,6 +204,42 @@ def dpkg_is_broken() -> bool:
 
 def dpkg_lock_available() -> bool:
     return os.system("lsof /var/lib/dpkg/lock >/dev/null") != 0
+
+
+# How long an operation waits for another apt/dpkg-touching operation to
+# finish before giving up. Generous on purpose: a big system or app upgrade
+# can legitimately run for several minutes, and the point of this lock is to
+# make the second caller queue behind the first, not to fail fast.
+APT_DPKG_LOCK_TIMEOUT = 1800
+
+
+@contextmanager
+def apt_dpkg_lock(timeout: float = APT_DPKG_LOCK_TIMEOUT) -> Generator[None, None, None]:
+    """Serialize every operation that may invoke apt/dpkg -- system upgrades
+    (``tools_upgrade``) and app install/upgrade/remove (which run
+    ``ynh_install_app_dependencies`` via apt) -- against each other.
+
+    Without this, a system upgrade and an app upgrade can both shell out to
+    apt/dpkg concurrently. dpkg's own lock normally just makes the second
+    caller wait rather than corrupt anything, but a service restart
+    triggered by one operation (e.g. ``tools_upgrade`` restarting
+    ``yunohost-api`` after upgrading the ``yunohost`` package itself) can
+    then kill the other operation's still-running postinst mid-transaction,
+    leaving a package half-configured -- which is exactly what
+    ``dpkg_is_broken()`` then blocks every future upgrade on.
+    """
+    from nostrhost.core import LockAcquireTimeout
+    from nostrhost.locking import LockManager
+
+    lock = LockManager(resources=["apt-dpkg"], timeout=timeout)
+    try:
+        lock.acquire()
+    except LockAcquireTimeout:
+        raise YunohostError("system_or_app_operation_in_progress")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _list_upgradable_apt_packages() -> Generator[dict[str, str], None, None]:

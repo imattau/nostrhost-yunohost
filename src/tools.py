@@ -40,6 +40,7 @@ from .utils.system import (
     _dump_sources_list,
     _group_packages_per_categories,
     _list_upgradable_apt_packages,
+    apt_dpkg_lock,
     dpkg_is_broken,
     dpkg_lock_available,
     ynh_packages_version,
@@ -620,7 +621,14 @@ def tools_upgrade(operation_logger: OperationLogger, target: str | None = None) 
                 else logger.debug(l.rstrip())
             ),
         )
-        returncode = call_async_output(dist_upgrade, callbacks, shell=True)
+        # Serialized against app install/upgrade/remove (see apt_dpkg_lock's
+        # docstring): without this, a concurrent app upgrade's apt-get and
+        # this dist-upgrade can race, and a service restart triggered below
+        # can kill the other operation's still-running postinst mid-transaction,
+        # leaving a package half-configured for the next upgrade attempt to
+        # trip over.
+        with apt_dpkg_lock():
+            returncode = call_async_output(dist_upgrade, callbacks, shell=True)
 
         # If yunohost is being upgraded from the webadmin
         if (
@@ -636,11 +644,14 @@ def tools_upgrade(operation_logger: OperationLogger, target: str | None = None) 
 
         if returncode != 0:
             upgradables = list(_list_upgradable_apt_packages())
-            logger.warning(
-                tr(
-                    "tools_upgrade_failed",
-                    packages_list=", ".join([p["name"] for p in upgradables]),
-                )
+            packages_list = ", ".join([p["name"] for p in upgradables])
+            # A failed dist-upgrade used to be reported as a plain warning
+            # and the operation still logged "SUCCESS" -- dpkg could be left
+            # half-configured with nothing surfacing it until the *next*
+            # unrelated upgrade attempt tripped over dpkg_is_broken(). Fail
+            # the operation instead, so the actual failure is what's reported.
+            raise YunohostError(
+                "tools_upgrade_incomplete", packages_list=packages_list
             )
 
         logger.success(tr("system_upgraded"))

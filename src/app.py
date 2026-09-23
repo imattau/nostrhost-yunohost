@@ -1037,20 +1037,27 @@ def app_upgrade(
             env_dict.update(env_dict_more)
 
         # Execute the app upgrade script
+        # Locked against other apt/dpkg-touching operations (system upgrade,
+        # concurrent app install/upgrade/remove): the script runs
+        # ynh_install_app_dependencies, and racing it against e.g. a system
+        # upgrade can leave a package half-configured (see apt_dpkg_lock).
+        from .utils.system import apt_dpkg_lock
+
         upgrade_failed = True
         try:
-            (
-                upgrade_failed,
-                failure_message_with_debug_instructions,
-            ) = hook_exec_with_script_debug_if_failure(
-                workdir + "/scripts/upgrade",
-                env=env_dict,
-                operation_logger=operation_logger,
-                error_message_if_script_failed=tr("app_upgrade_script_failed"),
-                error_message_if_failed=lambda e: tr(
-                    "app_upgrade_failed", app=app_, error=e
-                ),
-            )
+            with apt_dpkg_lock():
+                (
+                    upgrade_failed,
+                    failure_message_with_debug_instructions,
+                ) = hook_exec_with_script_debug_if_failure(
+                    workdir + "/scripts/upgrade",
+                    env=env_dict,
+                    operation_logger=operation_logger,
+                    error_message_if_script_failed=tr("app_upgrade_script_failed"),
+                    error_message_if_failed=lambda e: tr(
+                        "app_upgrade_failed", app=app_, error=e
+                    ),
+                )
         finally:
             # If upgrade failed, try to restore the safety backup
             if (
@@ -1558,20 +1565,24 @@ def app_install(
     operation_logger.extra.update({"env": env_dict_for_logging})
 
     # Execute the app install script
+    # Locked against other apt/dpkg-touching operations -- see apt_dpkg_lock.
+    from .utils.system import apt_dpkg_lock
+
     install_failed = True
     try:
-        (
-            install_failed,
-            failure_message_with_debug_instructions,
-        ) = hook_exec_with_script_debug_if_failure(
-            os.path.join(extracted_app_folder, "scripts/install"),
-            env=env_dict,
-            operation_logger=operation_logger,
-            error_message_if_script_failed=tr("app_install_script_failed"),
-            error_message_if_failed=lambda e: tr(
-                "app_install_failed", app=app_id, error=e
-            ),
-        )
+        with apt_dpkg_lock():
+            (
+                install_failed,
+                failure_message_with_debug_instructions,
+            ) = hook_exec_with_script_debug_if_failure(
+                os.path.join(extracted_app_folder, "scripts/install"),
+                env=env_dict,
+                operation_logger=operation_logger,
+                error_message_if_script_failed=tr("app_install_script_failed"),
+                error_message_if_failed=lambda e: tr(
+                    "app_install_failed", app=app_id, error=e
+                ),
+            )
     finally:
         # If success so far, validate that app didn't break important stuff
         if not install_failed:
@@ -1768,8 +1779,12 @@ def app_remove(
     operation_logger.extra.update({"env": env_dict})
     operation_logger.flush()
 
+    # Locked against other apt/dpkg-touching operations -- see apt_dpkg_lock.
+    from .utils.system import apt_dpkg_lock
+
     try:
-        ret = hook_exec(remove_script, env=env_dict)[0]
+        with apt_dpkg_lock():
+            ret = hook_exec(remove_script, env=env_dict)[0]
     # Here again, calling hook_exec could fail miserably, or get
     # manually interrupted (by mistake or because script was stuck)
     # In that case we still want to proceed with the rest of the
