@@ -2333,7 +2333,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
 
     @app_group.command("install-npk")
     def app_install_npk(
-        coordinate: str = typer.Argument(..., help="npack coordinate: <publisher>/<name>[@<version>]"),
+        coordinate: str = typer.Argument(..., help="npack coordinate <publisher>/<name>[@<version>], or a path to a local .npk file"),
         relay: str = typer.Option(None, "--relay", help="relay to resolve the release from (default: configured npack relays)"),
         store: Path = typer.Option(None, "--store", help="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)"),
         domain: str = typer.Option(None, "--domain", help="install-time override for [web].domain"),
@@ -2344,11 +2344,16 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
     ) -> None:
         """Install a native app from a verified npack artifact.
 
-        Resolves the publisher-signed release (kind-9900) with ``npack
-        resolve``, stages the verified payload into an isolated ``--store``
-        prefix (hybrid staged store), reads the embedded native manifest, plans
-        the resource-engine operations (binding artifact_sha256 into the
-        envelope) and runs them through the signed request -> policy ->
+        ``coordinate`` is either a publisher-signed release coordinate
+        (``<publisher>/<name>[@version]``, resolved from Nostr relays with
+        ``npack resolve``) or a path to a local ``.npk`` file (checked with
+        ``npack verify`` instead - there is no Nostr signature to check for
+        an artifact that was never published; useful for development/CI or
+        installing straight from a freshly built .npk). Either way, the
+        verified payload is staged into an isolated ``--store`` prefix
+        (hybrid staged store), the embedded native manifest is read, the
+        resource-engine operations are planned (binding artifact_sha256 into
+        the envelope) and run through the signed request -> policy ->
         approval -> execute chain.
 
         --set id=value supplies a value for one of the package's declared
@@ -2356,9 +2361,13 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         --domain/--path sugar).
         """
         def run() -> Any:
-            from nostrhost.npk import load_embedded_manifest, provenance, stage
+            from nostrhost.npk import load_embedded_manifest, provenance, stage, stage_local
 
-            staged = stage(coordinate, store=store or Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin=npack_bin)
+            store_path = store or Path("/var/lib/nostrhost/npack-store")
+            if Path(coordinate).is_file():
+                staged = stage_local(coordinate, store=store_path, npack_bin=npack_bin)
+            else:
+                staged = stage(coordinate, store=store_path, relay=relay or "", npack_bin=npack_bin)
             package_data = load_embedded_manifest(staged["payload_root"])
             package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
             envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))

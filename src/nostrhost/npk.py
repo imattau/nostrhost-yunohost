@@ -130,6 +130,59 @@ def stage(coordinate: str, *, store: Path = NPK_STORE_DEFAULT, relay: str = "", 
     }
 
 
+_VERIFIED_LOCAL = re.compile(r"^verified ([0-9a-fA-F]{64})/(\S+) (\S+)\s*$")
+
+
+def stage_local(path: str | Path, *, store: Path = NPK_STORE_DEFAULT, npack_bin: str = "") -> dict[str, Any]:
+    """Stage a locally-built ``.npk`` file (no relay) and return the same
+    layout :func:`stage` does.
+
+    This only checks the artifact's internal manifest consistency (SemVer,
+    safe names, embedded hash) via ``npack verify`` - there is no Nostr
+    signature to check for a file that was never published as a signed
+    release event. Real signature/revocation/trust verification stays in
+    :func:`resolve`/:func:`stage` for relay-discovered releases; this exists
+    for locally-built artifacts (development, CI, and installing straight
+    from a freshly built .npk before it's published).
+    """
+    binary = _npack_binary(npack_bin)
+    artifact = Path(path)
+    if not artifact.is_file():
+        raise PackageError(f"npk artifact not found: {artifact}")
+
+    verify = _run(binary, ["verify", str(artifact)])
+    if verify.returncode != 0:
+        raise PackageError(f"npack verify failed: {verify.stderr.strip() or verify.stdout.strip()}")
+    match = _VERIFIED_LOCAL.match(verify.stdout.strip())
+    if not match:
+        raise PackageError(f"npack verify returned unexpected output: {verify.stdout.strip()[:200]}")
+    publisher, name, version = match.group(1).lower(), match.group(2), match.group(3)
+
+    digest = _run(binary, ["hash", str(artifact)])
+    if digest.returncode != 0:
+        raise PackageError(f"npack hash failed: {digest.stderr.strip() or digest.stdout.strip()}")
+    artifact_sha256 = digest.stdout.strip().lower()
+    if not _HEX64.fullmatch(artifact_sha256):
+        raise PackageError(f"npack hash returned an unexpected digest: {digest.stdout.strip()[:200]}")
+
+    install = _run(binary, ["install", str(artifact)], store=store)
+    if install.returncode != 0:
+        raise PackageError(f"npack install failed: {install.stderr.strip() or install.stdout.strip()}")
+
+    payload_root = store / "packages" / publisher / name / version / "payload"
+    if not (payload_root / NPK_NATIVE_MANIFEST).is_file():
+        raise PackageError(f"staged artifact has no embedded native manifest: {payload_root}")
+    return {
+        "publisher": publisher,
+        "name": name,
+        "version": version,
+        "artifact_sha256": artifact_sha256,
+        "store": str(store),
+        "payload_root": str(payload_root),
+        "embedded_manifest": NPK_NATIVE_MANIFEST,
+    }
+
+
 def load_embedded_manifest(payload_root: str | Path) -> dict[str, Any]:
     """Read the canonical native manifest embedded in a staged artifact."""
     path = Path(payload_root) / NPK_NATIVE_MANIFEST

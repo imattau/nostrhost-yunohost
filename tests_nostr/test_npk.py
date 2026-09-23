@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from nostrhost.npk import NPK_NATIVE_MANIFEST, load_embedded_manifest, parse_coordinate, resolve, verify_embedded_matches
+from nostrhost.npk import NPK_NATIVE_MANIFEST, load_embedded_manifest, parse_coordinate, resolve, stage_local, verify_embedded_matches
+
+# The fork's pinned npack submodule binary; skip tests that shell out to npack
+# when it has not been built (cargo build --release in forks/npack), mirroring
+# tools/tests/test_package_authoring.py's NEEDS_NPACK convention.
+NPACK = Path(__file__).resolve().parents[2] / "npack" / "target" / "release" / "npack"
+NEEDS_NPACK = pytest.mark.skipif(not NPACK.is_file(), reason="npack binary not built (cargo build --release in forks/npack)")
+PUBLISHER = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
 
 
 def test_parse_coordinate_splits_publisher_name_version():
@@ -102,3 +109,41 @@ def test_verify_embedded_matches_canonical_digest():
     verify_embedded_matches(data, {"manifest_sha256": good})
     with pytest.raises(Exception, match="mismatch"):
         verify_embedded_matches(data, {"manifest_sha256": "f" * 64})
+
+
+@NEEDS_NPACK
+def test_stage_local_installs_a_locally_built_npk(tmp_path):
+    """stage_local() is the local-file counterpart to stage(): no relay, just
+    `npack verify`/`hash`/`install` against a real .npk, same output shape."""
+    from nostrhost.package_authoring import build_npk_artifact
+
+    package_data = {
+        "app": {"id": "npk-local-test", "version": "1.0.0"},
+        "directories": {"install": {"path": "/opt/npk-local-test"}},
+    }
+    artifact = tmp_path / "out.npk"
+    build_npk_artifact(
+        package_data,
+        payload_dir=None,
+        output=artifact,
+        publisher=PUBLISHER,
+        npack_bin=str(NPACK),
+    )
+
+    store = tmp_path / "store"
+    staged = stage_local(artifact, store=store, npack_bin=str(NPACK))
+    assert staged["publisher"] == PUBLISHER
+    assert staged["name"] == "npk-local-test"
+    assert staged["version"] == "1.0.0"
+    assert len(staged["artifact_sha256"]) == 64
+    assert staged["store"] == str(store)
+
+    manifest = load_embedded_manifest(staged["payload_root"])
+    assert manifest["app"]["id"] == "npk-local-test"
+    assert manifest["directories"]["install"]["path"] == "/opt/npk-local-test"
+
+
+@NEEDS_NPACK
+def test_stage_local_rejects_missing_file(tmp_path):
+    with pytest.raises(Exception, match="not found"):
+        stage_local(tmp_path / "missing.npk", store=tmp_path / "store", npack_bin=str(NPACK))
