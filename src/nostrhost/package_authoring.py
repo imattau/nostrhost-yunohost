@@ -463,6 +463,30 @@ def build_npk_artifact(
         if init.returncode != 0:
             raise PackageError(f"npack init failed: {init.stderr.strip() or init.stdout.strip()}")
 
+        # Project package.toml's [install_inputs.*] into npack's own signed
+        # app.install_inputs descriptor array (see docs/package-setup.md in
+        # the npack submodule). npack transports/validates presence only -
+        # `bind` (which resource field a value fills) is nostrhost-local and
+        # never leaves this manifest; only id/type/required/sensitive/
+        # description/constraints are signed into the release.
+        npack_manifest_path = metadata / "manifest.json"
+        try:
+            npack_manifest = json.loads(npack_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PackageError(f"cannot read npack manifest after init: {exc}") from exc
+        npack_manifest.setdefault("app", {})["install_inputs"] = [
+            {
+                "id": input_id,
+                "value_type": f"nostrhost:{field['type']}",
+                "required": bool(field.get("required", False)),
+                "sensitive": bool(field.get("sensitive", False)),
+                "description": field.get("description") or None,
+                "constraints": field.get("constraints") or {},
+            }
+            for input_id, field in package_data.get("install_inputs", {}).items()
+        ]
+        npack_manifest_path.write_text(json.dumps(npack_manifest), encoding="utf-8")
+
         embedded = metadata / "nostrhost" / "manifest.json"
         embedded.parent.mkdir(parents=True, exist_ok=True)
         embedded.write_bytes(_canonical_json(package_data))

@@ -1800,12 +1800,13 @@ def build_app(
         if not coordinate:
             raise ApiError(400, "invalid_request", "npk install plan requires an npack coordinate <publisher>/<name>[@version]")
         from nostrhost.npk import load_embedded_manifest, provenance, stage
-        from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
+        from nostrhost.package_engine import bind_install_values, package_plan_envelope
 
         try:
             staged = stage(coordinate, store=Path(body.get("store") or "/var/lib/nostrhost/npack-store"), relay=body.get("relay") or "", npack_bin="")
             package_data = load_embedded_manifest(staged["payload_root"])
-            package_data = apply_web_overrides(package_data, domain=body.get("domain"), path=body.get("path"))
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            package_data = bind_install_values(package_data, values, domain=body.get("domain"), path=body.get("path"))
             envelope = package_plan_envelope(package_data, npack=provenance(staged))
         except PackageError as exc:
             raise ApiError(400, "invalid_npk_release", str(exc)) from exc

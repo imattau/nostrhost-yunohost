@@ -400,23 +400,39 @@ def _verify_package(package_data: dict[str, Any], coordinate: dict[str, Any] | N
         raise NostrHostError(f"package manifest hash mismatch: expected {expected}, got {actual}")
 
 
-def _apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, path: str | None) -> dict[str, Any]:
-    """Apply install-time ``[web].domain``/``[web].path`` overrides.
+def _parse_set_values(pairs: list[str] | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise NostrHostError(f"--set must be id=value, got {pair!r}")
+        values[key] = value
+    return values
 
-    Domain and path are install-time parameters (which host, which URL mount
-    point) rather than part of the package's own signed content, so this
-    must run on a copy of ``package_data`` and only *after* ``_verify_package``
-    has checked the original against the catalogue's ``manifest_sha256`` —
-    overriding them before verification would let an override silently
-    forge what the catalogue actually signed. ``health.path`` is a separate
-    literal field that packages conventionally set equal to ``web.path``
-    (see nh-package-template's docs/new-package.md); keep it in sync so the
-    health check still targets the right route after a ``--path`` override.
+
+def _bind_install_values(
+    package_data: dict[str, Any],
+    *,
+    set_values: list[str] | None = None,
+    domain: str | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Bind install-time values (``--set id=value``, repeatable, plus the
+    legacy ``--domain``/``--path`` sugar) onto the resources a package's
+    ``install_inputs`` declare them for.
+
+    This must run on a copy of ``package_data`` and only *after*
+    ``_verify_package`` has checked the original against the catalogue's
+    ``manifest_sha256`` — binding before verification would let a value
+    silently forge what the catalogue actually signed. See
+    ``nostrhost.package_engine.bind_install_values`` for the resource-binding
+    rules and the domain/path fallback for packages that predate
+    ``install_inputs``.
     """
-    from nostrhost.package_engine import PackageError, apply_web_overrides
+    from nostrhost.package_engine import PackageError, bind_install_values
 
     try:
-        return apply_web_overrides(package_data, domain=domain, path=path)
+        return bind_install_values(package_data, _parse_set_values(set_values), domain=domain, path=path)
     except PackageError as exc:
         raise NostrHostError(str(exc)) from exc
 
@@ -2286,6 +2302,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
         domain: str = typer.Option(None, "--domain", help="install-time override for [web].domain"),
         path: str = typer.Option(None, "--path", help="install-time override for [web].path"),
+        set_values: list[str] = typer.Option(None, "--set", help="install-time value as id=value (see the package's install_inputs); repeatable"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Install a native app through the signed operation chain.
@@ -2294,16 +2311,19 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         (manifest_sha256), plans the resource-engine operations and runs them
         through the signed request -> policy -> approval -> execute chain.
 
-        --domain/--path let one package.toml be installed on whichever domain
-        and URL path the operator chooses, rather than the package hardcoding
-        one — applied only after manifest_sha256 verification, so they can
-        never be used to forge what the catalogue actually signed.
+        --set id=value supplies a value for one of the package's declared
+        install_inputs (repeatable). --domain/--path remain as sugar for the
+        common case: they map onto a declared web.domain/web.path input when
+        the package declares one, or fall back to overriding [web] directly
+        for packages that predate install_inputs — applied only after
+        manifest_sha256 verification, so they can never be used to forge what
+        the catalogue actually signed.
         """
         def run() -> Any:
             resolved = _coordinate_for(coordinate, repository=repository, revision=revision, package_path=package_path, manifest_sha256=manifest_sha256)
             package_data = _load_package_data(source, resolved)
             _verify_package(package_data, resolved)
-            package_data = _apply_web_overrides(package_data, domain=domain, path=path)
+            package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
             envelope = _plan_envelope(package_data, resolved)
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
@@ -2318,6 +2338,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         store: Path = typer.Option(None, "--store", help="isolated npack store prefix (default: /var/lib/nostrhost/npack-store)"),
         domain: str = typer.Option(None, "--domain", help="install-time override for [web].domain"),
         path: str = typer.Option(None, "--path", help="install-time override for [web].path"),
+        set_values: list[str] = typer.Option(None, "--set", help="install-time value as id=value (see the package's install_inputs); repeatable"),
         npack_bin: str = typer.Option("", "--npack", help="path to the npack binary (default: $NPACK_BIN or npack on PATH)"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
@@ -2329,13 +2350,17 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         the resource-engine operations (binding artifact_sha256 into the
         envelope) and runs them through the signed request -> policy ->
         approval -> execute chain.
+
+        --set id=value supplies a value for one of the package's declared
+        install_inputs (repeatable, see ``app install --help`` for the
+        --domain/--path sugar).
         """
         def run() -> Any:
             from nostrhost.npk import load_embedded_manifest, provenance, stage
 
             staged = stage(coordinate, store=store or Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin=npack_bin)
             package_data = load_embedded_manifest(staged["payload_root"])
-            package_data = _apply_web_overrides(package_data, domain=domain, path=path)
+            package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
             envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
@@ -2353,6 +2378,7 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         manifest_sha256: str = typer.Option(None, "--manifest-sha256", help="override the expected manifest sha256"),
         domain: str = typer.Option(None, "--domain", help="override [web].domain for this upgrade (default: keep the currently installed domain)"),
         path: str = typer.Option(None, "--path", help="override [web].path for this upgrade (default: keep the currently installed path)"),
+        set_values: list[str] = typer.Option(None, "--set", help="install-time value as id=value (see the package's install_inputs); repeatable"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Upgrade a native app to the resolved catalogue version.
@@ -2375,8 +2401,9 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             package_data = _load_package_data(source, resolved)
             _verify_package(package_data, resolved)
             installed_web = installed.get("web") or {}
-            package_data = _apply_web_overrides(
+            package_data = _bind_install_values(
                 package_data,
+                set_values=set_values,
                 domain=domain or installed_web.get("domain"),
                 path=path or installed_web.get("path"),
             )

@@ -448,10 +448,26 @@ class ConfigFileProvider(InspectVerifiedProvider):
 
     resource_type = "config"
 
-    def __init__(self, *, root: Path = Path("/"), template_root: Path | None = None, chown: Callable[..., Any] | None = None) -> None:
+    def __init__(self, *, root: Path = Path("/"), template_root: Path | None = None, chown: Callable[..., Any] | None = None, credential_dir: Path | None = None) -> None:
         self.root = root
         self.template_root = template_root
         self.chown = chown or os.chown
+        self.credential_dir = credential_dir
+
+    def _resolve_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Resolve ``secret:<namespace>/<name>`` context values through the
+        credential store instead of Jinja-rendering them literally. Supplied
+        install-time secrets (``bind = "secret.supplied"``) are written into
+        config context as such a reference - never the value itself - so it
+        never lands in the plan envelope; this is where it gets read back."""
+        if not any(isinstance(value, str) and value.startswith("secret:") for value in context.values()):
+            return context
+        from . import credentials
+
+        return {
+            key: credentials.read_secret(value, dir=self.credential_dir) if isinstance(value, str) and value.startswith("secret:") else value
+            for key, value in context.items()
+        }
 
     def inspect(self, desired: dict[str, Any], actual: Any = None) -> dict[str, Any]:
         target = _target(self.root, desired["destination"])
@@ -464,7 +480,7 @@ class ConfigFileProvider(InspectVerifiedProvider):
             import jinja2
 
             environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False, keep_trailing_newline=True)
-            rendered = environment.from_string(desired["template_content"]).render(desired.get("context", {}))
+            rendered = environment.from_string(desired["template_content"]).render(self._resolve_context(desired.get("context", {})))
             result["desired_sha256"] = hashlib.sha256(rendered.encode()).hexdigest()
         return result
 
@@ -490,7 +506,7 @@ class ConfigFileProvider(InspectVerifiedProvider):
             import jinja2
 
             environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False, keep_trailing_newline=True)
-            content = environment.from_string(args["template_content"]).render(args.get("context", {}))
+            content = environment.from_string(args["template_content"]).render(self._resolve_context(args.get("context", {})))
         else:
             template_root = Path(args.get("_template_root")) if args.get("_template_root") else self.template_root
             if template_root is None:
@@ -504,7 +520,7 @@ class ConfigFileProvider(InspectVerifiedProvider):
             if not template_path.is_file():
                 raise ProviderError(f"config template does not exist: {name}")
             environment = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
-            content = environment.from_string(template_path.read_text(encoding="utf-8")).render(args.get("context", {}))
+            content = environment.from_string(template_path.read_text(encoding="utf-8")).render(self._resolve_context(args.get("context", {})))
 
         target.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -2173,7 +2189,7 @@ def native_providers(*, root: Path = Path("/"), cache_dir: Path = Path("/var/cac
         "directory": TmpfilesProvider(root=root, command=command) if root == Path("/") else DirectoryProvider(root=root),
         "access": AccessProvider(root=root),
         "permission": PermissionProvider(),
-        "config": ConfigFileProvider(root=root, template_root=template_root),
+        "config": ConfigFileProvider(root=root, template_root=template_root, credential_dir=(root / "var/lib/nostrhost/credentials") if root != Path("/") else Path("/var/lib/nostrhost/credentials")),
         "source": SourceProvider(root=root, cache_dir=cache_dir),
         "payload": PayloadSyncProvider(root=root, state_dir=(root / "var/lib/nostrhost/state/payloads") if root != Path("/") else Path("/var/lib/nostrhost/state/payloads")),
         "runtime": RuntimeProvider(command=command, installer=runtime_installer),

@@ -524,6 +524,57 @@ class SettingResource(BaseModel):
         return values
 
 
+class InstallInputField(BaseModel):
+    """A publisher-declared, install-time value the operator supplies before
+    a package is planned. Unlike ``[settings]`` (post-install config-panel
+    state), these parametrize the package's own declarative resources at
+    plan time - see :func:`bind_install_values`. ``bind`` is a fixed set of
+    resource-field targets (not a general path resolver) so validation stays
+    a simple match instead of a reflective setter with its own injection
+    surface."""
+
+    type: Literal["string", "integer", "number", "boolean", "enum"]
+    bind: Literal[
+        "web.domain",
+        "web.path",
+        "database.name",
+        "permissions.allowed",
+        "ports.named",
+        "config.context",
+        "secret.supplied",
+    ]
+    required: bool = False
+    sensitive: bool = False
+    label: str | None = None
+    description: str = ""
+    choices: list[str] = Field(default_factory=list)
+    # Only used by bind targets that need an id: permissions.allowed needs
+    # {"permission": <id>}, ports.named needs {"port": <key>}, config.context
+    # and secret.supplied need {"config": <id>, "key": <context key>}.
+    constraints: dict[str, Any] = Field(default_factory=dict)
+
+    @root_validator
+    def valid_field(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if values.get("type") == "enum" and not values.get("choices"):
+            raise ValueError("enum install inputs require choices")
+        if values.get("type") != "enum" and values.get("choices"):
+            raise ValueError("only enum install inputs may declare choices")
+        bind = values.get("bind")
+        sensitive = values.get("sensitive")
+        if sensitive and bind != "secret.supplied":
+            raise ValueError("sensitive install inputs must bind to secret.supplied")
+        if bind == "secret.supplied" and not sensitive:
+            raise ValueError("secret.supplied install inputs must be marked sensitive")
+        constraints = values.get("constraints") or {}
+        if bind == "permissions.allowed" and "permission" not in constraints:
+            raise ValueError("bind=permissions.allowed requires constraints.permission")
+        if bind == "ports.named" and "port" not in constraints:
+            raise ValueError("bind=ports.named requires constraints.port")
+        if bind in ("config.context", "secret.supplied") and not {"config", "key"} <= constraints.keys():
+            raise ValueError(f"bind={bind} requires constraints.config and constraints.key")
+        return values
+
+
 class SecretResource(BaseModel):
     generate: Literal["password", "random"] = "random"
     length: int = Field(32, gt=0, le=4096)
@@ -565,9 +616,10 @@ class PackageManifest(BaseModel):
     policies: dict[str, PolicyResource] = Field(default_factory=dict)
     settings: SettingResource = Field(default_factory=SettingResource)
     secrets: dict[str, SecretResource] = Field(default_factory=dict)
+    install_inputs: dict[str, InstallInputField] = Field(default_factory=dict)
     hooks: dict[str, HookResource] = Field(default_factory=dict)
 
-    @validator("sources", "directories", "access", "permissions", "config", "secrets", "hooks", "policies", "dns")
+    @validator("sources", "directories", "access", "permissions", "config", "secrets", "install_inputs", "hooks", "policies", "dns")
     def unique_ids(cls, value: dict[str, Any]) -> dict[str, Any]:
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", key) for key in value):
             raise ValueError("resource identifiers must be lowercase names")
@@ -609,6 +661,30 @@ class PackageManifest(BaseModel):
             raise ValueError("[runtime_instance] requires installation_class = 'multi-tenant-runtime'")
         return values
 
+    @root_validator
+    def install_inputs_bind_to_declared_resources(cls, values: dict[str, Any]) -> dict[str, Any]:
+        inputs: dict[str, InstallInputField] = values.get("install_inputs") or {}
+        if not inputs:
+            return values
+        permissions = values.get("permissions") or {}
+        ports = values.get("ports") or PortsResource()
+        configs = values.get("config") or {}
+        database = values.get("database")
+        web = values.get("web")
+        for input_id, field in inputs.items():
+            constraints = field.constraints
+            if field.bind in ("web.domain", "web.path") and web is None:
+                raise ValueError(f"install_inputs.{input_id} binds to {field.bind} but no [web] resource is declared")
+            if field.bind == "database.name" and database is None:
+                raise ValueError(f"install_inputs.{input_id} binds to database.name but no [database] resource is declared")
+            if field.bind == "permissions.allowed" and constraints.get("permission") not in permissions:
+                raise ValueError(f"install_inputs.{input_id} binds to undeclared permission {constraints.get('permission')!r}")
+            if field.bind == "ports.named" and constraints.get("port") not in ports.named:
+                raise ValueError(f"install_inputs.{input_id} binds to undeclared named port {constraints.get('port')!r}")
+            if field.bind in ("config.context", "secret.supplied") and constraints.get("config") not in configs:
+                raise ValueError(f"install_inputs.{input_id} binds to undeclared config {constraints.get('config')!r}")
+        return values
+
     class Config:
         extra = "forbid"
         allow_population_by_field_name = True
@@ -643,35 +719,150 @@ def operation_plan_digest(plan: list[Operation]) -> str:
     return hashlib.sha256(_canonical_json([operation.json_dict() for operation in plan])).hexdigest()
 
 
-def apply_web_overrides(package_data: dict[str, Any], *, domain: str | None, path: str | None) -> dict[str, Any]:
-    """Apply install-time ``[web].domain``/``[web].path`` overrides.
+def bind_install_values(
+    package_data: dict[str, Any],
+    values: dict[str, Any],
+    *,
+    domain: str | None = None,
+    path: str | None = None,
+    credential_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Apply install-time values to the resources their ``install_inputs``
+    declarations bind to (domain/path, database name, permission grants,
+    config-template context, supplied secrets).
 
-    Domain and path are install-time parameters (which host, which URL mount
-    point) rather than part of the package's own signed content, so this
-    operates on a copy and must run only *after* the original manifest has
-    been checked against a catalogue's ``manifest_sha256``. Overriding before
-    verification would let an override silently forge what the catalogue
-    actually signed. ``health.path`` conventionally mirrors ``web.path`` (see
+    Install-time values are operator input, not part of the package's own
+    signed content, so this operates on a copy and must run only *after* the
+    original manifest has been checked against a catalogue's
+    ``manifest_sha256`` or npack provenance. Binding before verification
+    would let a value silently forge what the publisher actually signed.
+    ``health.path`` conventionally mirrors ``web.path`` (see
     nh-package-template's docs/new-package.md); keep it in sync so the health
-    check still targets the right route after a ``path`` override.
+    check still targets the right route after a ``web.path`` bind.
+
+    ``domain``/``path`` are legacy sugar for the two install-time values
+    every package used to be able to override unconditionally, before
+    ``install_inputs`` existed: they map onto a declared ``web.domain``/
+    ``web.path`` install input when the package declares one, or fall back
+    to directly overriding ``[web]`` for packages that predate
+    ``install_inputs`` and declare none.
+
+    ``credential_dir`` overrides the root-only credential store a
+    ``secret.supplied`` value is written to (see :func:`_store_supplied_secret`);
+    it exists for test isolation and defaults to the real store.
     """
-    if domain is None and path is None:
+    declared: dict[str, Any] = package_data.get("install_inputs") or {}
+    values = dict(values)
+    legacy_domain, legacy_path = domain, path
+    if domain is not None or path is not None:
+        bound_ids = {field.get("bind"): input_id for input_id, field in declared.items()}
+        if domain is not None and "web.domain" in bound_ids:
+            values[bound_ids["web.domain"]] = domain
+            legacy_domain = None
+        if path is not None and "web.path" in bound_ids:
+            values[bound_ids["web.path"]] = path
+            legacy_path = None
+
+    unknown = set(values) - set(declared)
+    if unknown:
+        raise PackageError(f"unexpected install value(s): {', '.join(sorted(unknown))}")
+    missing = sorted(name for name, field in declared.items() if field.get("required") and name not in values)
+    if missing:
+        raise PackageError(f"missing required install value(s): {', '.join(missing)}")
+    if not values and legacy_domain is None and legacy_path is None:
         return package_data
+
     import copy
 
     package_data = copy.deepcopy(package_data)
-    web = package_data.get("web")
-    if not isinstance(web, dict):
-        raise PackageError("install-time domain/path given but the package declares no [web] resource")
-    old_path = web.get("path")
-    if domain is not None:
-        web["domain"] = domain
-    if path is not None:
-        web["path"] = path
-        health = package_data.get("health")
-        if isinstance(health, dict) and health.get("path") == old_path:
-            health["path"] = path
+    app_id = str((package_data.get("app") or {}).get("id") or "")
+    for name, value in values.items():
+        field = declared[name]
+        bind = field.get("bind")
+        constraints = field.get("constraints") or {}
+        if bind == "web.domain":
+            web = package_data.get("web")
+            if not isinstance(web, dict):
+                raise PackageError(f"install value {name!r} binds to web.domain but the package declares no [web] resource")
+            web["domain"] = value
+        elif bind == "web.path":
+            web = package_data.get("web")
+            if not isinstance(web, dict):
+                raise PackageError(f"install value {name!r} binds to web.path but the package declares no [web] resource")
+            old_path = web.get("path")
+            web["path"] = value
+            health = package_data.get("health")
+            if isinstance(health, dict) and health.get("path") == old_path:
+                health["path"] = value
+        elif bind == "database.name":
+            database = package_data.get("database")
+            if not isinstance(database, dict):
+                raise PackageError(f"install value {name!r} binds to database.name but the package declares no [database] resource")
+            database["name"] = value
+        elif bind == "permissions.allowed":
+            permission_id = constraints.get("permission")
+            permission = (package_data.get("permissions") or {}).get(permission_id)
+            if not isinstance(permission, dict):
+                raise PackageError(f"install value {name!r} binds to undeclared permission {permission_id!r}")
+            permission["allowed"] = value
+        elif bind == "ports.named":
+            port_key = constraints.get("port")
+            named = (package_data.get("ports") or {}).get("named") or {}
+            if port_key not in named:
+                raise PackageError(f"install value {name!r} binds to undeclared named port {port_key!r}")
+            named[port_key] = value
+        elif bind == "config.context":
+            _bind_config_context(package_data, name, constraints, value)
+        elif bind == "secret.supplied":
+            ref = _store_supplied_secret(app_id, name, value, credential_dir=credential_dir)
+            _bind_config_context(package_data, name, constraints, ref)
+        else:  # pragma: no cover - InstallInputField.bind is a closed Literal
+            raise PackageError(f"install_inputs.{name} has an unsupported bind target {bind!r}")
+
+    if legacy_domain is not None or legacy_path is not None:
+        web = package_data.get("web")
+        if not isinstance(web, dict):
+            raise PackageError("install-time domain/path given but the package declares no [web] resource")
+        old_path = web.get("path")
+        if legacy_domain is not None:
+            web["domain"] = legacy_domain
+        if legacy_path is not None:
+            web["path"] = legacy_path
+            health = package_data.get("health")
+            if isinstance(health, dict) and health.get("path") == old_path:
+                health["path"] = legacy_path
     return package_data
+
+
+def _bind_config_context(package_data: dict[str, Any], name: str, constraints: dict[str, Any], value: Any) -> None:
+    config_id = constraints.get("config")
+    key = constraints.get("key")
+    config = (package_data.get("config") or {}).get(config_id)
+    if not isinstance(config, dict):
+        raise PackageError(f"install value {name!r} binds to undeclared config {config_id!r}")
+    config.setdefault("context", {})[key] = value
+
+
+def _store_supplied_secret(app_id: str, input_id: str, value: Any, *, credential_dir: Path | None = None) -> str:
+    """Write a ``sensitive`` install value straight to the credential store
+    and return its ``secret:`` reference. The value never enters
+    ``package_data`` (which is hashed into ``manifest_sha256`` and audited as
+    part of the plan envelope) - only the reference does.
+
+    This is the one deliberate exception to this module's "parsing a package
+    never mutates the host" rule (module docstring): it mirrors the existing
+    DNS credential broker (``credentials.py``), whose tokens are likewise set
+    outside of - and before - any resource plan that references them. A
+    root-only credential file is not a host resource the plan/executor chain
+    governs.
+    """
+    from .credentials import set_secret
+
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", app_id) or not re.fullmatch(r"[a-zA-Z0-9_.-]+", input_id):
+        raise PackageError("install-time secrets require a safe app id and input id")
+    ref = f"secret:install-{app_id}/{input_id}"
+    set_secret(ref, str(value), dir=credential_dir)
+    return ref
 
 
 def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, Any] | None = None, npack: dict[str, Any] | None = None) -> dict[str, Any]:

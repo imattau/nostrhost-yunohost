@@ -1020,3 +1020,33 @@ def test_config_provider_removes_managed_file(tmp_path: Path):
     remove = provider.remove({"destination": "/etc/example.conf"})[0]
     assert provider.apply(remove)["changed"]
     assert not (tmp_path / "etc/example.conf").exists()
+
+
+def test_config_provider_resolves_secret_ref_in_context(tmp_path: Path):
+    """A ``secret:`` context value (how bind_install_values wires a
+    sensitive install input into a config template) is resolved from the
+    credential store at render time - never Jinja-rendered literally, and
+    never present in the operation's own args."""
+    from nostrhost import credentials
+
+    credential_dir = tmp_path / "credentials"
+    credentials.set_secret("secret:install-example/api_key", "s3cr3t", dir=credential_dir)
+
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "app.conf.j2").write_text("key={{ api_key }}\n")
+    provider = ConfigFileProvider(root=tmp_path, template_root=templates, credential_dir=credential_dir)
+    operation = provider.plan({"destination": "/etc/example.conf", "template": "app.conf.j2", "context": {"api_key": "secret:install-example/api_key"}})[0]
+    assert operation.args["context"]["api_key"] == "secret:install-example/api_key"  # the ref, not the secret
+
+    provider.apply(operation)
+    assert (tmp_path / "etc/example.conf").read_text() == "key=s3cr3t"
+
+
+def test_config_provider_inline_content_untouched_by_secret_refs(tmp_path: Path):
+    """Literal `content` (no template/context) never triggers secret
+    resolution - only Jinja context values do."""
+    provider = ConfigFileProvider(root=tmp_path)
+    operation = provider.plan({"destination": "/etc/example.conf", "content": "secret:install-example/api_key\n"})[0]
+    provider.apply(operation)
+    assert (tmp_path / "etc/example.conf").read_text() == "secret:install-example/api_key\n"

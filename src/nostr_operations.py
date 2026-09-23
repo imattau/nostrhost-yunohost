@@ -553,16 +553,17 @@ IRREVERSIBLE = "irreversible"
 def _safe_package_plan(
     package: dict[str, Any] | None = None,
     catalogue: dict[str, Any] | None = None,
+    values: dict[str, Any] | None = None,
     domain: str | None = None,
     path: str | None = None,
     **args: Any,
 ) -> dict[str, Any]:
     if args or not isinstance(package, dict):
         raise OperationError("package.plan requires a package object and optional catalogue provenance")
-    from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
+    from nostrhost.package_engine import bind_install_values, package_plan_envelope
 
     try:
-        package = apply_web_overrides(package, domain=domain, path=path)
+        package = bind_install_values(package, values or {}, domain=domain, path=path)
         return package_plan_envelope(package, catalogue=catalogue)
     except (TypeError, ValueError) as exc:
         raise OperationError(f"invalid native package: {exc}") from exc
@@ -579,7 +580,7 @@ def _safe_package_fetch_manifest(repository: str = "", revision: str = "", packa
         raise OperationError(str(exc)) from exc
 
 
-def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str = "", domain: str | None = None, path: str | None = None, **args: Any) -> dict[str, Any]:
+def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str = "", values: dict[str, Any] | None = None, domain: str | None = None, path: str | None = None, **args: Any) -> dict[str, Any]:
     """Stage a verified npack release and build the plan envelope.
 
     Read-only with respect to the host: npack resolve verifies the release
@@ -596,9 +597,9 @@ def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str 
     try:
         staged = stage(coordinate, store=Path(store) if store else Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin="")
         package_data = load_embedded_manifest(staged["payload_root"])
-        from nostrhost.package_engine import apply_web_overrides, package_plan_envelope
+        from nostrhost.package_engine import bind_install_values, package_plan_envelope
 
-        package_data = apply_web_overrides(package_data, domain=domain, path=path)
+        package_data = bind_install_values(package_data, values or {}, domain=domain, path=path)
         envelope = package_plan_envelope(package_data, npack=provenance(staged))
     except (TypeError, ValueError) as exc:
         raise OperationError(f"cannot stage npack release: {exc}") from exc

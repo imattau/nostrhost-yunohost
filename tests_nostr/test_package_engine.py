@@ -102,13 +102,15 @@ def test_plan_envelope_binds_npack_provenance(tmp_path):
         validate_plan_envelope(envelope)
 
 
-def test_apply_web_overrides_sets_domain_path_and_syncs_health():
-    from nostrhost.package_engine import apply_web_overrides
+def test_bind_install_values_legacy_domain_path_sugar_syncs_health():
+    """A package with no declared install_inputs still accepts --domain/--path
+    (legacy sugar), applied directly to [web]/[health]."""
+    from nostrhost.package_engine import bind_install_values
 
     data = example()
     data["web"]["path"] = "/"
     data["health"]["path"] = "/"
-    overridden = apply_web_overrides(data, domain="ditto.example", path="/app")
+    overridden = bind_install_values(data, {}, domain="ditto.example", path="/app")
     assert overridden["web"]["domain"] == "ditto.example"
     assert overridden["web"]["path"] == "/app"
     assert overridden["health"]["path"] == "/app"
@@ -118,14 +120,97 @@ def test_apply_web_overrides_sets_domain_path_and_syncs_health():
     assert data["health"]["path"] == "/"
 
 
-def test_apply_web_overrides_noop_and_requires_web_resource():
-    from nostrhost.package_engine import apply_web_overrides
+def test_bind_install_values_noop_and_requires_web_resource():
+    from nostrhost.package_engine import bind_install_values
 
     data = example()
-    assert apply_web_overrides(data, domain=None, path=None) is data
+    assert bind_install_values(data, {}) is data
     without_web = {key: value for key, value in data.items() if key != "web"}
     with pytest.raises(PackageError, match=r"\[web\]"):
-        apply_web_overrides(without_web, domain="example.org", path=None)
+        bind_install_values(without_web, {}, domain="example.org")
+
+
+def test_bind_install_values_maps_domain_sugar_onto_declared_input():
+    """--domain maps onto a declared web.domain input instead of the legacy
+    fallback when the package declares one."""
+    from nostrhost.package_engine import bind_install_values
+
+    data = example()
+    data["install_inputs"] = {"domain": {"type": "string", "bind": "web.domain", "required": True}}
+    overridden = bind_install_values(data, {}, domain="ditto.example")
+    assert overridden["web"]["domain"] == "ditto.example"
+
+
+def test_bind_install_values_rejects_unknown_and_missing_required():
+    from nostrhost.package_engine import bind_install_values
+
+    data = example()
+    data["install_inputs"] = {"domain": {"type": "string", "bind": "web.domain", "required": True}}
+    with pytest.raises(PackageError, match="missing required"):
+        bind_install_values(data, {})
+    with pytest.raises(PackageError, match="unexpected install value"):
+        bind_install_values(data, {"domain": "d.example", "bogus": "x"})
+
+
+def test_bind_install_values_config_context():
+    from nostrhost.package_engine import bind_install_values
+
+    data = example()
+    data["config"] = {"index": {"destination": "/opt/example/index.html", "template_content": "hi {{ name }}"}}
+    data["install_inputs"] = {"greeting_name": {"type": "string", "bind": "config.context", "constraints": {"config": "index", "key": "name"}}}
+    overridden = bind_install_values(data, {"greeting_name": "World"})
+    assert overridden["config"]["index"]["context"] == {"name": "World"}
+
+
+def test_bind_install_values_permissions_and_ports():
+    from nostrhost.package_engine import bind_install_values
+
+    data = example()
+    data["permissions"] = {"main": {"url": "/"}}
+    data["ports"] = {"named": {"web": 8090}}
+    data["install_inputs"] = {
+        "who": {"type": "string", "bind": "permissions.allowed", "constraints": {"permission": "main"}},
+        "port": {"type": "integer", "bind": "ports.named", "constraints": {"port": "web"}},
+    }
+    overridden = bind_install_values(data, {"who": "all_users", "port": 9090})
+    assert overridden["permissions"]["main"]["allowed"] == "all_users"
+    assert overridden["ports"]["named"]["web"] == 9090
+
+
+def test_bind_install_values_secret_supplied_never_enters_package_data(tmp_path):
+    from nostrhost.package_engine import bind_install_values
+
+    data = example()
+    data["config"] = {"index": {"destination": "/opt/example/index.html", "template_content": "key={{ api_key }}"}}
+    data["install_inputs"] = {
+        "api_key": {
+            "type": "string",
+            "bind": "secret.supplied",
+            "required": True,
+            "sensitive": True,
+            "constraints": {"config": "index", "key": "api_key"},
+        }
+    }
+    credential_dir = tmp_path / "credentials"
+    overridden = bind_install_values(data, {"api_key": "s3cr3t"}, credential_dir=credential_dir)
+    ref = overridden["config"]["index"]["context"]["api_key"]
+    assert ref == "secret:install-example/api_key"
+    assert "s3cr3t" not in str(overridden)
+    assert (credential_dir / "install-example" / "api_key").read_text(encoding="utf-8") == "s3cr3t"
+
+
+def test_install_input_sensitive_must_bind_secret_supplied():
+    data = example()
+    data["install_inputs"] = {"bad": {"type": "string", "bind": "web.domain", "sensitive": True}}
+    with pytest.raises(ValueError, match="secret.supplied"):
+        PackageManifest.parse_obj(data)
+
+
+def test_install_input_must_reference_declared_resource():
+    data = example()
+    data["install_inputs"] = {"who": {"type": "string", "bind": "permissions.allowed", "constraints": {"permission": "main"}}}
+    with pytest.raises(ValueError, match="undeclared permission"):
+        PackageManifest.parse_obj(data)
 
 
 def test_safe_package_plan_applies_install_time_web_override():
@@ -133,13 +218,13 @@ def test_safe_package_plan_applies_install_time_web_override():
     ships without [web].domain), matching the CLI's own override path."""
     from yunohost.nostr_operations import OperationError, _safe_package_plan
 
-    from nostrhost.package_engine import apply_web_overrides
+    from nostrhost.package_engine import bind_install_values
 
     data = example()
     data["web"]["path"] = "/"
     data["health"]["path"] = "/"
     envelope = _safe_package_plan(package=data, domain="ditto.example", path="/")
-    expected = package_plan_envelope(apply_web_overrides(data, domain="ditto.example", path="/"))
+    expected = package_plan_envelope(bind_install_values(data, {}, domain="ditto.example", path="/"))
     assert envelope["plan_sha256"] == expected["plan_sha256"]
 
     without_web = {key: value for key, value in data.items() if key != "web"}
