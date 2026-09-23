@@ -1551,6 +1551,46 @@ def _safe_catalog_trust(
     return {"entries": entries if isinstance(entries, list) else []}
 
 
+def _safe_catalog_attest_release(
+    publisher: str = "",
+    name: str = "",
+    version: str = "",
+    arch: str = "x86_64",
+    relays: str = "",
+    attestation_policy: str = "off",
+    min_attestations: int = 0,
+    required_checks: list[str] | None = None,
+    trusted_verifiers: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """The trust/curation/attestation picture for one npack release - the
+    npack-release counterpart to catalog.trust, which only sees releases
+    already relay-synced into this node's local projection. Fetches the one
+    release plus matching attestations live and evaluates the same
+    CI-attestation policy. Informational only, like catalog.trust: nothing
+    calls this automatically before an install (see app install-npk's own
+    --require-attestation flag for the opt-in hard gate)."""
+    if extra:
+        raise OperationError(f"catalog.attest_release does not accept extra args: {sorted(extra)}")
+    if not publisher or not name or not version:
+        raise OperationError("catalog.attest_release requires publisher, name, and version")
+    extra_flags = [
+        "--relay", _catalog_relay_arg(relays),
+        "--publisher", publisher,
+        "--name", name,
+        "--version", version,
+        "--arch", arch,
+        "--attestation-policy", attestation_policy,
+    ]
+    if min_attestations:
+        extra_flags += ["--min-attestations", str(min_attestations)]
+    if required_checks:
+        extra_flags += ["--required-checks", ",".join(required_checks)]
+    if trusted_verifiers:
+        extra_flags += ["--trusted-verifiers", ",".join(trusted_verifiers)]
+    return _catalog_cli(["attest-release"], extra_flags=extra_flags)
+
+
 def _safe_catalog_reverify(app_id: str = "", **extra: Any) -> dict[str, Any]:
     """Independently re-check one accepted declaration on demand: re-clone its
     repository at the declared commit and recompute both hashes, rather than

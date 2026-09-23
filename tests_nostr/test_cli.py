@@ -294,3 +294,45 @@ def test_reconcile_routes_skips_mcp_when_unconfigured(app, monkeypatch):
     assert result.exit_code == 0
     data = json.loads(result.stdout)
     assert data["reconciled"]["mcp"] == {"ok": True, "configured": False}
+
+
+# --------------------------------------------------------------------------- #
+# app install-npk: informational vs. --require-attestation trust gate
+
+STAGED = {"publisher": "ab" * 32, "name": "myapp", "version": "1.0.0"}
+
+
+def test_attest_release_is_informational_by_default(monkeypatch):
+    monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", lambda **_: {"verified": False, "accepted": True})
+    result = cli_module._attest_release(STAGED, relay="", require=False, trusted_verifiers=None)
+    assert result == {"verified": False, "accepted": True}
+
+
+def test_attest_release_swallows_lookup_failure_when_not_required(monkeypatch):
+    def fail(**_):
+        raise RuntimeError("relay unreachable")
+
+    monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", fail)
+    result = cli_module._attest_release(STAGED, relay="", require=False, trusted_verifiers=None)
+    assert result == {"error": "relay unreachable"}
+
+
+def test_attest_release_blocks_when_required_and_unverified(monkeypatch):
+    monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", lambda **_: {"verified": False, "accepted": False})
+    with pytest.raises(cli_module.NostrHostError, match="not verified"):
+        cli_module._attest_release(STAGED, relay="", require=True, trusted_verifiers=["cd" * 32])
+
+
+def test_attest_release_blocks_on_lookup_failure_when_required(monkeypatch):
+    def fail(**_):
+        raise RuntimeError("relay unreachable")
+
+    monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", fail)
+    with pytest.raises(cli_module.NostrHostError, match="cannot determine attestation trust"):
+        cli_module._attest_release(STAGED, relay="", require=True, trusted_verifiers=["cd" * 32])
+
+
+def test_attest_release_passes_when_required_and_verified(monkeypatch):
+    monkeypatch.setattr("nostrhost.native_ops._safe_catalog_attest_release", lambda **_: {"verified": True, "accepted": True})
+    result = cli_module._attest_release(STAGED, relay="", require=True, trusted_verifiers=["cd" * 32])
+    assert result == {"verified": True, "accepted": True}

@@ -239,6 +239,7 @@ _TOOL_HANDLERS: dict[str, Callable[..., Any]] = {
     "catalog.attest": native_ops._safe_catalog_attest,
     "catalog.history": native_ops._safe_catalog_history,
     "catalog.trust": native_ops._safe_catalog_trust,
+    "catalog.attest_release": native_ops._safe_catalog_attest_release,
     "catalog.reverify": native_ops._safe_catalog_reverify,
     "catalog.profile.get": native_ops._safe_catalog_profile_get,
     "catalog.profile.set": native_ops._safe_catalog_profile_set,
@@ -435,6 +436,49 @@ def _bind_install_values(
         return bind_install_values(package_data, _parse_set_values(set_values), domain=domain, path=path)
     except PackageError as exc:
         raise NostrHostError(str(exc)) from exc
+
+
+def _attest_release(
+    staged: dict[str, Any],
+    *,
+    relay: str,
+    require: bool,
+    trusted_verifiers: list[str] | None,
+) -> dict[str, Any] | None:
+    """Look up the trust/curation/attestation picture for the release just
+    staged (see ``nostrhost.native_ops._safe_catalog_attest_release``) and,
+    if ``--require-attestation`` was passed, refuse to install when it isn't
+    verified.
+
+    Best-effort when not required: a lookup failure (unreachable relay, no
+    ``nostrhost-catalog`` binary) is reported in the result, not fatal -
+    matching how ``catalog.trust`` is itself just an on-demand dashboard
+    tool nothing else depends on. When required, the same failure blocks
+    the install instead, since there is then no way to know whether the
+    release is trustworthy. Attestation policy "require" needs at least one
+    ``--trusted-verifier`` (the Go trust layer itself refuses to construct
+    an empty-verifier "require" policy - trusting any verifier is not a
+    safe default), so an empty list with ``require=True`` surfaces that
+    error rather than silently passing.
+    """
+    from nostrhost.native_ops import _safe_catalog_attest_release
+
+    try:
+        result = _safe_catalog_attest_release(
+            publisher=staged["publisher"],
+            name=staged["name"],
+            version=staged["version"],
+            relays=relay,
+            attestation_policy="require" if require else "off",
+            trusted_verifiers=trusted_verifiers or [],
+        )
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        if require:
+            raise NostrHostError(f"cannot determine attestation trust for this release: {exc}") from exc
+        return {"error": str(exc)}
+    if require and not result.get("verified"):
+        raise NostrHostError("release is not verified under the required attestation policy (--trusted-verifier)")
+    return result
 
 
 def _plan_envelope(package_data: dict[str, Any], coordinate: dict[str, Any] | None, *, npack: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2340,6 +2384,8 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         path: str = typer.Option(None, "--path", help="install-time override for [web].path"),
         set_values: list[str] = typer.Option(None, "--set", help="install-time value as id=value (see the package's install_inputs); repeatable"),
         npack_bin: str = typer.Option("", "--npack", help="path to the npack binary (default: $NPACK_BIN or npack on PATH)"),
+        require_attestation: bool = typer.Option(False, "--require-attestation", help="refuse to install unless a trusted CI verifier's attestation confirms this exact release (requires --trusted-verifier; see catalog.attest_release for the on-demand, non-blocking version of this check)"),
+        trusted_verifier: list[str] = typer.Option(None, "--trusted-verifier", help="attestation verifier hex pubkey trusted for --require-attestation; repeatable"),
         output_as: str = typer.Option(None, "--output-as"),
     ) -> None:
         """Install a native app from a verified npack artifact.
@@ -2359,13 +2405,19 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         --set id=value supplies a value for one of the package's declared
         install_inputs (repeatable, see ``app install --help`` for the
         --domain/--path sugar).
+
+        For a coordinate (not a local file), the release's trust/curation/
+        attestation picture is looked up and included in the report -
+        informational by default, like ``catalog.trust``; nothing blocks the
+        install unless ``--require-attestation`` is passed.
         """
         def run() -> Any:
             from nostrhost.native_ops import trusted_publisher_list
             from nostrhost.npk import load_embedded_manifest, provenance, stage, stage_local
 
             store_path = store or Path("/var/lib/nostrhost/npack-store")
-            if Path(coordinate).is_file():
+            from_local = Path(coordinate).is_file()
+            if from_local:
                 staged = stage_local(coordinate, store=store_path, npack_bin=npack_bin)
             else:
                 staged = stage(
@@ -2375,13 +2427,19 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
                     npack_bin=npack_bin,
                     trusted_publishers=trusted_publisher_list(),
                 )
+            attestation = None
+            if not from_local:
+                attestation = _attest_release(staged, relay=relay or "", require=require_attestation, trusted_verifiers=trusted_verifier)
             package_data = load_embedded_manifest(staged["payload_root"])
             package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
             envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"install rejected: {body.get('reason') or body.get('state')}")
-            return _lifecycle_report("installed", envelope, body)
+            report = _lifecycle_report("installed", envelope, body)
+            if attestation is not None:
+                report["attestation"] = attestation
+            return report
         _guard(run, output_as)
 
     @app_group.command("upgrade")

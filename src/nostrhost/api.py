@@ -1707,6 +1707,30 @@ def build_app(
             },
         )
 
+    @app.get("/package/catalog/attest-release")
+    def catalog_attest_release() -> Any:
+        """The trust/curation/attestation picture for one npack release
+        (fetched live, not from the local relay-synced projection) -
+        informational, the npack-release counterpart to /catalog/trust."""
+        query = _req().query_params
+        required_checks = [item for item in query.get("required_checks", "").split(",") if item]
+        trusted_verifiers = [item for item in query.get("trusted_verifiers", "").split(",") if item]
+        min_attestations = query.get("min_attestations", "")
+        return _run_tool(
+            "catalog.attest_release",
+            {
+                "publisher": query.get("publisher", ""),
+                "name": query.get("name", ""),
+                "version": query.get("version", ""),
+                "arch": query.get("arch", "x86_64"),
+                "relays": query.get("relays", ""),
+                "attestation_policy": query.get("attestation_policy", "off"),
+                "min_attestations": int(min_attestations) if min_attestations.isdigit() else 0,
+                "required_checks": required_checks,
+                "trusted_verifiers": trusted_verifiers,
+            },
+        )
+
     @app.post("/package/catalog/reverify")
     def catalog_reverify() -> Any:
         body = _body(CatalogReverifyBody)

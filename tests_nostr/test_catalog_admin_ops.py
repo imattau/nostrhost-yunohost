@@ -73,6 +73,8 @@ def cli_fake(monkeypatch, boot):
             }
         if sub[0] == "trust":
             return [{"declaration": {"AppID": "nostrhost-test"}, "attestations": [], "verified": False, "accepted": True}]
+        if sub[0] == "attest-release":
+            return {"declaration": {"AppID": "nostrhost-test"}, "attestations": [], "verified": False, "accepted": True}
         if sub[0] == "reverify":
             return {"app_id": "nostrhost-test", "ok": True}
         raise AssertionError(f"unexpected subcommand {sub}")
@@ -222,6 +224,39 @@ def test_trust_passes_policy_flags_before_subcommand(boot, cli_fake):
     assert result["entries"][0]["declaration"]["AppID"] == "nostrhost-test"
     sub, _, extra_flags = next(c for c in cli_fake if c[0] == ["trust"])
     assert extra_flags == ["--attestation-policy", "require", "--min-attestations", "2", "--required-checks", "a,b"]
+
+
+def test_attest_release_requires_publisher_name_version(boot, cli_fake):
+    import nostrhost.native_ops as no
+
+    with pytest.raises(OperationError, match="publisher, name, and version"):
+        no._safe_catalog_attest_release(name="myapp", version="1.0.0")
+    with pytest.raises(OperationError, match="publisher, name, and version"):
+        no._safe_catalog_attest_release(publisher=OTHER_PUBLISHER, version="1.0.0")
+    with pytest.raises(OperationError, match="publisher, name, and version"):
+        no._safe_catalog_attest_release(publisher=OTHER_PUBLISHER, name="myapp")
+
+
+def test_attest_release_passes_release_and_policy_flags_before_subcommand(boot, cli_fake):
+    import nostrhost.native_ops as no
+
+    result = no._safe_catalog_attest_release(
+        publisher=OTHER_PUBLISHER, name="myapp", version="1.0.0", arch="x86_64",
+        relays="wss://relay.example", attestation_policy="require", min_attestations=2,
+        required_checks=["a", "b"],
+    )
+    assert result["declaration"]["AppID"] == "nostrhost-test"
+    sub, _, extra_flags = next(c for c in cli_fake if c[0] == ["attest-release"])
+    assert extra_flags == [
+        "--relay", "wss://relay.example",
+        "--publisher", OTHER_PUBLISHER,
+        "--name", "myapp",
+        "--version", "1.0.0",
+        "--arch", "x86_64",
+        "--attestation-policy", "require",
+        "--min-attestations", "2",
+        "--required-checks", "a,b",
+    ]
 
 
 def test_reverify_passes_app_id_flag(boot, cli_fake):
