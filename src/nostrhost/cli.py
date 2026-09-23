@@ -2361,13 +2361,20 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
         --domain/--path sugar).
         """
         def run() -> Any:
+            from nostrhost.native_ops import trusted_publisher_list
             from nostrhost.npk import load_embedded_manifest, provenance, stage, stage_local
 
             store_path = store or Path("/var/lib/nostrhost/npack-store")
             if Path(coordinate).is_file():
                 staged = stage_local(coordinate, store=store_path, npack_bin=npack_bin)
             else:
-                staged = stage(coordinate, store=store_path, relay=relay or "", npack_bin=npack_bin)
+                staged = stage(
+                    coordinate,
+                    store=store_path,
+                    relay=relay or "",
+                    npack_bin=npack_bin,
+                    trusted_publishers=trusted_publisher_list(),
+                )
             package_data = load_embedded_manifest(staged["payload_root"])
             package_data = _bind_install_values(package_data, set_values=set_values, domain=domain, path=path)
             envelope = _plan_envelope(package_data, catalogue=None, npack=provenance(staged))

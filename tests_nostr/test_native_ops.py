@@ -257,3 +257,16 @@ def test_operation_catalog_covers_native_tools():
 
     names = {entry["name"] for entry in operation_catalog()["operations"]}
     assert {"app.install", "system.status", "firewall.open"} <= names
+
+
+def test_trusted_publisher_list_splits_and_filters(monkeypatch):
+    """trusted_publisher_list() is _trusted_publishers()'s comma-joined
+    string reshaped into repeatable flags (npack's --trusted-publisher
+    shape), stripping whitespace and dropping empty entries."""
+    monkeypatch.setattr(native_ops, "_trusted_publishers", lambda: " " + "ab" * 32 + " , " + "cd" * 32 + " ,")
+    assert native_ops.trusted_publisher_list() == ["ab" * 32, "cd" * 32]
+
+
+def test_trusted_publisher_list_single_entry(monkeypatch):
+    monkeypatch.setattr(native_ops, "_trusted_publishers", lambda: "ab" * 32)
+    assert native_ops.trusted_publisher_list() == ["ab" * 32]

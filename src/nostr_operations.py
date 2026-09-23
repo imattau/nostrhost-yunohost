@@ -592,10 +592,17 @@ def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str 
         raise OperationError("package.install requires an npack coordinate <publisher>/<name>[@version]")
     from pathlib import Path
 
+    from nostrhost.native_ops import trusted_publisher_list
     from nostrhost.npk import load_embedded_manifest, provenance, stage
 
     try:
-        staged = stage(coordinate, store=Path(store) if store else Path("/var/lib/nostrhost/npack-store"), relay=relay or "", npack_bin="")
+        staged = stage(
+            coordinate,
+            store=Path(store) if store else Path("/var/lib/nostrhost/npack-store"),
+            relay=relay or "",
+            npack_bin="",
+            trusted_publishers=trusted_publisher_list(),
+        )
         package_data = load_embedded_manifest(staged["payload_root"])
         from nostrhost.package_engine import bind_install_values, package_plan_envelope
 

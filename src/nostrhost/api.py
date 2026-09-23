@@ -1799,11 +1799,18 @@ def build_app(
         coordinate = body.get("coordinate") if isinstance(body, dict) else None
         if not coordinate:
             raise ApiError(400, "invalid_request", "npk install plan requires an npack coordinate <publisher>/<name>[@version]")
+        from nostrhost.native_ops import trusted_publisher_list
         from nostrhost.npk import load_embedded_manifest, provenance, stage
         from nostrhost.package_engine import bind_install_values, package_plan_envelope
 
         try:
-            staged = stage(coordinate, store=Path(body.get("store") or "/var/lib/nostrhost/npack-store"), relay=body.get("relay") or "", npack_bin="")
+            staged = stage(
+                coordinate,
+                store=Path(body.get("store") or "/var/lib/nostrhost/npack-store"),
+                relay=body.get("relay") or "",
+                npack_bin="",
+                trusted_publishers=trusted_publisher_list(),
+            )
             package_data = load_embedded_manifest(staged["payload_root"])
             values = body.get("values") if isinstance(body.get("values"), dict) else {}
             package_data = bind_install_values(package_data, values, domain=body.get("domain"), path=body.get("path"))

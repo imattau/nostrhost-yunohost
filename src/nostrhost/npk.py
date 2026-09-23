@@ -66,18 +66,26 @@ def parse_coordinate(coordinate: str) -> tuple[str, str, str | None]:
     return normalize_publisher(publisher), name, version or None
 
 
-def resolve(coordinate: str, *, relay: str = "", npack_bin: str = "") -> dict[str, Any]:
+def resolve(coordinate: str, *, relay: str = "", npack_bin: str = "", trusted_publishers: list[str] | None = None) -> dict[str, Any]:
     """Resolve and verify a package's release metadata without installing it.
 
     Runs ``npack resolve`` (the same relay discovery, signature/revocation and
     hash verification remote install uses) and returns the parsed JSON, which
     includes ``publisher``, ``name``, ``version``, ``sha256``, candidate
     artifact URLs and a ``verification`` summary.
+
+    ``trusted_publishers`` (hex pubkeys) is passed through as repeatable
+    ``--trusted-publisher`` flags. npack treats an empty list as "trust
+    everyone" (see ``forks/npack/npack-cli/src/main.rs``), so omitting this
+    is permissive, not a safe default - callers should pass the host's real
+    trust list (e.g. ``nostrhost.native_ops.trusted_publisher_list()``).
     """
     binary = _npack_binary(npack_bin)
     args = ["resolve", coordinate]
     if relay:
         args += ["--relay", relay]
+    for publisher in trusted_publishers or []:
+        args += ["--trusted-publisher", publisher]
     result = _run(binary, args)
     if result.returncode != 0:
         raise PackageError(f"npack resolve failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -97,22 +105,37 @@ def resolve(coordinate: str, *, relay: str = "", npack_bin: str = "") -> dict[st
     return body
 
 
-def stage(coordinate: str, *, store: Path = NPK_STORE_DEFAULT, relay: str = "", npack_bin: str = "") -> dict[str, Any]:
+def stage(
+    coordinate: str,
+    *,
+    store: Path = NPK_STORE_DEFAULT,
+    relay: str = "",
+    npack_bin: str = "",
+    trusted_publishers: list[str] | None = None,
+) -> dict[str, Any]:
     """Stage a verified package into the isolated store and return its layout.
 
     Returns ``{publisher, name, version, artifact_sha256, store, payload_root,
     embedded_manifest}`` where ``payload_root`` is the directory whose files
     sit at host-relative paths (the input to the resource engine's
     ``payload.sync`` provider).
+
+    ``trusted_publishers`` is forwarded to the initial ``resolve()`` call
+    *and* to the ``npack install`` subprocess below - ``npack install
+    <coordinate>`` performs its own independent trust check internally, not
+    just the earlier resolve, so both need it (see :func:`resolve`).
     """
     binary = _npack_binary(npack_bin)
-    resolved = resolve(coordinate, relay=relay, npack_bin=binary)
+    resolved = resolve(coordinate, relay=relay, npack_bin=binary, trusted_publishers=trusted_publishers)
     publisher = resolved["publisher"].lower()
     name = resolved["name"]
     version = resolved["version"]
     artifact_sha256 = resolved["sha256"].lower()
 
-    install = _run(binary, ["install", coordinate], store=store)
+    install_args = ["install", coordinate]
+    for trusted_publisher in trusted_publishers or []:
+        install_args += ["--trusted-publisher", trusted_publisher]
+    install = _run(binary, install_args, store=store)
     if install.returncode != 0:
         raise PackageError(f"npack install failed: {install.stderr.strip() or install.stdout.strip()}")
 

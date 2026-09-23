@@ -1185,6 +1185,13 @@ def _trusted_publishers() -> str:
     return _operator_config().publisher_pubkey
 
 
+def trusted_publisher_list() -> list[str]:
+    """``_trusted_publishers()`` as a list of pubkeys, for callers that need
+    repeatable flags (e.g. npack's ``--trusted-publisher``) rather than the
+    comma-joined string the catalogue CLI's ``--publishers`` flag takes."""
+    return [publisher.strip() for publisher in _trusted_publishers().split(",") if publisher.strip()]
+
+
 def _catalog_cli(subcommand: list[str], stdin_data: bytes | None = None, extra_flags: list[str] | None = None) -> dict[str, Any]:
     """Run the native catalogue CLI and parse its JSON stdout.
 
