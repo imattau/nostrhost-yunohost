@@ -390,6 +390,12 @@ class WebResource(BaseModel):
     # the trusted identity header against a `multi-tenant-runtime` package's
     # `runtime_instance.socket_path_template` - see build_web_route().
     route_mode: Literal["static", "per-user-socket"] = "static"
+    # Static SPAs (Vite/webpack etc.) need client-side routes to fall back to
+    # index.html; defaults to true for file_root apps (see build_web_route) so
+    # a deep link survives a refresh. Set false for a genuinely static site
+    # that wants real 404s. None = unspecified (effective default true for
+    # file_root apps); explicit true without file_root is rejected.
+    spa_fallback: bool | None = None
 
     @validator("path")
     def path_starts_with_slash(cls, value: str) -> str:
@@ -1229,6 +1235,8 @@ def validate_package(package: PackageManifest) -> PackageManifest:
                 raise PackageError("web.route_mode 'per-user-socket' cannot declare a static web.upstream")
         elif not package.web.upstream and not package.web.file_root:
             raise PackageError("web resource needs upstream host:port or file_root")
+        if package.web.spa_fallback is True and not package.web.file_root:
+            raise PackageError("web.spa_fallback=true requires web.file_root (it only affects static file serving)")
         if package.web.upstream:
             host, separator, port = package.web.upstream.rpartition(":")
             if not separator or not host or not port.isdigit() or not 1 <= int(port) <= 65535:

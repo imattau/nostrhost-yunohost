@@ -822,8 +822,31 @@ def _reconciliation_tool(
     return None, {}
 
 
-def apply_reconciliation_plan(plan: dict[str, Any], *, backend: Any, approve: bool = False, repo: StateRepo | None = None) -> list[dict[str, Any]]:
-    """Apply only approved, registry-bounded reconciliation steps."""
+# Ordering for the max_risk gate below -- higher index = more dangerous.
+# Mirrors the levels _reconciliation_risk() assigns (low/medium/high).
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def apply_reconciliation_plan(
+    plan: dict[str, Any],
+    *,
+    backend: Any,
+    approve: bool = False,
+    repo: StateRepo | None = None,
+    max_risk: str = "medium",
+) -> list[dict[str, Any]]:
+    """Apply only approved, registry-bounded reconciliation steps.
+
+    ``max_risk`` (default ``"medium"``) enforces the risk level
+    ``reconciliation_plan()`` already computes per change: a change riskier
+    than the threshold is refused at execution time even when it is
+    ``automatic`` and tool-mapped. Without this, ``risk`` was metadata only
+    -- computed and reported, but never actually gating anything -- so a
+    future drift type mapped to an automatic tool at "high" risk would have
+    executed unattended. Today's tool mapping (service start/stop = low,
+    app removal = medium) never exceeds "medium", so this is a closed gap
+    for defense-in-depth, not a behaviour change for current traffic.
+    """
     if not approve:
         raise StateError("reconciliation plan not approved (pass approve=True)")
     if plan.get("schema") != RECONCILIATION_SCHEMA:
@@ -832,11 +855,17 @@ def apply_reconciliation_plan(plan: dict[str, Any], *, backend: Any, approve: bo
         raise StateError("reconciliation plan already applied")
     if repo is not None and repo.revision() != plan.get("revision"):
         raise StateError("reconciliation plan is stale; generate a new plan")
+    if max_risk not in _RISK_ORDER:
+        raise StateError(f"unknown max_risk: {max_risk!r} (expected one of {sorted(_RISK_ORDER)})")
+    risk_ceiling = _RISK_ORDER[max_risk]
     report: list[dict[str, Any]] = []
     for change in plan.get("changes", []):
         entry = {"path": change.get("path", ""), "status": "blocked", "detail": ""}
         try:
-            if not change.get("automatic") or not change.get("tool"):
+            risk = change.get("risk", "high")
+            if _RISK_ORDER.get(risk, _RISK_ORDER["high"]) > risk_ceiling:
+                entry["detail"] = f"risk {risk!r} exceeds max_risk {max_risk!r}"
+            elif not change.get("automatic") or not change.get("tool"):
                 entry["detail"] = change.get("detail", "manual intervention required")
             else:
                 from .nostr_operations import tool_spec

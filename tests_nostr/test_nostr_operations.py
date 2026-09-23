@@ -944,3 +944,40 @@ def test_get_operation_fetches_only_its_chain(monkeypatch):
     assert entry["state"] == "APPROVED"
     assert captured["calls"][0]["ids"] == (request["id"],)
     assert captured["calls"][1]["e_tags"] == (request["id"],)
+
+
+def test_reconcile_args_accept_optional_max_risk():
+    """StateReconcileArgs validates 'max_risk' as one of low/medium/high and
+    defaults it to 'medium' when omitted, so a bare {'plan': ...} request
+    keeps behaving the way it did before the risk gate existed."""
+    from yunohost.nostr_operations import StateReconcileArgs
+
+    assert StateReconcileArgs(plan={}).max_risk == "medium"
+    assert StateReconcileArgs(plan={}, max_risk="low").max_risk == "low"
+    with pytest.raises(Exception):
+        StateReconcileArgs(plan={}, max_risk="extreme")
+
+
+def test_run_reconcile_apply_forwards_max_risk(monkeypatch):
+    """_run_reconcile_apply must pass max_risk through to
+    apply_reconciliation_plan rather than silently dropping it, and must
+    keep rejecting truly unknown args."""
+    from yunohost.nostr_operations import OperationError, _run_reconcile_apply
+
+    captured: dict = {}
+
+    def fake_apply(plan, *, backend, approve, repo, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("yunohost.nostr_state.apply_reconciliation_plan", fake_apply)
+
+    _run_reconcile_apply({"plan": {}, "max_risk": "low"}, backend=None, repo=None)
+    assert captured == {"max_risk": "low"}
+
+    captured.clear()
+    _run_reconcile_apply({"plan": {}}, backend=None, repo=None)
+    assert captured == {}
+
+    with pytest.raises(OperationError, match="requires 'plan'"):
+        _run_reconcile_apply({"plan": {}, "bogus": 1}, backend=None, repo=None)

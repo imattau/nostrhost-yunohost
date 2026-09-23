@@ -376,6 +376,18 @@ def test_semantic_validation_rejects_unsafe_service_and_upstream():
         validate_package(PackageManifest.parse_obj(invalid))
 
 
+def test_semantic_validation_rejects_spa_fallback_without_file_root():
+    invalid = example()
+    invalid["web"] = {"path": "/demo/", "upstream": "127.0.0.1:8123", "spa_fallback": True}
+    with pytest.raises(PackageError, match="spa_fallback"):
+        validate_package(PackageManifest.parse_obj(invalid))
+    # Unset spa_fallback with a file_root is accepted (effective default true
+    # is applied at route-build time, not in the model).
+    valid = example()
+    valid["web"] = {"path": "/demo/", "file_root": "/var/www/demo"}
+    assert validate_package(PackageManifest.parse_obj(valid)).web.spa_fallback is None
+
+
 def test_semantic_validation_requires_explicit_database_backup_choice():
     invalid = example() | {"database": {"type": "postgresql"}, "backup": {"paths": ["/var/lib/example"], "database": False}}
     with pytest.raises(PackageError, match="backup.database"):

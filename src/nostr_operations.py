@@ -398,6 +398,10 @@ class RollbackApplyArgs(_Strict):
 
 class StateReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the approved reconciliation plan for the state layer")
+    max_risk: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description="refuse to execute any change riskier than this (see reconciliation_plan's per-change 'risk')",
+    )
 
 
 class StateStatusArgs(_Strict):
@@ -907,12 +911,16 @@ def _safe_rollback_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
 
 def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None) -> dict[str, Any]:
     """Execute an approved reconciliation plan through the shared chain."""
-    if set(args) != {"plan"} or not isinstance(args.get("plan"), dict):
-        raise OperationError("state.reconcile requires exactly one argument: 'plan'")
+    extra = set(args) - {"plan", "max_risk"}
+    if extra or not isinstance(args.get("plan"), dict):
+        raise OperationError("state.reconcile requires 'plan' and accepts an optional 'max_risk'")
     from .nostr_state import apply_reconciliation_plan
 
     plan = args["plan"]
-    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
+    kwargs: dict[str, Any] = {}
+    if "max_risk" in args:
+        kwargs["max_risk"] = args["max_risk"]
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo, **kwargs)
     return {"changes": report, "_ok": all(row["status"] == "executed" for row in report)}
 
 
@@ -927,11 +935,15 @@ def _run_reconcile_apply(args: dict[str, Any], *, backend: Any, repo: Any = None
 
 
 def _safe_reconcile_apply(plan: Any = None, **args: Any) -> dict[str, Any]:
-    if args:
-        raise OperationError(f"state.reconcile does not accept extra args: {sorted(args)}")
+    extra = set(args) - {"max_risk"}
+    if extra:
+        raise OperationError(f"state.reconcile does not accept extra args: {sorted(extra)}")
     from .nostr_operationsd import YnhExecutorBackend
 
-    return _run_reconcile_apply({"plan": plan}, backend=YnhExecutorBackend())
+    call_args: dict[str, Any] = {"plan": plan}
+    if "max_risk" in args:
+        call_args["max_risk"] = args["max_risk"]
+    return _run_reconcile_apply(call_args, backend=YnhExecutorBackend())
 
 
 # -- state read / plan / DR (ngit state repo, §7 / §15) --------------------- #

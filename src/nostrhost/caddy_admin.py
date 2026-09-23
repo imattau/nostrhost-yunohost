@@ -205,6 +205,37 @@ def _applogos_route_handle() -> dict[str, Any]:
     }
 
 
+def _spa_file_server_routes(root: str) -> list[dict[str, Any]]:
+    """Inner Caddy routes that serve real files from ``root`` and fall back to
+    ``/index.html`` for client-side routes.
+
+    Mirrors what the Caddyfile ``root * <root>; try_files {path} {path}/
+    /index.html; file_server`` block adapts to: resolve the file
+    (``{http.matchers.file.relative}``) or fall back to ``/index.html``, then
+    serve from ``root``. An unconditional ``rewrite /index.html`` would return
+    the HTML shell for asset requests too (the browser then fails to load the
+    SPA's JS/CSS and renders a blank page).
+    """
+    return [
+        {"handle": [{"handler": "vars", "root": root}]},
+        {
+            "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
+            "match": [
+                {
+                    "file": {
+                        "try_files": [
+                            "{http.request.uri.path}",
+                            "{http.request.uri.path}/",
+                            "/index.html",
+                        ]
+                    }
+                }
+            ],
+        },
+        {"handle": [{"handler": "file_server"}]},
+    ]
+
+
 def _spa_route_handle(
     root: str,
     prefix: str,
@@ -232,22 +263,7 @@ def _spa_route_handle(
                     "handler": "subroute",
                     "routes": [
                         {"handle": [{"handler": "rewrite", "strip_path_prefix": prefix}]},
-                        {"handle": [{"handler": "vars", "root": root}]},
-                        {
-                            "handle": [{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}],
-                            "match": [
-                                {
-                                    "file": {
-                                        "try_files": [
-                                            "{http.request.uri.path}",
-                                            "{http.request.uri.path}/",
-                                            "/index.html",
-                                        ]
-                                    }
-                                }
-                            ],
-                        },
-                        {"handle": [{"handler": "file_server"}]},
+                        *_spa_file_server_routes(root),
                     ],
                 }
             ],
@@ -439,7 +455,15 @@ def build_web_route(desired: dict[str, Any]) -> dict[str, Any]:
 
     file_root = desired.get("file_root")
     if file_root:
-        handle.append({"handler": "file_server", "root": file_root})
+        # A static app's build output is almost always a client-routed SPA
+        # (Vite/webpack etc.), so serve real files and fall back to
+        # /index.html for client-side routes by default (spa_fallback unset or
+        # true). `spa_fallback = false` opts out to a plain file_server for
+        # genuinely static sites.
+        if desired.get("spa_fallback", True) is not False:
+            handle.append({"handler": "subroute", "routes": _spa_file_server_routes(file_root)})
+        else:
+            handle.append({"handler": "file_server", "root": file_root})
     else:
         upstream = desired.get("upstream")
         if not isinstance(upstream, str) or not upstream:

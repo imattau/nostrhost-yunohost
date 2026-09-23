@@ -218,6 +218,128 @@ def test_reconciliation_apply_requires_approval_and_is_bounded(tmp_path: Path):
     assert backend.calls == [("service.control", {"name": "dnsmasq", "action": "start"})]
 
 
+def test_reconciliation_apply_default_max_risk_allows_medium(tmp_path: Path):
+    """An app present live but not in the committed desired state maps to
+    app.remove, classified "medium" risk (_reconciliation_risk). The default
+    max_risk="medium" must still let it execute -- this is the existing
+    behaviour apply_reconciliation_plan had before the risk gate was added,
+    and the gate must not regress it."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+
+    current = export_state(FakeBackend())
+    current["apps"]["demo.toml"] = {"id": "demo", "status": "installed"}
+    plan = repo.reconciliation_plan(current)
+    assert plan["changes"] == [
+        {
+            "path": "apps/demo.toml",
+            "status": "A",
+            "action": "remove",
+            "risk": "medium",
+            "tool": "app.remove",
+            "args": {"app": "demo", "purge": False},
+            "automatic": True,
+        }
+    ]
+    backend = type("Backend", (), {"calls": [], "execute": lambda self, tool, args: self.calls.append((tool, args))})()
+
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
+
+    assert report[0]["status"] == "executed"
+    assert backend.calls == [("app.remove", {"app": "demo", "purge": False})]
+
+
+def test_reconciliation_apply_blocks_change_above_max_risk(tmp_path: Path):
+    """The risk field reconciliation_plan() computes must actually gate
+    execution, not just describe it. Construct a plan with a change that is
+    automatic + tool-mapped (so it would otherwise execute) but flagged
+    "high" risk, and confirm apply_reconciliation_plan refuses it under the
+    default max_risk="medium" -- closing the metadata-vs-enforcement gap."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+    plan = repo.reconciliation_plan(export_state(FakeBackend()))
+    plan["changes"] = [
+        {
+            "path": "services/dnsmasq.toml",
+            "status": "M",
+            "action": "update",
+            "risk": "high",
+            "tool": "service.control",
+            "args": {"name": "dnsmasq", "action": "start"},
+            "automatic": True,
+        }
+    ]
+    backend = type("Backend", (), {"calls": [], "execute": lambda self, tool, args: self.calls.append((tool, args))})()
+
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo)
+
+    assert report == [
+        {
+            "path": "services/dnsmasq.toml",
+            "status": "blocked",
+            "detail": "risk 'high' exceeds max_risk 'medium'",
+        }
+    ]
+    assert backend.calls == []
+
+
+def test_reconciliation_apply_max_risk_is_configurable(tmp_path: Path):
+    """A caller may widen (max_risk="high") or narrow (max_risk="low") the
+    gate explicitly; the default stays "medium" for existing callers."""
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+    plan = repo.reconciliation_plan(export_state(FakeBackend()))
+    plan["changes"] = [
+        {
+            "path": "services/dnsmasq.toml",
+            "status": "M",
+            "action": "update",
+            "risk": "high",
+            "tool": "service.control",
+            "args": {"name": "dnsmasq", "action": "start"},
+            "automatic": True,
+        }
+    ]
+    backend = type("Backend", (), {"calls": [], "execute": lambda self, tool, args: self.calls.append((tool, args))})()
+
+    report = apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo, max_risk="high")
+
+    assert report[0]["status"] == "executed"
+    assert backend.calls == [("service.control", {"name": "dnsmasq", "action": "start"})]
+
+    # A second plan, gated even tighter than the default.
+    plan2 = repo.reconciliation_plan(export_state(FakeBackend()))
+    plan2["changes"] = [
+        {
+            "path": "apps/demo.toml",
+            "status": "A",
+            "action": "remove",
+            "risk": "medium",
+            "tool": "app.remove",
+            "args": {"app": "demo", "purge": False},
+            "automatic": True,
+        }
+    ]
+    report2 = apply_reconciliation_plan(plan2, backend=backend, approve=True, repo=repo, max_risk="low")
+    assert report2 == [
+        {
+            "path": "apps/demo.toml",
+            "status": "blocked",
+            "detail": "risk 'medium' exceeds max_risk 'low'",
+        }
+    ]
+
+
+def test_reconciliation_apply_rejects_unknown_max_risk(tmp_path: Path):
+    repo = StateRepo(tmp_path / "state", "a" * 64)
+    repo.commit(export_state(FakeBackend()), known_good=True, health="passed")
+    plan = repo.reconciliation_plan(export_state(FakeBackend()))
+    backend = type("Backend", (), {"execute": lambda self, tool, args: None})()
+
+    with pytest.raises(StateError, match="unknown max_risk"):
+        apply_reconciliation_plan(plan, backend=backend, approve=True, repo=repo, max_risk="critical")
+
+
 def test_executor_records_auto_pre_post_snapshots(tmp_path: Path):
     """The engine's automatic snapshot hook: a full chain produces a pre and
     a post commit, the post one linked to the request and known-good."""

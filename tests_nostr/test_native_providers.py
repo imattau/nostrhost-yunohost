@@ -481,7 +481,25 @@ def test_build_web_route_forward_auth_and_file_server():
     # forward_auth runs first (original URI for permission matching), then the
     # prefix strip, then the static backend.
     assert handlers[1] == {"handler": "rewrite", "strip_path_prefix": "/demo"}
-    assert handlers[2] == {"handler": "file_server", "root": "/var/www/demo"}
+    # spa_fallback defaults true: file_root apps serve real files and fall
+    # back to /index.html for client-side routes (deep links survive refresh).
+    backend = handlers[2]
+    assert backend["handler"] == "subroute"
+    routes = backend["routes"]
+    assert routes[0]["handle"] == [{"handler": "vars", "root": "/var/www/demo"}]
+    try_files = routes[1]["match"][0]["file"]["try_files"]
+    assert try_files == ["{http.request.uri.path}", "{http.request.uri.path}/", "/index.html"]
+    assert routes[2]["handle"] == [{"handler": "file_server"}]
+
+
+def test_build_web_route_file_server_without_spa_fallback():
+    from nostrhost.caddy_admin import build_web_route
+
+    route = build_web_route({"app": "demo", "domain": "example.test", "path": "/demo/", "file_root": "/var/www/demo", "auth": "none", "spa_fallback": False})
+    assert route["handle"] == [
+        {"handler": "rewrite", "strip_path_prefix": "/demo"},
+        {"handler": "file_server", "root": "/var/www/demo"},
+    ]
 
 
 def test_build_web_route_rejects_invalid_upstream():
