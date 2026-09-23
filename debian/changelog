@@ -1,3 +1,29 @@
+yunohost (12.1.41.111) stable; urgency=low
+
+  * package_engine: install-time overrides (`install_inputs`) generalized
+    beyond nsite so any native package's manifest can declare operator-
+    supplied install-time inputs, not just nsite drafts.
+  * npk: `app install-npk` can install from a local `.npk` file with no
+    relay round-trip, and is now trust-gated against nostrhost's projected
+    trust list before install; `package_authoring` signs the source
+    repo/commit into npk releases, and the CLI surfaces that release
+    trust/attestation at install-npk time. `app upgrade-npk` lands (CLI,
+    API, MCP) for the upgrade path.
+  * catalogue cleanup (Phase 3a/3b): trust/attestation is now surfaced at
+    install-npk time; the legacy git-repository catalogue distribution and
+    install path is retired now that npk is the sole distribution
+    mechanism.
+  * web: `file_root` web resources default to serving real files with an
+    `/index.html` fallback for client-side routes (`spa_fallback`, default
+    true, so a static SPA's deep link survives a refresh); `spa_fallback =
+    false` opts a genuinely static site out to a plain file_server.
+  * state.reconcile: `apply_reconciliation_plan` gains a `max_risk` gate
+    (default "medium") so the risk level `reconciliation_plan()` already
+    computes per change actually blocks execution above the threshold,
+    instead of being metadata only.
+
+ -- NostrHost <nostrhost@example.com>  Wed, 23 Sep 2026 09:45:00 +0000
+
 yunohost (12.1.41.110) stable; urgency=low
 
   * operations read-path performance: `list_operations` and `get_operation`
