@@ -1,3 +1,20 @@
+yunohost (12.1.41.114) stable; urgency=low
+
+  * tools_upgrade: serialize the system dist-upgrade against app
+    install/upgrade/remove (which also invoke apt via
+    ynh_install_app_dependencies) with a new flock-backed lock, so the
+    two can no longer race for dpkg. Previously nothing prevented a
+    concurrent app operation's apt-get and the system upgrade's
+    apt-get from running at once; a service restart triggered by one
+    could kill the other's still-running postinst mid-transaction,
+    leaving a package half-configured for a later, unrelated upgrade
+    attempt to trip over as "dpkg is broken".
+  * tools_upgrade: a failed dist-upgrade (non-zero apt-get exit) now
+    raises instead of being swallowed into a plain warning while the
+    operation still reported "System upgraded" / SUCCESS.
+
+ -- NostrHost <nostrhost@example.com>  Wed, 23 Sep 2026 21:20:56 +0000
+
 yunohost (12.1.41.113) stable; urgency=low
 
   * install-npk / upgrade-npk: pass the empty catalogue positionally to
