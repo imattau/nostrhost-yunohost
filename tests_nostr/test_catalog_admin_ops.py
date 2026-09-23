@@ -75,8 +75,6 @@ def cli_fake(monkeypatch, boot):
             return [{"declaration": {"AppID": "nostrhost-test"}, "attestations": [], "verified": False, "accepted": True}]
         if sub[0] == "attest-release":
             return {"declaration": {"AppID": "nostrhost-test"}, "attestations": [], "verified": False, "accepted": True}
-        if sub[0] == "reverify":
-            return {"app_id": "nostrhost-test", "ok": True}
         raise AssertionError(f"unexpected subcommand {sub}")
 
     monkeypatch.setattr(no, "_catalog_cli", fake)
@@ -112,47 +110,6 @@ def test_candidates_excludes_already_attested(boot, cli_fake, app_list_fake, mon
     )
     result = no._safe_catalog_candidates()
     assert result["candidates"] == []
-
-
-# --------------------------------------------------------------------------- #
-# declare
-
-def test_declare_signs_new_declaration_from_manifest(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    package = {"app": {"id": "my-native-app", "version": "0.2.0"}}
-    result = no._safe_catalog_declare(package=package, repository="https://git.example.com/my-native-app.git")
-    assert result["app_id"] == "my-native-app"
-
-    pub_call = next(c for c in cli_fake if "publish" in c[0])
-    event = json.loads(pub_call[1])
-    assert event["pubkey"] == boot["publisher_pubkey"]
-    assert event["kind"] == 32267
-    tags = dict((t[0], t[1]) for t in event["tags"])
-    assert tags["d"] == "my-native-app"
-    assert tags["platform"] == "linux"
-    assert tags["repository"] == "https://git.example.com/my-native-app.git"
-    assert tags["version"] == "0.2.0"
-    assert tags["commit"] == tags["manifest"].split(":", 1)[1]
-    assert tags["manifest"] == tags["content"]
-
-    from nostr_sdk import Event
-
-    assert Event.from_json(json.dumps(event)).verify()
-
-
-def test_declare_requires_repository(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    with pytest.raises(OperationError, match="repository"):
-        no._safe_catalog_declare(package={"app": {"id": "x", "version": "1"}}, repository="")
-
-
-def test_declare_rejects_invalid_manifest(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    with pytest.raises(OperationError, match="invalid native package"):
-        no._safe_catalog_declare(package={"nope": True}, repository="https://git.example.com/x.git")
 
 
 # --------------------------------------------------------------------------- #
@@ -257,22 +214,6 @@ def test_attest_release_passes_release_and_policy_flags_before_subcommand(boot, 
         "--min-attestations", "2",
         "--required-checks", "a,b",
     ]
-
-
-def test_reverify_passes_app_id_flag(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    result = no._safe_catalog_reverify(app_id="nostrhost-test")
-    assert result["ok"] is True
-    sub, _, extra_flags = next(c for c in cli_fake if c[0] == ["reverify"])
-    assert extra_flags == ["--app-id", "nostrhost-test"]
-
-
-def test_reverify_requires_app_id(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    with pytest.raises(OperationError):
-        no._safe_catalog_reverify(app_id="")
 
 
 # --------------------------------------------------------------------------- #

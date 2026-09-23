@@ -56,11 +56,7 @@ from .api_models import (
     CapabilityRevokeBody,
     CatalogAnnounceBody,
     CatalogAttestBody,
-    CatalogDeclareBody,
     CatalogProfileSetBody,
-    CatalogPublishBody,
-    CatalogReverifyBody,
-    CatalogVerifyBody,
     ConnectivityApplyBody,
     ConnectivityCheckBody,
     ConnectivityPlanBody,
@@ -103,7 +99,6 @@ from .api_models import (
     NotifySignersPairStartBody,
     NotifySignersRegisterBody,
     OperationDecisionBody,
-    PackageFetchManifestBody,
     PackagePlanBody,
     PackageReconcileBody,
     RollbackApplyBody,
@@ -143,7 +138,7 @@ from .cli import (
     _run_lifecycle,
 )
 from .core import NostrHostError
-from .app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
+from .app_management import app_catalog_logo_urls, attach_app_logos, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_change_url, plan_native_settings_update
 from .package_engine import PackageError
 from .mcp_endpoint import configure_route, export_ca_bundle, read_endpoint_config
 from .accounts import user_is_admin as _native_user_is_admin
@@ -1653,29 +1648,6 @@ def build_app(
                     entry["logo"] = logo
         return out
 
-    @app.post("/package/catalog/publish")
-    def catalog_publish() -> Any:
-        body = _body(CatalogPublishBody)
-        # H5: catalogue writes go through the signed operation chain (policy /
-        # approval / audit), not a direct handler call.
-        return _run_lifecycle(
-            "catalog.publish", {"app_id": body.get("app_id", ""), "relays": body.get("relays", "")}, state=_State()
-        )
-
-    @app.post("/package/catalog/declare")
-    def catalog_declare() -> Any:
-        body = _body(CatalogDeclareBody)
-        return _run_lifecycle(
-            "catalog.declare",
-            {"package": body.get("package"), "repository": body.get("repository", ""), "relays": body.get("relays", "")},
-            state=_State(),
-        )
-
-    @app.post("/package/catalog/verify")
-    def catalog_verify() -> Any:
-        body = _body(CatalogVerifyBody)
-        return _run_tool("catalog.verify", {"event_or_naddr": body.get("event_or_naddr", "")})
-
     @app.post("/package/catalog/attest")
     def catalog_attest() -> Any:
         body = _body(CatalogAttestBody)
@@ -1731,11 +1703,6 @@ def build_app(
             },
         )
 
-    @app.post("/package/catalog/reverify")
-    def catalog_reverify() -> Any:
-        body = _body(CatalogReverifyBody)
-        return _run_tool("catalog.reverify", {"app_id": body.get("app_id", "")})
-
     @app.post("/package/catalog/profile")
     def catalog_profile_set() -> Any:
         body = _body(CatalogProfileSetBody)
@@ -1784,36 +1751,6 @@ def build_app(
             return native_app_settings(app_id)
         except PackageError as exc:
             raise ApiError(404 if "not installed" in str(exc) else 400, "app_settings_unavailable", str(exc)) from exc
-
-    def apply_catalogue_lifecycle(app_id: str, action: str, body: dict[str, Any]) -> Any:
-        if set(body) != {"plan_sha256"}:
-            raise ApiError(400, "invalid_request", "lifecycle apply requires plan_sha256")
-        try:
-            envelope = catalogue_lifecycle_plan(app_id, action)
-        except PackageError as exc:
-            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
-        if body.get("plan_sha256") != envelope["plan_sha256"]:
-            raise ApiError(409, "plan_changed", "The app or catalogue changed after this plan was reviewed. Review the refreshed plan before applying.")
-        result = _run_lifecycle("package.reconcile", {"plan": envelope}, state=_State())
-        if not result.get("ok"):
-            return JSONResponse(
-                {"error": result.get("reason") or result.get("state") or f"{action} was rejected", "code": "operation_rejected", "operation": result},
-                status_code=409,
-            )
-        return {"operation": result, "action": action, "package": envelope.get("package")}
-
-    @app.post("/package/app/{app_id}/install/plan")
-    def app_install_plan(app_id: str) -> Any:
-        if _json_body():
-            raise ApiError(400, "invalid_request", "install plan does not accept a request body")
-        try:
-            return catalogue_lifecycle_plan(app_id, "install")
-        except PackageError as exc:
-            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
-
-    @app.post("/package/app/{app_id}/install/apply")
-    def app_install_apply(app_id: str) -> Any:
-        return apply_catalogue_lifecycle(app_id, "install", _json_body())
 
     @app.post("/package/npk/install/plan")
     def npk_install_plan() -> Any:
@@ -1945,19 +1882,6 @@ def build_app(
                 status_code=409,
             )
         return {"operation": result, "action": "upgrade", "package": envelope.get("package")}
-
-    @app.post("/package/app/{app_id}/upgrade/plan")
-    def app_upgrade_plan(app_id: str) -> Any:
-        if _json_body():
-            raise ApiError(400, "invalid_request", "upgrade plan does not accept a request body")
-        try:
-            return catalogue_lifecycle_plan(app_id, "upgrade")
-        except PackageError as exc:
-            raise ApiError(400, "invalid_app_lifecycle", str(exc)) from exc
-
-    @app.post("/package/app/{app_id}/upgrade/apply")
-    def app_upgrade_apply(app_id: str) -> Any:
-        return apply_catalogue_lifecycle(app_id, "upgrade", _json_body())
 
     @app.post("/package/app/{app_id}/remove/plan")
     def app_remove_plan(app_id: str) -> Any:
@@ -2367,18 +2291,6 @@ def build_app(
             },
         )
 
-    @app.post("/package/authoring/fetch_manifest")
-    def package_fetch_manifest() -> Any:
-        body = _body(PackageFetchManifestBody)
-        return _run_tool(
-            "package.fetch_manifest",
-            {
-                "repository": body.get("repository", ""),
-                "revision": body.get("revision", ""),
-                "package_path": body.get("package_path", ""),
-            },
-        )
-
     @app.post("/package/reconcile")
     def package_reconcile() -> Any:
         body = _body(PackageReconcileBody)
@@ -2726,11 +2638,7 @@ def _REQUEST_BODY_MODELS() -> dict[str, type[BaseModel]]:
         "/package/agent/contribution/settings": AgentContributionSettingsSetBody,
         "/package/agent/contribution/submit": AgentContributionSubmitBody,
         "/package/agent/contribution/share": AgentContributionShareBody,
-        "/package/catalog/publish": CatalogPublishBody,
-        "/package/catalog/declare": CatalogDeclareBody,
-        "/package/catalog/verify": CatalogVerifyBody,
         "/package/catalog/attest": CatalogAttestBody,
-        "/package/catalog/reverify": CatalogReverifyBody,
         "/package/catalog/profile": CatalogProfileSetBody,
         "/package/catalog/announce": CatalogAnnounceBody,
         "/package/app/remove": AppRemoveBody,
@@ -2756,7 +2664,6 @@ def _REQUEST_BODY_MODELS() -> dict[str, type[BaseModel]]:
         "/package/domain/primary/apply": DomainPrimaryApplyBody,
         "/package/service/configs/reconcile": ServiceConfigsReconcileBody,
         "/package/plan": PackagePlanBody,
-        "/package/authoring/fetch_manifest": PackageFetchManifestBody,
         "/package/reconcile": PackageReconcileBody,
         "/package/identity/link": IdentityLinkBody,
         "/package/identity/revoke": IdentityRevokeBody,

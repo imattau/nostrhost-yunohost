@@ -372,14 +372,6 @@ class PackagePlanArgs(_Strict):
     path: str | None = Field(default=None, description="install-time override for [web].path")
 
 
-class PackageFetchManifestArgs(_Strict):
-    repository: str = Field(description="https URL of the git repository holding the package manifest")
-    revision: str = Field(
-        default="", description="git revision (branch/tag/commit); defaults to the repository's default branch"
-    )
-    package_path: str = Field(default="", description="subdirectory of the repository containing the package manifest")
-
-
 class PackageReconcileArgs(_Strict):
     plan: dict[str, Any] = Field(description="the signed native package plan envelope (from package.plan)")
 
@@ -575,17 +567,6 @@ def _safe_package_plan(
         return package_plan_envelope(package, catalogue=catalogue)
     except (TypeError, ValueError) as exc:
         raise OperationError(f"invalid native package: {exc}") from exc
-
-
-def _safe_package_fetch_manifest(repository: str = "", revision: str = "", package_path: str = "", **args: Any) -> dict[str, Any]:
-    if args or not repository:
-        raise OperationError("package.fetch_manifest requires a repository URL")
-    from nostrhost.package_authoring import fetch_manifest_from_repository
-
-    try:
-        return fetch_manifest_from_repository(repository, revision=revision, package_path=package_path)
-    except ValueError as exc:
-        raise OperationError(str(exc)) from exc
 
 
 def _safe_package_install_npk(coordinate: str = "", relay: str = "", store: str = "", values: dict[str, Any] | None = None, domain: str | None = None, path: str | None = None, **args: Any) -> dict[str, Any]:
@@ -1208,11 +1189,6 @@ TOOLS: dict[str, ToolSpec] = {
         name="package.plan", handler=_safe_package_plan, scope=SCOPE_APPS_READ,
         require_approval=False, description="validate and plan a native package",
         input_model=PackagePlanArgs,
-    ),
-    "package.fetch_manifest": ToolSpec(
-        name="package.fetch_manifest", handler=_safe_package_fetch_manifest, scope=SCOPE_APPS_READ,
-        require_approval=False, description="shallow-clone a package.toml manifest from its repository",
-        input_model=PackageFetchManifestArgs,
     ),
     "package.reconcile": ToolSpec(
         name="package.reconcile", handler=_safe_package_reconcile, scope=SCOPE_APPS_WRITE,

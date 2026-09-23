@@ -87,16 +87,12 @@ def test_registry_has_the_safe_tools():
         "catalog.announcements",
         "catalog.attest",
         "catalog.candidates",
-        "catalog.declare",
         "catalog.get",
         "catalog.history",
         "catalog.list",
         "catalog.profile.get",
         "catalog.profile.set",
-        "catalog.publish",
-        "catalog.reverify",
         "catalog.trust",
-        "catalog.verify",
         "credential.list",
         "credential.remove",
         "credential.set",
@@ -163,7 +159,6 @@ def test_registry_has_the_safe_tools():
         "nsite.snapshot",
         "nsite.unregister",
         "nsite.validate_manifest",
-        "package.fetch_manifest",
         "package.install",
         "package.plan",
         "package.reconcile",
@@ -264,8 +259,6 @@ def test_registry_has_the_safe_tools():
     assert tool_spec("user.group.delete").scope == "users.delete"
     assert tool_spec("user.permission.list").require_approval is False
     assert tool_spec("user.permission.info").scope == "users.read"
-    assert tool_spec("catalog.verify").scope == "catalog.verify"
-    assert tool_spec("catalog.verify").require_approval is False
     assert tool_spec("audit.list").scope == "audit.read"
     assert tool_spec("audit.get").scope == "audit.read"
     assert tool_spec("system.reboot").scope == "system.power"
@@ -281,7 +274,6 @@ def test_registry_has_the_safe_tools():
         assert spec.handler is not None
         if name not in (
             "package.plan",
-            "package.fetch_manifest",
             "package.install",
             "package.upgrade_npk",
             "domain.list",
@@ -336,7 +328,6 @@ def test_registry_has_the_safe_tools():
             "catalog.candidates",
             "catalog.history",
             "catalog.profile.get",
-            "catalog.reverify",
             "catalog.trust",
             "updates.check",
             "updates.refresh",
@@ -350,7 +341,6 @@ def test_registry_has_the_safe_tools():
             "user.group.list",
             "user.permission.list",
             "user.permission.info",
-            "catalog.verify",
             "settings.list",
             "settings.get",
         ):
@@ -404,9 +394,9 @@ def test_every_write_tool_carries_an_input_model():
 
 
 def test_package_authoring_read_tools_expose_input_schemas():
-    """The package authoring/planning reads must advertise their real
-    arguments so an MCP client can send the manifest/repository at all
-    (both were _EmptyArgs, which made native install unreachable over MCP)."""
+    """The package planning read must advertise its real arguments so an
+    MCP client can send the manifest at all (was _EmptyArgs, which made
+    native install unreachable over MCP)."""
     from yunohost.nostr_operations import operation_catalog
 
     catalog = {entry["name"]: entry for entry in operation_catalog()["operations"]}
@@ -416,11 +406,6 @@ def test_package_authoring_read_tools_expose_input_schemas():
     assert plan["properties"]["package"]["additionalProperties"] is True
     assert set(plan["properties"]) == {"package", "catalogue", "domain", "path"}
 
-    fetch = catalog["package.fetch_manifest"]["input_schema"]
-    assert fetch["required"] == ["repository"]
-    assert fetch["additionalProperties"] is False
-    assert set(fetch["properties"]) == {"repository", "revision", "package_path"}
-
 
 def test_package_plan_args_validation_and_unknown_arg_rejection():
     spec = tool_spec("package.plan")
@@ -428,11 +413,6 @@ def test_package_plan_args_validation_and_unknown_arg_rejection():
     assert validated["domain"] == "example.org"
     with pytest.raises(OperationError, match="invalid arguments"):
         spec.validate_args({"package": {"app": {"id": "x", "version": "0"}}, "bogus": 1})
-
-    fetch = tool_spec("package.fetch_manifest")
-    assert fetch.validate_args({"repository": "https://github.com/example/app"})["repository"] == "https://github.com/example/app"
-    with pytest.raises(OperationError, match="invalid arguments"):
-        fetch.validate_args({"repository": "https://github.com/example/app", "unexpected": True})
 
 
 def test_service_status_accepts_the_planner_name_argument(monkeypatch):

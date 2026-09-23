@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from nostrhost.app_management import app_catalog_logo_urls, attach_app_logos, catalogue_lifecycle_plan, carry_forward_compatible_settings, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
+from nostrhost.app_management import app_catalog_logo_urls, attach_app_logos, carry_forward_compatible_settings, merge_catalogue_and_installed, native_app_removal_plan, native_app_settings, plan_native_settings_update
 from nostrhost.package_engine import PackageError, validate_plan_envelope
 
 
@@ -188,27 +188,6 @@ def test_compatible_settings_survive_upgrade_and_invalid_choices_reset_to_new_de
     }
     merged = carry_forward_compatible_settings(installed, candidate)
     assert merged["settings"]["values"] == {"mode": "safe", "enabled": True, "old": 1}
-
-
-def test_catalogue_upgrade_plan_verifies_source_and_preserves_compatible_settings(monkeypatch):
-    installed = _manifest()
-    candidate = {
-        "app": {"id": "example", "version": "1.3.0"},
-        "settings": {"fields": {"mode": {"type": "enum", "choices": ["safe", "fast"], "default": "safe"}}},
-    }
-    from nostrhost import cli, native_providers
-
-    monkeypatch.setattr(native_providers, "installed_package_manifest", lambda app_id, state_dir=None: installed)
-    monkeypatch.setattr(cli, "_coordinate_for", lambda app_id: {"app_id": app_id, "version": "1.3.0", "manifest_sha256": "unused"})
-    monkeypatch.setattr(cli, "_load_package_data", lambda source, coordinate: candidate)
-    verified = []
-    monkeypatch.setattr(cli, "_verify_package", lambda package, coordinate: verified.append((package, coordinate)))
-
-    plan = catalogue_lifecycle_plan("example", "upgrade")
-    assert verified and verified[0][0] is candidate
-    assert plan["package"] == {"id": "example", "version": "1.3.0"}
-    settings_op = next(row for row in plan["operations"] if row["name"] == "settings.ensure")
-    assert settings_op["args"]["values"]["mode"] == "safe"
 
 
 def test_native_removal_plan_uses_only_recorded_manifest(monkeypatch):

@@ -66,7 +66,6 @@ from yunohost.nostr_operations import (
     SCOPE_USERS_READ,
     SCOPE_USERS_WRITE,
     SCOPE_CATALOG_READ,
-    SCOPE_CATALOG_VERIFY,
     SCOPE_CATALOG_PUBLISH,
     SCOPE_DOMAINS_READ,
     SCOPE_DOMAINS_WRITE,
@@ -285,23 +284,6 @@ class CatalogGetArgs(_Strict):
     app_id: str = Field(..., description="the app id to resolve from the trusted projection")
 
 
-class CatalogPublishArgs(_Strict):
-    app_id: str = Field(..., description="the app id to re-declare and publish under the node's publisher key")
-    relays: str = Field(
-        default="",
-        description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
-    )
-
-
-class CatalogDeclareArgs(_Strict):
-    package: dict[str, Any] = Field(..., description="a native package manifest, the same object sent to package.plan")
-    repository: str = Field(..., description="a URL where this exact manifest content is published, for provenance")
-    relays: str = Field(
-        default="",
-        description="comma-separated relay ws:// or wss:// URLs to publish the declaration to",
-    )
-
-
 class CatalogCandidatesArgs(_Strict):
     pass
 
@@ -328,10 +310,6 @@ class CatalogTrustArgs(_Strict):
     min_attestations: int = Field(default=0, ge=0, description="minimum acceptable attestations to count a revision verified (0 = default of 1)")
     required_checks: list[str] = Field(default_factory=list, description="required CI check names; empty means any overall pass result is acceptable")
     trusted_verifiers: list[str] = Field(default_factory=list, description="trusted attestation verifier keys; empty means trust any verifier")
-
-
-class CatalogReverifyArgs(_Strict):
-    app_id: str = Field(..., description="the app id to independently re-check against its declared repository and commit")
 
 
 class CatalogProfileGetArgs(_Strict):
@@ -527,10 +505,6 @@ class UserPermissionUpdateArgs(_Strict):
     label: str | None = None
     show_tile: bool | None = None
     protected: bool | None = None
-
-
-class CatalogVerifyArgs(_Strict):
-    event_or_naddr: str = Field(..., description="a JSON Nostr declaration event to verify (naddr input is not yet supported)")
 
 
 class AuditListArgs(_Strict):
@@ -1231,139 +1205,10 @@ def _safe_catalog_get(app_id: str = "", **extra: Any) -> dict[str, Any]:
     return _catalog_cli(["get", app_id])
 
 
-def _safe_catalog_publish(app_id: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
-    """Re-declare a trusted app under the node's own catalogue publisher key.
-
-    The declaration is built from the local trusted projection's package
-    coordinate, signed with the node's publisher key (operator.toml), pushed
-    to the configured relays, and ingested back into the local projection so
-    the change is visible immediately without waiting for a sync round-trip.
-    """
-    if extra:
-        raise OperationError(f"catalog.publish does not accept extra args: {sorted(extra)}")
-    if not app_id:
-        raise OperationError("catalog.publish requires an app_id")
-
-    from yunohost.nostr_catalog_provider import native_catalog_coordinate
-    from yunohost.nostr_identity import _operator_config, _sign_event
-
-    coordinate = native_catalog_coordinate(app_id)
-    if not coordinate:
-        raise OperationError(f"app {app_id!r} is not in the trusted native catalogue projection")
-    manifest = coordinate.get("manifest_sha256") or ""
-    content = coordinate.get("content_sha256") or ""
-    commit = coordinate.get("revision") or ""
-    for label, value in (("manifest", manifest), ("content", content), ("commit", commit)):
-        if len(value) < 40:
-            raise OperationError(f"catalogue coordinate for {app_id!r} lacks a valid {label} hash")
-
-    tags = [
-        ["d", coordinate["app_id"]],
-        ["platform", "yunohost"],
-        ["repository", coordinate["repository"]],
-        ["version", coordinate.get("version") or "0"],
-        ["commit", commit],
-        ["manifest", f"sha256:{manifest}"],
-        ["content", f"sha256:{content}"],
-    ]
-    package_path = coordinate.get("package_path")
-    if package_path:
-        tags.append(["package", package_path])
-    archs = coordinate.get("architectures") or []
-    if archs:
-        tags.append(["category", "app"])
-    content_json = json.dumps({"name": coordinate.get("version") or app_id, "architectures": archs}, separators=(",", ":"))
-
-    cfg = _operator_config()
-    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
-
-    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
-    ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
-    return {
-        "app_id": app_id,
-        "publisher_pubkey": cfg.publisher_pubkey,
-        "event_id": event["id"],
-        "published": result,
-        "ingested": ingest,
-    }
-
-
-def _safe_catalog_declare(package: dict[str, Any] | None = None, repository: str = "", relays: str = "", **extra: Any) -> dict[str, Any]:
-    """Declare a brand-new app in the catalogue from an authored native
-    package manifest - the missing link between the package-authoring
-    screen's "review plan" and actually getting the package installable by
-    anyone else.
-
-    Unlike catalog.publish (which re-declares an *existing* trusted
-    catalogue entry), this builds a fresh kind-32267 declaration from a
-    manifest that has never been declared before. It reuses package.plan's
-    own validation and its exact manifest_sha256 (package_plan_envelope's
-    canonical-JSON hash) as the authoritative provenance hash, so a
-    declaration can never drift from what package.plan would compute for
-    the same manifest.
-
-    This does not (yet) independently re-clone `repository` to confirm the
-    manifest actually lives there the way catalog.reverify does for
-    YunoHost-style git packages - the Go catalogue library's repository
-    verification assumes a manifest.toml layout, not this project's native
-    JSON package schema. `repository` is provenance the admin asserts, not
-    yet independently checked; commit/manifest/content hashes are all the
-    manifest's own content hash, since a native package has no separate
-    build artifact distinct from its manifest.
-    """
-    if extra:
-        raise OperationError(f"catalog.declare does not accept extra args: {sorted(extra)}")
-    if not isinstance(package, dict):
-        raise OperationError("catalog.declare requires a package object")
-    if not repository:
-        raise OperationError("catalog.declare requires a repository URL where this exact manifest is published")
-
-    from nostrhost.package_engine import package_plan_envelope
-
-    try:
-        envelope = package_plan_envelope(package)
-    except (TypeError, ValueError) as exc:
-        raise OperationError(f"invalid native package: {exc}") from exc
-
-    app_id = envelope["package"]["id"]
-    version = envelope["package"]["version"]
-    manifest_hash = envelope["manifest_sha256"]
-
-    from yunohost.nostr_identity import _operator_config, _sign_event
-
-    cfg = _operator_config()
-    tags = [
-        ["d", app_id],
-        # Native NostrHost packages are generic Linux packages, not YunoHost
-        # apps; the catalogue protocol only accepts "yunohost" or "linux"
-        # (libs/nostrhost-catalog/internal/protocol/types.go ParseAppDeclaration),
-        # so declaring "native" made every native declaration fail to ingest.
-        ["platform", "linux"],
-        ["repository", repository],
-        ["version", version],
-        ["commit", manifest_hash],
-        ["manifest", f"sha256:{manifest_hash}"],
-        ["content", f"sha256:{manifest_hash}"],
-    ]
-    content_json = json.dumps({"name": app_id}, separators=(",", ":"))
-    event = _sign_event(cfg.publisher_sk, cfg.publisher_pubkey, 32267, content_json, tags)
-
-    result = _catalog_cli(["--relay", _catalog_relay_arg(relays), "publish"], json.dumps(event).encode())
-    ingest = _catalog_cli(["ingest"], json.dumps(event).encode())
-    return {
-        "app_id": app_id,
-        "publisher_pubkey": cfg.publisher_pubkey,
-        "event_id": event["id"],
-        "published": result,
-        "ingested": ingest,
-    }
-
-
 # --------------------------------------------------------------------------- #
-# catalogue admin page (Phase 6) — endorsements, trust dashboard, on-demand
-# reverification, publisher profile, and release announcements. Every event
-# built here is signed with the node's publisher key the same way
-# catalog.publish already is (_sign_event, never leaving this process), then
+# catalogue admin page (Phase 6) — endorsements, trust dashboard, publisher
+# profile, and release announcements. Every event built here is signed with
+# the node's publisher key (_sign_event, never leaving this process), then
 # handed to the catalogue CLI's kind-agnostic "publish" subcommand for pure
 # transport - the CLI itself never accepts a private key. WP5: all history /
 # profile / announcement reads are relay-derived (no local JSON ledgers).
@@ -1589,17 +1434,6 @@ def _safe_catalog_attest_release(
     if trusted_verifiers:
         extra_flags += ["--trusted-verifiers", ",".join(trusted_verifiers)]
     return _catalog_cli(["attest-release"], extra_flags=extra_flags)
-
-
-def _safe_catalog_reverify(app_id: str = "", **extra: Any) -> dict[str, Any]:
-    """Independently re-check one accepted declaration on demand: re-clone its
-    repository at the declared commit and recompute both hashes, rather than
-    trusting whatever was true at ingestion time."""
-    if extra:
-        raise OperationError(f"catalog.reverify does not accept extra args: {sorted(extra)}")
-    if not app_id:
-        raise OperationError("catalog.reverify requires an app_id")
-    return _catalog_cli(["reverify"], extra_flags=["--app-id", app_id])
 
 
 def _safe_catalog_profile_get(**args: Any) -> dict[str, Any]:
@@ -2512,101 +2346,6 @@ def _safe_user_permission_update(permission: str = "", label: str | None = None,
     return {"permission": permission, "result": result}
 
 
-# --------------------------------------------------------------------------- #
-# catalogue verify
-
-def _verify_catalog_event(event: dict[str, Any]) -> dict[str, Any]:
-    """Verify a declaration event: id, signature, kind/tag schema, and that the
-    signer is a trusted catalogue publisher. Mirrors the checks the Go CLI's
-    ingest/sync apply (internal/protocol/types.go + trust policy)."""
-    import hashlib
-    import re as _re
-
-    from nostr_sdk import Event
-
-    required = ("pubkey", "created_at", "kind", "tags", "content", "id", "sig")
-    if not isinstance(event, dict) or not all(k in event for k in required):
-        raise OperationError("event must be a JSON Nostr event object")
-
-    pubkey = str(event["pubkey"])
-    if not _re.fullmatch(r"[0-9a-f]{64}", pubkey):
-        raise OperationError("event pubkey must be 64 lowercase hex")
-
-    kind = event["kind"]
-    if kind not in (32267, 30078):
-        raise OperationError(f"event kind {kind} is not a catalogue declaration (expected 32267 or 30078)")
-
-    tags = event["tags"]
-    if not isinstance(tags, list) or not all(isinstance(t, list) and len(t) >= 2 for t in tags):
-        raise OperationError("event tags must be a list of string arrays")
-    tag_map: dict[str, list[str]] = {}
-    for t in tags:
-        tag_map.setdefault(str(t[0]), []).append(str(t[1]))
-    for single in ("d", "version", "commit", "manifest", "content"):
-        if len(tag_map.get(single, [])) != 1:
-            raise OperationError(f"event must carry exactly one '{single}' tag")
-    if not (tag_map.get("platform") or tag_map.get("platforms")):
-        raise OperationError("event must carry a 'platform' or 'platforms' tag")
-    if not (tag_map.get("repository") or tag_map.get("repo")):
-        raise OperationError("event must carry a 'repository' or 'repo' tag")
-
-    if not _re.fullmatch(r"[a-z0-9][a-z0-9_-]*", tag_map["d"][0]):
-        raise OperationError("app id 'd' tag is invalid")
-    platforms = tag_map.get("platform", []) + tag_map.get("platforms", [])
-    if any(p not in ("yunohost", "linux") for p in platforms):
-        raise OperationError("platform must be 'yunohost' or 'linux'")
-    repos = tag_map.get("repository", []) + tag_map.get("repo", [])
-    if any(not _re.fullmatch(r"https://[^/\s]+/[^/\s]+", r) for r in repos):
-        raise OperationError("repository must be an HTTPS URL with a path")
-    if not _re.fullmatch(r"[0-9a-f]{40,64}", tag_map["commit"][0]):
-        raise OperationError("commit must be 40-64 lowercase hex")
-    if not _re.fullmatch(r"sha256:[0-9a-f]{64}", tag_map["manifest"][0]):
-        raise OperationError("manifest must be sha256:<64 hex>")
-    if not _re.fullmatch(r"sha256:[0-9a-f]{64}", tag_map["content"][0]):
-        raise OperationError("content must be sha256:<64 hex>")
-    content = event["content"]
-    try:
-        json.loads(content) if isinstance(content, str) else content
-    except (json.JSONDecodeError, TypeError):
-        raise OperationError("event content must be a JSON object") from None
-
-    serialized = json.dumps([0, pubkey, event["created_at"], kind, tags, content], separators=(",", ":"), ensure_ascii=False).encode()
-    if hashlib.sha256(serialized).hexdigest() != event["id"]:
-        raise OperationError("event id does not match its canonical serialization")
-    try:
-        parsed = Event.from_json(json.dumps(event))
-    except Exception as exc:  # noqa: BLE001 - normalize SDK parse/verification errors
-        raise OperationError("event signature is invalid") from exc
-    if not parsed.verify_signature():
-        raise OperationError("event signature is invalid")
-
-    trusted = [p.strip() for p in _trusted_publishers().split(",") if p.strip()]
-    if pubkey not in trusted:
-        raise OperationError(f"event publisher {pubkey[:16]}… is not a trusted catalogue publisher")
-
-    return {
-        "app_id": tag_map["d"][0],
-        "kind": kind,
-        "publisher": pubkey,
-        "event_id": event["id"],
-        "valid": True,
-    }
-
-
-def _safe_catalog_verify(event_or_naddr: str = "", **extra: Any) -> dict[str, Any]:
-    if extra:
-        raise OperationError(f"catalog.verify does not accept extra args: {sorted(extra)}")
-    raw = str(event_or_naddr or "").strip()
-    if not raw:
-        raise OperationError("catalog.verify requires an 'event_or_naddr'")
-    if raw.startswith("naddr"):
-        raise OperationError("catalog.verify does not yet support naddr; pass the JSON declaration event (no nip19 decoder is installed)")
-    try:
-        event = json.loads(raw)
-    except json.JSONDecodeError:
-        raise OperationError("catalog.verify expects a JSON Nostr declaration event")
-    return _verify_catalog_event(event)
-
 
 # --------------------------------------------------------------------------- #
 # audit (the signed operation chain on the control relay)
@@ -2959,16 +2698,6 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         require_approval=False, input_model=CatalogGetArgs,
         description="resolve one app from the trusted native catalogue projection",
     ),
-    "catalog.publish": ToolSpec(
-        name="catalog.publish", handler=_safe_catalog_publish, scope=SCOPE_CATALOG_PUBLISH,
-        input_model=CatalogPublishArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
-        description="re-declare a trusted app under the node's catalogue publisher key and publish it (admin approval)",
-    ),
-    "catalog.declare": ToolSpec(
-        name="catalog.declare", handler=_safe_catalog_declare, scope=SCOPE_CATALOG_PUBLISH,
-        input_model=CatalogDeclareArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
-        description="declare a new app in the catalogue from an authored native package manifest (admin approval)",
-    ),
     "catalog.candidates": ToolSpec(
         name="catalog.candidates", handler=_safe_catalog_candidates, scope=SCOPE_CATALOG_READ,
         require_approval=False, input_model=CatalogCandidatesArgs,
@@ -2988,11 +2717,6 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="catalog.trust", handler=_safe_catalog_trust, scope=SCOPE_CATALOG_READ,
         require_approval=False, input_model=CatalogTrustArgs,
         description="every accepted declaration's CI-attestation trust status under a given policy",
-    ),
-    "catalog.reverify": ToolSpec(
-        name="catalog.reverify", handler=_safe_catalog_reverify, scope=SCOPE_CATALOG_VERIFY,
-        require_approval=False, input_model=CatalogReverifyArgs,
-        description="independently re-check one accepted declaration against its repository and commit",
     ),
     "catalog.profile.get": ToolSpec(
         name="catalog.profile.get", handler=_safe_catalog_profile_get, scope=SCOPE_CATALOG_READ,
@@ -3128,11 +2852,6 @@ NATIVE_TOOLS: dict[str, ToolSpec] = {
         name="user.permission.update", handler=_safe_user_permission_update, scope=SCOPE_USERS_WRITE,
         input_model=UserPermissionUpdateArgs, risk=RISK_MEDIUM, reversibility=REVERSIBLE,
         description="update a permission's label/tile visibility, not membership (owner co-signature)",
-    ),
-    "catalog.verify": ToolSpec(
-        name="catalog.verify", handler=_safe_catalog_verify, scope=SCOPE_CATALOG_VERIFY,
-        require_approval=False, input_model=CatalogVerifyArgs,
-        description="verify a catalogue declaration event: id, signature, schema and trusted publisher",
     ),
     "audit.list": ToolSpec(
         name="audit.list", handler=_safe_audit_list, scope=SCOPE_AUDIT_READ,

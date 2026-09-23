@@ -259,30 +259,6 @@ def test_native_settings_plan_and_apply_are_bound_to_reviewed_digest(monkeypatch
     assert "settings_diff" not in lifecycle_calls[0][1]["plan"]
 
 
-def test_catalogue_lifecycle_apply_revalidates_plan_and_uses_signed_chain(monkeypatch):
-    plan = {
-        "schema": 1,
-        "package": {"id": "example", "version": "1.2.0"},
-        "manifest_sha256": "m" * 64,
-        "plan_sha256": "p" * 64,
-        "operations": [],
-    }
-    monkeypatch.setattr(api_module, "catalogue_lifecycle_plan", lambda app_id, action: plan)
-    calls = []
-    monkeypatch.setattr(api_module, "_run_lifecycle", lambda tool, args, state: calls.append((tool, args)) or {"ok": True, "request_id": "r" * 64})
-    app = build_app(authorizer=lambda _rule: "admin")
-
-    status, _, stale = wsgi_request(app, "POST", "/package/app/example/install/apply", {"plan_sha256": "x" * 64})
-    assert status == "409"
-    assert json.loads(stale)["code"] == "plan_changed"
-    assert calls == []
-
-    status, _, result = wsgi_request(app, "POST", "/package/app/example/install/apply", {"plan_sha256": plan["plan_sha256"]})
-    assert status == "200"
-    assert json.loads(result)["action"] == "install"
-    assert calls[0][0] == "package.reconcile"
-
-
 def test_malformed_auth_header_401():
     app = build_app()
     status, _, body = wsgi_request(app, "GET", "/package/system/version", headers={"Authorization": "Nostr !!!not-base64!!!"})
@@ -2033,36 +2009,6 @@ def test_mcp_ca_bundle_passes_configured_domain(app, monkeypatch):
     assert status == "200"
     assert captured["domain"] == "nmcp.example.com"
     assert json.loads(body) == {"available": False}
-
-
-# --------------------------------------------------------------------------- #
-# package authoring: fetch a manifest straight from its repository
-
-def test_package_fetch_manifest(app, monkeypatch):
-    captured = {}
-
-    def fake(repository, revision="", package_path=""):
-        captured.update({"repository": repository, "revision": revision, "package_path": package_path})
-        return {"package": {"app": {"id": "example-app", "version": "0.1.0"}}, "valid": True, "diagnostics": [], "commit": "a" * 40}
-
-    import nostrhost.package_authoring as package_authoring_module
-
-    monkeypatch.setattr(package_authoring_module, "fetch_manifest_from_repository", fake)
-    status, _, body = wsgi_request(
-        app, "POST", "/package/authoring/fetch_manifest",
-        {"repository": "https://example.invalid/app.git", "revision": "main"},
-    )
-    assert status == "200"
-    assert captured["repository"] == "https://example.invalid/app.git"
-    assert captured["revision"] == "main"
-    data = json.loads(body)
-    assert data["valid"] is True
-    assert data["package"]["app"]["id"] == "example-app"
-
-
-def test_package_fetch_manifest_requires_repository(app):
-    status, _, body = wsgi_request(app, "POST", "/package/authoring/fetch_manifest", {})
-    assert status == "400"
 
 
 # --------------------------------------------------------------------------- #

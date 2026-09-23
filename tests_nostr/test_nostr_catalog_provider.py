@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from yunohost.nostr_catalog_provider import load_native_catalog, native_catalog_coordinate
+from yunohost.nostr_catalog_provider import load_native_catalog
 
 
 def test_load_native_catalog_maps_verified_projection(tmp_path):
@@ -29,9 +29,6 @@ def test_load_native_catalog_maps_verified_projection(tmp_path):
     assert result["hello_nostr"]["manifest"]["name"] == {"en": "Hello Nostr"}
     assert result["hello_nostr"]["native"]["package_path"] == "package.toml"
     assert result["hello_nostr"]["native"]["app_id"] == "hello_nostr"
-    coordinate = native_catalog_coordinate("hello_nostr", path)
-    assert coordinate["revision"] == "c" * 40
-    assert coordinate["repository"].endswith("hello_nostr_ynh")
 
 
 def test_load_native_catalog_maps_logo_hash(tmp_path):

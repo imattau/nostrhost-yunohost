@@ -1,15 +1,13 @@
-"""Native catalogue surface (MCP transition Phase 5): catalog.list/get/publish.
+"""Native catalogue surface: catalog.list/get (the trusted, relay-synced
+projection browsing/discovery reads - shared with npack releases since
+Phase 2's ingestion adapter, not a git-specific mechanism).
 
 The ops shell out to the `nostrhost-catalog` CLI; these tests stub the CLI
-with a fake so no Go binary or relay is needed. catalog.publish is the key
-case: it must build a kind-32267 declaration from the trusted projection and
-sign it with the node's **publisher** key (operator.toml), never the operator
-key.
+with a fake so no Go binary or relay is needed.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -80,13 +78,12 @@ def cli_fake(monkeypatch):
 # registry
 
 def test_catalog_ops_registered_with_catalog_scopes():
-    for name, scope in (("catalog.list", "catalog.inspect"), ("catalog.get", "catalog.inspect"), ("catalog.publish", "catalog.publish")):
+    for name, scope in (("catalog.list", "catalog.inspect"), ("catalog.get", "catalog.inspect")):
         spec = TOOLS[name]
         assert spec.scope == scope
         assert spec.scope in KNOWN_SCOPES
     assert TOOLS["catalog.list"].require_approval is False
     assert TOOLS["catalog.get"].require_approval is False
-    assert TOOLS["catalog.publish"].require_approval is True
 
 
 # --------------------------------------------------------------------------- #
@@ -105,46 +102,3 @@ def test_catalog_get_requires_app_id():
 
     with pytest.raises(OperationError):
         no._safe_catalog_get(app_id="")
-
-
-# --------------------------------------------------------------------------- #
-# publish signs with the publisher key
-
-def test_catalog_publish_signs_with_publisher_key(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    result = no._safe_catalog_publish(app_id="nostrhost-test", relays="ws://127.0.0.1:4848")
-    assert result["publisher_pubkey"] == boot["publisher_pubkey"]
-
-    pub_call = next(c for c in cli_fake if "publish" in c[0])
-    event = json.loads(pub_call[1])
-    assert event["pubkey"] == boot["publisher_pubkey"]
-    assert event["pubkey"] != boot["operator_pubkey"]
-    assert event["kind"] == 32267
-
-    tags = dict((t[0], t[1]) for t in event["tags"])
-    assert tags["d"] == "nostrhost-test"
-    assert tags["platform"] == "yunohost"
-    assert tags["repository"] == "https://git.example.com/nostrhost-test.git"
-    assert tags["commit"] == "a" * 40
-    assert tags["manifest"] == f"sha256:{'b' * 64}"
-    assert tags["content"] == f"sha256:{'c' * 64}"
-    assert tags["package"] == "package.toml"
-
-    serialized = json.dumps([0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]], separators=(",", ":"), ensure_ascii=False).encode()
-    assert hashlib.sha256(serialized).hexdigest() == event["id"]
-
-    from nostr_sdk import Event
-
-    assert Event.from_json(json.dumps(event)).verify()
-
-    # publish passes --relay before the subcommand (Go's flag.Parse stops at the
-    # first non-flag token, so flags must precede `publish`), then ingests back.
-    assert [c[0][0] for c in cli_fake] == ["--relay", "ingest"]
-
-
-def test_catalog_publish_unknown_app_rejected(boot, cli_fake):
-    import nostrhost.native_ops as no
-
-    with pytest.raises(OperationError, match="not in the trusted native catalogue"):
-        no._safe_catalog_publish(app_id="does-not-exist")

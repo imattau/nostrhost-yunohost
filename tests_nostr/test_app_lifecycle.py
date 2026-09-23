@@ -148,16 +148,6 @@ def test_run_signed_chain_failed_execution_is_reported_not_raised():
     assert "backend boom" in body["error"]
 
 
-def test_run_signed_chain_catalog_publish_executes():
-    """H5: the catalogue write tools must run through the signed chain
-    (policy/approval/audit), not a bare handler call."""
-    h = Harness(policy=allowing_policy)
-    body = h.chain("catalog.publish", {"app_id": "demo_app", "relays": "ws://r"})
-    assert body["ok"] is True
-    assert h.backend.calls[0][0] == "catalog.publish"
-    assert h.recorder.history == ["pre", "post"]
-
-
 def test_run_signed_chain_operator_request_auto_approves():
     """The local operator is an admin, so its request auto-approves in the
     engine and ``run_signed_chain`` must not feed a redundant approval (that
@@ -194,28 +184,7 @@ def test_run_signed_chain_agent_mode_set_executes():
 
 
 # --------------------------------------------------------------------------- #
-# catalogue coordinate + manifest verification
-
-def test_coordinate_from_catalogue(tmp_path: Path):
-    state = tmp_path / "catalogue.json"
-    state.write_text(json.dumps({
-        "entries": [{
-            "event_id": "e1",
-            "declaration": {
-                "AppID": "nostrhost-test", "Repository": "https://example.org/repo.git",
-                "Version": "0.1", "Commit": "abc123", "Name": "Test",
-                "ManifestHash": "c" * 64, "ContentHash": "d" * 64,
-            },
-        }],
-    }))
-    from yunohost.nostr_catalog_provider import native_catalog_coordinate
-
-    coordinate = native_catalog_coordinate("nostrhost-test", path=state)
-    assert coordinate["repository"] == "https://example.org/repo.git"
-    assert coordinate["revision"] == "abc123"
-    assert coordinate["manifest_sha256"] == "c" * 64
-    assert native_catalog_coordinate("missing", path=state) is None
-
+# manifest verification
 
 def test_manifest_hash_verification_rejects_tampering():
     package_data = example_package()
@@ -420,10 +389,6 @@ def test_cli_lifecycle_helpers_use_node_safe_imports(tmp_path: Path, monkeypatch
     monkeypatch.setenv("NOSTRHOST_RESTIC_CONFIG", str(tmp_path / "missing.toml"))
     with pytest.raises(Exception, match="restic is not configured"):
         cli_module._restic_client()
-
-    # _coordinate_for must resolve the catalogue provider import cleanly.
-    monkeypatch.delenv("NOSTRHOST_CATALOG_STATE", raising=False)
-    assert cli_module._coordinate_for("nostrhost-test") in (None, {})
 
 
 def test_policy_writer_quotes_dotted_keys(tmp_path: Path, monkeypatch):

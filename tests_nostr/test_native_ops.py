@@ -82,7 +82,6 @@ def test_native_tools_registered_with_scope_and_approval():
         "user.permission.add": ("users.write", True),
         "user.permission.remove": ("users.write", True),
         "user.permission.update": ("users.write", True),
-        "catalog.verify": ("catalog.verify", False),
         "audit.list": ("audit.read", True),
         "audit.get": ("audit.read", True),
     }

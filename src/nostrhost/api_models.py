@@ -355,31 +355,12 @@ class AgentContributionShareBody(_Tolerant):
 
 # -- catalog ------------------------------------------------------------------
 
-class CatalogPublishBody(_Tolerant):
-    app_id: str = ""
-    relays: str = ""
-
-
-class CatalogDeclareBody(_Tolerant):
-    package: Any = None
-    repository: str = ""
-    relays: str = ""
-
-
-class CatalogVerifyBody(_Tolerant):
-    event_or_naddr: str = ""
-
-
 class CatalogAttestBody(_Tolerant):
     app_id: str = ""
     publisher: str = ""
     claim: str = ""
     comment: str = ""
     relays: str = ""
-
-
-class CatalogReverifyBody(_Tolerant):
-    app_id: str = ""
 
 
 class CatalogProfileSetBody(_Tolerant):
@@ -536,10 +517,6 @@ class PackagePlanBody(_Tolerant):
     path: str | None = None
 
 
-class PackageFetchManifestBody(_Tolerant):
-    repository: str = ""
-    revision: str = ""
-    package_path: str = ""
 
 
 class PackageReconcileBody(_Tolerant):

@@ -295,55 +295,6 @@ def plan_native_change_url(app_id: str, domain: str, path: str, *, state_dir: st
     return envelope
 
 
-def catalogue_lifecycle_plan(app_id: str, action: str) -> dict[str, Any]:
-    """Resolve and verify a trusted catalogue package for install or upgrade."""
-    app_id = _app_id(app_id)
-    if action not in {"install", "upgrade"}:
-        raise PackageError("unsupported catalogue lifecycle action")
-    from .cli import _coordinate_for, _load_package_data, _plan_envelope, _verify_package
-    from .native_providers import installed_package_manifest
-
-    installed = installed_package_manifest(app_id)
-    if action == "install":
-        from .cli import _TOOL_HANDLERS
-
-        installed_apps = _TOOL_HANDLERS["app.list"]().get("apps", {})
-        if app_id in installed_apps:
-            raise PackageError(f"app {app_id!r} is already installed")
-    if action == "upgrade" and installed is None:
-        raise PackageError(f"native app {app_id!r} is not installed")
-    coordinate = _coordinate_for(app_id)
-    if not coordinate:
-        raise PackageError(f"app {app_id!r} is not in the trusted native catalogue")
-    try:
-        package = _load_package_data(None, coordinate)
-        _verify_package(package, coordinate)
-        if package.get("app", {}).get("id") != app_id:
-            raise PackageError("catalogue package id does not match the requested app")
-        if action == "upgrade":
-            installed_version = (installed.get("app") or {}).get("version")
-            if installed_version == package.get("app", {}).get("version"):
-                raise PackageError(f"native app {app_id!r} is already at the catalogue version")
-            package = carry_forward_compatible_settings(installed, package)
-        if action == "install":
-            web = package.get("web")
-            if isinstance(web, dict) and web.get("domain"):
-                from .cli import _iter_installed_manifests
-
-                _check_domain_path_availability(
-                    app_id,
-                    str(web.get("domain") or ""),
-                    str(web.get("path") or "/"),
-                    bool(web.get("full_domain")),
-                    other_manifests=_iter_installed_manifests(),
-                )
-        return _plan_envelope(package, coordinate)
-    except PackageError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - surface fetch/parse failures as bounded API errors
-        raise PackageError(f"could not build {action} plan for {app_id!r}: {exc}") from exc
-
-
 def native_app_removal_plan(app_id: str) -> dict[str, Any]:
     """Build a removal plan only from the locally recorded native manifest."""
     app_id = _app_id(app_id)
