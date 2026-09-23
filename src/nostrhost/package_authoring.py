@@ -390,6 +390,8 @@ def build_npk_artifact(
     os_name: str | None = None,
     arch: str | None = None,
     npack_bin: str = "",
+    repo: str | None = None,
+    commit: str | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic .npk artifact from a validated native manifest.
 
@@ -400,6 +402,19 @@ def build_npk_artifact(
     plan envelope from the artifact alone; npack skips the ``.npack`` metadata
     directory when installing, so the manifest never becomes part of the
     staged payload.
+
+    ``repo``/``commit`` are signed into the npack release's own ``repo``/
+    ``commit`` fields (npack supports them; ``npack init`` just has no flag
+    for them, so they're patched into ``.npack/manifest.json`` the same way
+    ``install_inputs`` is below). ``repo`` must be a NIP-34 kind:30617
+    address (``30617:<pubkey>:<identifier>``) - npack's own release signing
+    rejects any other format (``validate_repo_reference`` in
+    ``sign_release_event``), so a plain URL will fail at build time, not
+    silently produce an unattestable release. Without ``repo``/``commit``,
+    nostrhost-catalog's npack-release ingestion
+    (``protocol.ParseFromNpackRelease``) has nothing to attest against - CI
+    attestations are inherently scoped to a specific commit - so a release
+    with neither is simply never attestable, not broken.
 
     Returns ``{artifact, sha256, publisher, name, version, os, arch,
     npack, embedded_manifest}``. Requires the ``npack`` binary (see
@@ -485,6 +500,10 @@ def build_npk_artifact(
             }
             for input_id, field in package_data.get("install_inputs", {}).items()
         ]
+        if repo is not None:
+            npack_manifest["repo"] = repo
+        if commit is not None:
+            npack_manifest["commit"] = commit
         npack_manifest_path.write_text(json.dumps(npack_manifest), encoding="utf-8")
 
         embedded = metadata / "nostrhost" / "manifest.json"
@@ -531,6 +550,8 @@ def build_npk(
     os_name: Optional[str] = typer.Option(None, "--os", help="Target OS override (default: host)."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Target architecture override (default: host)."),
     npack_bin: str = typer.Option("", "--npack", help="Path to the npack binary (default: $NPACK_BIN or npack on PATH)."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Source repository as a NIP-34 kind:30617 address '30617:<pubkey>:<identifier>' (npack itself rejects any other format), signed into the release (required for nostrhost-catalog attestation to apply to this release)."),
+    commit: Optional[str] = typer.Option(None, "--commit", help="Source commit, signed into the release (required for nostrhost-catalog attestation to apply to this release)."),
 ) -> None:
     """Build a deterministic, content-addressed .npk artifact for a package."""
     package, diagnostics = _load_and_validate(package_file)
@@ -550,6 +571,8 @@ def build_npk(
             os_name=os_name,
             arch=arch,
             npack_bin=npack_bin,
+            repo=repo,
+            commit=commit,
         )
     except PackageError as exc:
         typer.echo(json.dumps({"schema": 1, "valid": False, "error": str(exc)}, indent=2, sort_keys=True))
