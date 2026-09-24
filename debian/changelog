@@ -1,3 +1,15 @@
+yunohost (12.1.41.116) stable; urgency=low
+
+  * nostrhost-core.preinst / postinst: diagnostic-only syslog breadcrumbs
+    (no functional change) around the unpack/configure boundary, to
+    pin down a second self-stop of nostr-operationsd observed on the
+    clean7 testbed even after 12.1.41.115's postinst-restart fix -- this
+    one happens during archive *unpack* (before any maintainer script
+    runs), only when the upgrade triggering it is itself driven through
+    nostr-operationsd (the normal API/admin-UI path).
+
+ -- NostrHost <nostrhost@example.com>  Thu, 24 Sep 2026 08:31:25 +0000
+
 yunohost (12.1.41.115) stable; urgency=low
 
   * nostrhost-core.postinst / debian/rules: stop restarting

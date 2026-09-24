@@ -100,6 +100,7 @@ provision_crowdsec() {
 }
 
 do_configure() {
+    logger -t nostrhost-core.postinst "do_configure: entered (pid $$)"
 
     mkdir -p /etc/yunohost
     mkdir -p /etc/yunohost/apps
@@ -143,10 +144,12 @@ do_configure() {
         fi
     else
         echo "Regenerating configuration, this might take a while..."
+        logger -t nostrhost-core.postinst "do_configure: about to run regen-conf"
         # Best-effort: the CLI lives in python3-nostrhost which may still be
         # the previous version when nostrhost-core is configured first in a
         # cyclic upgrade; a stale or absent CLI must never fail the install.
         nostrhost system regen-conf --output-as none || true
+        logger -t nostrhost-core.postinst "do_configure: regen-conf returned"
 
         # nostr-operationsd is deliberately excluded from dh_installsystemd's
         # synchronous restart-after-upgrade (see debian/rules): it is the
@@ -159,6 +162,7 @@ do_configure() {
         # `at` daemon must never fail the install (it's a hard Depends, but
         # atd could still be down).
         at -M now >/dev/null 2>&1 <<< "sleep 60; systemctl try-restart nostr-operationsd.service" || true
+        logger -t nostrhost-core.postinst "do_configure: deferred restart scheduled, exiting upgrade branch"
     fi
 }
 
