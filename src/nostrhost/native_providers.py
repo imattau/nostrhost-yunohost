@@ -861,13 +861,27 @@ class PayloadSyncProvider(InspectVerifiedProvider):
         copied: list[str] = []
         for source in sorted(payload_root.rglob("*")):
             relative = source.relative_to(payload_root)
-            if relative.parts and relative.parts[0] == ".npack":
+            # ``.npack`` carries the artifact's embedded manifest and
+            # ``.npack-backups`` is npack's staging bookkeeping; neither
+            # belongs on the host root.
+            if relative.parts and relative.parts[0].startswith(".npack"):
                 continue
             if source.is_dir():
                 continue
             target = self._safe_target(relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            if source.is_symlink():
+                # Preserve the link itself: npm ``.bin`` shims are relative
+                # symlinks, and copy2 would dereference them - crashing on a
+                # dangling target and materialising copies of every link.
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+                os.symlink(os.readlink(source), target)
+            else:
+                # Never write through a stale symlink at the destination.
+                if target.is_symlink():
+                    target.unlink()
+                shutil.copy2(source, target)
             copied.append(str(relative))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         marker = self._marker(app)
@@ -900,10 +914,16 @@ class PayloadSyncProvider(InspectVerifiedProvider):
     def _safe_target(self, relative: Path) -> Path:
         if relative.is_absolute() or ".." in relative.parts:
             raise ProviderError(f"staged payload contains a path traversal entry: {relative}")
-        target = (self.root / relative).resolve()
-        if target != self.root and self.root not in target.parents:
+        candidate = self.root / relative
+        # Resolve the parent chain so intermediate host symlinks cannot
+        # escape the root, but keep the final component unresolved: it may
+        # be a symlink that sync must replace in place or that removal must
+        # unlink - resolving it would name its destination instead.
+        parent = candidate.parent.resolve()
+        resolved_root = self.root.resolve()
+        if parent != resolved_root and resolved_root not in parent.parents:
             raise ProviderError(f"staged payload escapes the target root: {relative}")
-        return target
+        return parent / candidate.name
 
     def remove(self, desired: dict[str, Any]) -> list[Operation]:
         return [Operation("payload.remove", f"{desired['app']}:payload", {"app": desired["app"]}, reverse="payload.sync", summary=f"remove staged payload for {desired['app']}")]

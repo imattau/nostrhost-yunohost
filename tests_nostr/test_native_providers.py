@@ -159,6 +159,39 @@ def test_payload_sync_rejects_path_traversal(tmp_path: Path):
         provider._safe_target(Path("/etc/passwd"))
 
 
+def test_payload_sync_skips_npack_bookkeeping_and_keeps_symlinks(tmp_path: Path):
+    """npack's own directories stay out of the host tree, and payload
+    symlinks (npm .bin shims) are preserved as links - including ones whose
+    target is only valid inside the payload, which a dereferencing copy
+    would crash on."""
+    payload = tmp_path / "staged"
+    (payload / ".npack").mkdir(parents=True)
+    (payload / ".npack" / "manifest.json").write_text("{}", encoding="utf-8")
+    (payload / ".npack-backups").mkdir()
+    (payload / ".npack-backups" / "0").write_text("staging junk", encoding="utf-8")
+    (payload / ".npack-backups" / "1").symlink_to("../../../../etc/passwd")
+    (payload / "var/www/app/bin").mkdir(parents=True)
+    (payload / "var/www/app/bin/tool").write_text("#!/bin/sh", encoding="utf-8")
+    (payload / "var/www/app/node_modules/.bin").mkdir(parents=True)
+    (payload / "var/www/app/node_modules/.bin/tool").symlink_to("../bin/tool")
+
+    root = tmp_path / "root"
+    provider = PayloadSyncProvider(root=root, state_dir=tmp_path / "state")
+    result = provider.apply(Operation("payload.sync", "example:payload", {"app": "example", "artifact_sha256": "cd" * 32, "payload_root": str(payload)}, reverse="payload.remove"))
+    assert result["synced"] is True
+    assert result["copied"] == 2
+    assert not (root / ".npack").exists()
+    assert not (root / ".npack-backups").exists()
+    link = root / "var/www/app/node_modules/.bin/tool"
+    assert link.is_symlink()
+    assert link.readlink() == Path("../bin/tool")
+    assert (root / "var/www/app/bin/tool").read_text() == "#!/bin/sh"
+
+    removed = provider.apply(Operation("payload.remove", "example:payload", {"app": "example"}, reverse="payload.sync"))
+    assert removed["removed"] == 2
+    assert not link.is_symlink()
+
+
 def test_runtime_provider_validates_version_with_bounded_arguments():
     calls = []
 
