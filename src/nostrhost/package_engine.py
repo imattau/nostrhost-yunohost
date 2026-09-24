@@ -895,23 +895,43 @@ def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, 
         payload_root = Path(str(npack["payload_root"])).expanduser().resolve()
         if not payload_root.is_dir() or not (payload_root / ".npack" / "manifest.json").is_file():
             raise PackageError(f"npack payload root is not a staged artifact: {payload_root}")
-        # apply_operation_plan takes the *first* ready operation in list
-        # order, and service.start only depends on service.enable - so a
-        # trailing payload.sync would run after the unit already tried to
-        # exec a payload that is not on disk yet. Insert it right after its
-        # single dependency (the manifest record) instead.
+        # The manifest record commits last (plan_package gives it a
+        # dependency on every other op so it cannot claim success for a
+        # partially applied plan), and the health check is one of those ops -
+        # so a payload.sync waiting on the manifest would only run *after*
+        # health, while health can never pass while the payload is missing.
+        # Wait on the package record + install directory instead, and make
+        # every host-tree consumer and the manifest commit wait for the
+        # payload explicitly.
+        app_id = package.app.id
+        payload_resource = f"{app_id}:payload"
+        install_dir_resource = f"{app_id}:directory:install"
+        planned_resources = {operation.resource for operation in plan}
+        payload_deps = (
+            (app_id, install_dir_resource)
+            if install_dir_resource in planned_resources
+            else (app_id,)
+        )
         plan.insert(next(
             index for index, operation in enumerate(plan)
-            if operation.resource == f"{package.app.id}:manifest"
+            if operation.resource == f"{app_id}:manifest"
         ) + 1, _op(
             "payload.sync",
-            f"{package.app.id}:payload",
-            {"app": package.app.id, "artifact_sha256": npack["artifact_sha256"], "payload_root": str(payload_root)},
-            deps=(f"{package.app.id}:manifest",),
+            payload_resource,
+            {"app": app_id, "artifact_sha256": npack["artifact_sha256"], "payload_root": str(payload_root)},
+            deps=payload_deps,
             risk="medium",
             reverse="payload.remove",
             summary=f"sync staged payload from {payload_root}",
         ))
+        for index, operation in enumerate(plan):
+            if (
+                (operation.name in {"service.start", "web.route.ensure"} or operation.name == "package.manifest.ensure")
+                and payload_resource not in operation.depends_on
+            ):
+                plan[index] = Operation(
+                    **{**operation.__dict__, "depends_on": (*operation.depends_on, payload_resource)}
+                )
     envelope = {
         "schema": PLAN_SCHEMA,
         "package": {"id": package.app.id, "version": package.app.version},

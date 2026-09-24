@@ -103,9 +103,11 @@ def test_plan_envelope_binds_npack_provenance(tmp_path):
 
 
 def test_npack_payload_sync_runs_before_service_start(tmp_path):
-    """The apply loop takes the first ready op in list order, so payload.sync
-    must sit right after the manifest record - a trailing payload.sync would
-    run after service.start and the unit would exec a missing payload."""
+    """manifest.ensure depends on every other op (commit-last), and health is
+    one of them - so payload.sync waiting on the manifest would deadlock
+    behind the health check it exists to make pass. payload.sync waits only
+    on the package record + install dir; every host-tree consumer
+    (service.start, web route) and the manifest commit wait for it."""
     payload_root = tmp_path / "payload"
     (payload_root / ".npack").mkdir(parents=True)
     (payload_root / ".npack" / "manifest.json").write_text("{}", encoding="utf-8")
@@ -117,9 +119,31 @@ def test_npack_payload_sync_runs_before_service_start(tmp_path):
         "payload_root": str(payload_root),
     }
     envelope = package_plan_envelope(example(), npack=provenance)
-    names = [operation.name for operation in validate_plan_envelope(envelope)]
-    assert names.index("payload.sync") == names.index("package.manifest.ensure") + 1
-    assert names.index("payload.sync") < names.index("service.start")
+    operations = validate_plan_envelope(envelope)
+    by_name = {operation.name: operation for operation in operations}
+    assert by_name["payload.sync"].depends_on == ("example", "example:directory:install")
+    assert "example:payload" in by_name["package.manifest.ensure"].depends_on
+    assert "example:payload" in by_name["service.start"].depends_on
+    assert "example:payload" in by_name["web.route.ensure"].depends_on
+    assert operations.index(by_name["payload.sync"]) < operations.index(by_name["service.start"])
+
+    class Recorder:
+        def __init__(self):
+            self.ran: list[str] = []
+
+        def execute(self, operation):
+            self.ran.append(operation.name)
+            if operation.name == "health.http.check":
+                raise RuntimeError("boom")
+            return {"ok": True}
+
+    recorder = Recorder()
+    with pytest.raises(RuntimeError, match="boom"):
+        apply_reconciled_plan(operations, recorder)
+    assert recorder.ran.index("payload.sync") < recorder.ran.index("service.start")
+    assert recorder.ran.index("payload.sync") < recorder.ran.index("health.http.check")
+    # the failed health check keeps the commit-last manifest unrecorded
+    assert "package.manifest.ensure" not in recorder.ran
 
 
 def test_removal_plan_removes_payload_after_service_stop():
