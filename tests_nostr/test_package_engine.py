@@ -102,6 +102,37 @@ def test_plan_envelope_binds_npack_provenance(tmp_path):
         validate_plan_envelope(envelope)
 
 
+def test_npack_payload_sync_runs_before_service_start(tmp_path):
+    """The apply loop takes the first ready op in list order, so payload.sync
+    must sit right after the manifest record - a trailing payload.sync would
+    run after service.start and the unit would exec a missing payload."""
+    payload_root = tmp_path / "payload"
+    (payload_root / ".npack").mkdir(parents=True)
+    (payload_root / ".npack" / "manifest.json").write_text("{}", encoding="utf-8")
+    provenance = {
+        "publisher": "ab" * 32,
+        "name": "example",
+        "version": "1.2.0",
+        "artifact_sha256": "cd" * 32,
+        "payload_root": str(payload_root),
+    }
+    envelope = package_plan_envelope(example(), npack=provenance)
+    names = [operation.name for operation in validate_plan_envelope(envelope)]
+    assert names.index("payload.sync") == names.index("package.manifest.ensure") + 1
+    assert names.index("payload.sync") < names.index("service.start")
+
+
+def test_removal_plan_removes_payload_after_service_stop():
+    """payload.remove is synthesized into the removal chain: after the unit
+    stops, before directory.remove rmdir's the install dir."""
+    plan = plan_package_removal(PackageManifest.parse_obj(example()))
+    names = [operation.name for operation in plan]
+    assert "payload.remove" in names
+    assert names.index("payload.remove") == names.index("service.stop") + 1
+    assert names.index("payload.remove") < names.index("directory.remove")
+    assert all(operation.depends_on == ((plan[index - 1].resource,) if index else ()) for index, operation in enumerate(plan))
+
+
 def test_bind_install_values_legacy_domain_path_sugar_syncs_health():
     """A package with no declared install_inputs still accepts --domain/--path
     (legacy sugar), applied directly to [web]/[health]."""

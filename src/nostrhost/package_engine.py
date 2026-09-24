@@ -878,9 +878,11 @@ def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, 
     binds an install to a specific verified artifact: it must carry the
     publisher (hex), name, version, and ``artifact_sha256`` of the release
     whose payload is staged in the isolated npack store. When present, a
-    ``payload.sync`` operation is appended so the staged payload is copied
-    into the host root (hybrid staged store); the reconcile executor reads
-    the store root from the envelope.
+    ``payload.sync`` operation is inserted immediately after the manifest
+    record so the staged payload is copied into the host root (hybrid staged
+    store) before any resource that consumes the host tree (service.start,
+    web.route.ensure, ...); the reconcile executor reads the store root from
+    the envelope.
     """
     if not isinstance(package_data, dict):
         raise PackageError("package plan requires an object")
@@ -893,7 +895,15 @@ def package_plan_envelope(package_data: dict[str, Any], *, catalogue: dict[str, 
         payload_root = Path(str(npack["payload_root"])).expanduser().resolve()
         if not payload_root.is_dir() or not (payload_root / ".npack" / "manifest.json").is_file():
             raise PackageError(f"npack payload root is not a staged artifact: {payload_root}")
-        plan.append(_op(
+        # apply_operation_plan takes the *first* ready operation in list
+        # order, and service.start only depends on service.enable - so a
+        # trailing payload.sync would run after the unit already tried to
+        # exec a payload that is not on disk yet. Insert it right after its
+        # single dependency (the manifest record) instead.
+        plan.insert(next(
+            index for index, operation in enumerate(plan)
+            if operation.resource == f"{package.app.id}:manifest"
+        ) + 1, _op(
             "payload.sync",
             f"{package.app.id}:payload",
             {"app": package.app.id, "artifact_sha256": npack["artifact_sha256"], "payload_root": str(payload_root)},
@@ -1193,10 +1203,35 @@ def plan_package_removal(package: PackageManifest) -> list[Operation]:
     host dependencies (APT packages and runtimes) stay installed, while
     database removal remains an explicit high-risk operation that callers may
     gate on a backup/restore policy.
+
+    ``payload.remove`` is synthesized here (the forward plan never plans
+    ``payload.sync`` - the npack envelope adds that): the payload provider
+    tracks its own sync marker, and without this the installed files would
+    survive removal and a later ``directory.remove`` rmdir would fail on a
+    non-empty install dir. It lands after the service stops, before the first
+    directory removal.
     """
+    package_operations = list(reversed(plan_package(package)))
+    # Forward-shaped so the reverse loop below emits name=payload.remove.
+    payload_operation = Operation(
+        "payload.sync",
+        f"{package.app.id}:payload",
+        {"app": package.app.id},
+        (),
+        "medium",
+        True,
+        "payload.remove",
+        "sync staged payload",
+    )
+    stop_at = next(
+        (index for index, operation in enumerate(package_operations) if operation.name == "service.start"),
+        None,
+    )
+    package_operations.insert(0 if stop_at is None else stop_at + 1, payload_operation)
+
     removal: list[Operation] = []
     previous: str | None = None
-    for operation in reversed(plan_package(package)):
+    for operation in package_operations:
         if not operation.reversible or not operation.reverse:
             continue
         args = dict(operation.args)
