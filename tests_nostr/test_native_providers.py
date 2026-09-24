@@ -147,8 +147,37 @@ def test_payload_sync_remove_reverses_copied_files(tmp_path: Path):
     provider.apply(Operation("payload.sync", "example:payload", {"app": "example", "artifact_sha256": "cd" * 32, "payload_root": str(payload)}, reverse="payload.remove"))
     removed = provider.apply(Operation("payload.remove", "example:payload", {"app": "example"}, reverse="payload.sync"))
     assert removed["removed"] == 2
+    assert removed["directories"] > 0
     assert not (tmp_path / "var/www/example/index.html").exists()
+    assert not (tmp_path / "var/www/example").exists()
     assert provider.inspect({"app": "example"})["synced"] is False
+
+
+def test_payload_remove_prunes_dirs_from_pre_tracking_markers(tmp_path: Path):
+    """Markers written before directory tracking only carry files; removal
+    still prunes the deep dirs those files lived in, while shallow parents
+    (which may be shared with other apps, e.g. var/www) are left alone."""
+    import json
+
+    provider = PayloadSyncProvider(root=tmp_path, state_dir=tmp_path / "state")
+    (tmp_path / "var/www/app/node_modules/dep").mkdir(parents=True)
+    (tmp_path / "var/www/app/node_modules/dep/index.js").write_text("x", encoding="utf-8")
+    (tmp_path / "opt/app/bin").mkdir(parents=True)
+    (tmp_path / "opt/app/bin/tool").write_text("y", encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "example.json").write_text(json.dumps({
+        "app": "example",
+        "synced": True,
+        "artifact_sha256": "cd" * 32,
+        "files": ["var/www/app/node_modules/dep/index.js", "opt/app/bin/tool"],
+    }), encoding="utf-8")
+
+    removed = provider.apply(Operation("payload.remove", "example:payload", {"app": "example"}, reverse="payload.sync"))
+    assert removed["removed"] == 2
+    assert not (tmp_path / "var/www/app").exists()
+    assert not (tmp_path / "opt/app/bin").exists()
+    assert (tmp_path / "opt/app").exists()
 
 
 def test_payload_sync_rejects_path_traversal(tmp_path: Path):
@@ -570,6 +599,40 @@ def test_systemd_definitions_are_rendered_and_applied_with_bounded_commands(tmp_
         (["systemd-tmpfiles", "--create", str(tmpfile)], {"check": True}),
         (["systemd-sysusers", str(tmp_path / "etc/sysusers.d/nostrhost-example.conf")], {"check": True}),
     ]
+
+
+def test_tmpfiles_removal_drops_definition_and_directory(tmp_path: Path):
+    provider = TmpfilesProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    desired = {"path": "/var/lib/example", "mode": 0o750}
+    provider.apply(provider.plan(desired)[0])
+    target = tmp_path / "var/lib/example"
+    target.mkdir(parents=True)  # stand-in for systemd-tmpfiles --create
+    result = provider.apply(provider.remove(desired)[0])
+    assert result["changed"] is True
+    assert not target.exists()
+    assert not list((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
+
+
+def test_tmpfiles_removal_drops_definition_when_directory_already_gone(tmp_path: Path):
+    """payload.remove prunes the empty install dir first, so directory.remove
+    finds the path missing - the declaration must still be cleaned up."""
+    provider = TmpfilesProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    desired = {"path": "/var/lib/example", "mode": 0o750}
+    provider.apply(provider.plan(desired)[0])
+    result = provider.apply(provider.remove(desired)[0])
+    assert result["changed"] is True
+    assert not list((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
+
+
+def test_tmpfiles_removal_refuses_a_non_empty_directory(tmp_path: Path):
+    provider = TmpfilesProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    desired = {"path": "/var/lib/example", "mode": 0o750}
+    provider.apply(provider.plan(desired)[0])
+    (tmp_path / "var/lib/example/data").mkdir(parents=True)
+    with pytest.raises(ProviderError, match="not empty"):
+        provider.apply(provider.remove(desired)[0])
+    # a failed removal keeps the declaration so reconcile can retry
+    assert list((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
 
 
 def test_sysusers_provider_declares_requested_groups(tmp_path: Path):

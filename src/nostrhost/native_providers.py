@@ -558,11 +558,26 @@ class TmpfilesProvider(DirectoryProvider):
         path = Path(args["path"])
         resource_name = operation.resource.rsplit(":", 1)[-1]
         name = hashlib.sha256(str(path).encode()).hexdigest()[:12] if resource_name.startswith("/") else _safe_name(resource_name)
+        definition = self.definition_dir / f"nostrhost-{name}.conf"
+        if operation.name == "directory.remove":
+            # The reverse op must drop the declaration and the directory it
+            # declared. Falling through to the ensure branch below would
+            # re-create both and leave the removed app's directories behind.
+            target = _target(self.root, path)
+            try:
+                target.rmdir()
+            except FileNotFoundError:
+                existed = definition.exists()
+                definition.unlink(missing_ok=True)
+                return {"path": str(path), "definition": str(definition), "changed": existed}
+            except OSError as exc:
+                raise ProviderError(f"directory is not empty or cannot be removed: {target}") from exc
+            definition.unlink(missing_ok=True)
+            return {"path": str(path), "definition": str(definition), "changed": True}
         self.definition_dir.mkdir(parents=True, exist_ok=True)
-        file = self.definition_dir / f"nostrhost-{name}.conf"
-        file.write_text(f"d {path} {args['mode']:04o} {args.get('owner') or '-'} {args.get('group') or '-'} -\n", encoding="utf-8")
-        self.command(["systemd-tmpfiles", "--create", str(file)], check=True)
-        return {"path": str(path), "definition": str(file), "changed": True}
+        definition.write_text(f"d {path} {args['mode']:04o} {args.get('owner') or '-'} {args.get('group') or '-'} -\n", encoding="utf-8")
+        self.command(["systemd-tmpfiles", "--create", str(definition)], check=True)
+        return {"path": str(path), "definition": str(definition), "changed": True}
 
 
 class SysusersProvider(InspectVerifiedProvider):
@@ -859,6 +874,7 @@ class PayloadSyncProvider(InspectVerifiedProvider):
         if not (payload_root / ".npack" / "manifest.json").is_file():
             raise ProviderError(f"staged payload root is not an npack artifact: {payload_root}")
         copied: list[str] = []
+        created: set[str] = set()
         for source in sorted(payload_root.rglob("*")):
             relative = source.relative_to(payload_root)
             # ``.npack`` carries the artifact's embedded manifest and
@@ -869,7 +885,7 @@ class PayloadSyncProvider(InspectVerifiedProvider):
             if source.is_dir():
                 continue
             target = self._safe_target(relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_parent(target, created)
             if source.is_symlink():
                 # Preserve the link itself: npm ``.bin`` shims are relative
                 # symlinks, and copy2 would dereference them - crashing on a
@@ -887,12 +903,36 @@ class PayloadSyncProvider(InspectVerifiedProvider):
         marker = self._marker(app)
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"app": app, "artifact_sha256": artifact_sha256, "synced": True, "files": sorted(copied)}, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "app": app,
+                    "artifact_sha256": artifact_sha256,
+                    "synced": True,
+                    "files": sorted(copied),
+                    "directories": sorted(created),
+                },
+                sort_keys=True,
+            ) + "\n",
             encoding="utf-8",
         )
         os.chmod(temporary, 0o640)
         temporary.replace(marker)
         return {"app": app, "synced": True, "artifact_sha256": artifact_sha256, "copied": len(copied), "changed": True}
+
+    def _ensure_parent(self, target: Path, created: set[str]) -> None:
+        """mkdir the target's parent chain, recording the directories this
+        sync had to create so removal can prune them again."""
+        missing: list[Path] = []
+        cursor = target.parent
+        while not cursor.exists() and cursor != cursor.parent:
+            missing.append(cursor)
+            cursor = cursor.parent
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for path in missing:
+            try:
+                created.add(str(path.relative_to(self.root)))
+            except ValueError:
+                continue
 
     def _remove(self, args: dict[str, Any]) -> dict[str, Any]:
         marker = self._marker(args["app"])
@@ -901,15 +941,42 @@ class PayloadSyncProvider(InspectVerifiedProvider):
         except (OSError, json.JSONDecodeError):
             return {"app": args["app"], "synced": False, "changed": False}
         removed: list[str] = []
-        for raw_path in data.get("files", []):
+        files = data.get("files", [])
+        for raw_path in files:
             target = self._safe_target(Path(raw_path))
             try:
                 target.unlink()
                 removed.append(str(target))
             except FileNotFoundError:
                 continue
+        # Directories the sync created are not files, so prune them here:
+        # an npm-style payload leaves thousands of empty dirs that would
+        # otherwise block directory.remove's rmdir. Recorded directories are
+        # proven payload-owned; for markers written before directory tracking
+        # only derive deep paths - shallow parents like ``var/www`` may be
+        # shared with other apps.
+        candidates = {raw for raw in data.get("directories", []) if raw and raw != "."}
+        for raw_path in files:
+            parts = Path(raw_path).parts
+            candidates.update(str(Path(*parts[:depth])) for depth in range(3, len(parts)))
+        pruned = 0
+        for raw in sorted(candidates, key=lambda value: len(Path(value).parts), reverse=True):
+            target = self._safe_target(Path(raw))
+            try:
+                target.rmdir()
+            except OSError:
+                # Missing, not a directory, or no longer empty (foreign
+                # content arrived after the sync) - leave it alone.
+                continue
+            pruned += 1
         marker.unlink(missing_ok=True)
-        return {"app": args["app"], "synced": False, "removed": len(removed), "changed": bool(removed)}
+        return {
+            "app": args["app"],
+            "synced": False,
+            "removed": len(removed),
+            "directories": pruned,
+            "changed": bool(removed or pruned),
+        }
 
     def _safe_target(self, relative: Path) -> Path:
         if relative.is_absolute() or ".." in relative.parts:
