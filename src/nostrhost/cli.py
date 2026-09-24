@@ -2408,7 +2408,23 @@ def build_app(*, prog: str = "nostrhost", state: _State | None = None) -> typer.
             body = _run_lifecycle("package.reconcile", {"plan": envelope}, state=state)
             if not body.get("ok"):
                 raise NostrHostError(f"removal rejected: {body.get('reason') or body.get('state')}")
-            return _lifecycle_report("removed", envelope, body)
+            report = _lifecycle_report("removed", envelope, body)
+            # The chain only reverses host resources; the staged npack store
+            # copy (payload, flat prefix files, installed.json) still needs
+            # its own teardown via ``npack remove``. Best-effort: the host
+            # removal already succeeded, so report a cleanup failure in the
+            # result instead of claiming the whole removal was rejected.
+            from nostrhost.npk import remove_staged
+            from nostrhost.package_engine import PackageError
+
+            try:
+                staged = remove_staged(app)
+            except PackageError as exc:
+                report["npack_store"] = {"error": str(exc)}
+            else:
+                if staged is not None:
+                    report["npack_store"] = staged
+            return report
         _guard(run, output_as)
 
     @app_group.command("change-url")

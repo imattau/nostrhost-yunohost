@@ -147,3 +147,49 @@ def test_stage_local_installs_a_locally_built_npk(tmp_path):
 def test_stage_local_rejects_missing_file(tmp_path):
     with pytest.raises(Exception, match="not found"):
         stage_local(tmp_path / "missing.npk", store=tmp_path / "store", npack_bin=str(NPACK))
+
+
+def test_remove_staged_runs_npack_remove_and_handles_missing_entries(tmp_path, monkeypatch):
+    from nostrhost import npk as npk_module
+
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "installed.json").write_text(json.dumps([
+        {"publisher": "ab" * 32, "name": "hello", "version": "1.0.0"},
+    ]))
+    calls = []
+
+    def fake_run(binary, args, *, store=None):
+        import subprocess
+
+        calls.append((binary, args, str(store)))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(npk_module, "_run", fake_run)
+
+    result = npk_module.remove_staged("hello", store=store)
+    assert result == {"publisher": "ab" * 32, "name": "hello", "version": "1.0.0", "store": str(store)}
+    assert calls == [("npack", ["remove", f"{'ab' * 32}/hello"], str(store))]
+
+    assert npk_module.remove_staged("missing", store=store) is None
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert npk_module.remove_staged("hello", store=empty) is None
+
+
+def test_remove_staged_surfaces_npack_remove_failure(tmp_path, monkeypatch):
+    import subprocess
+
+    from nostrhost import npk as npk_module
+    from nostrhost.package_engine import PackageError
+
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "installed.json").write_text(json.dumps([{"publisher": "ab" * 32, "name": "hello"}]))
+    monkeypatch.setattr(
+        npk_module,
+        "_run",
+        lambda binary, args, *, store=None: subprocess.CompletedProcess(args, 1, "", "boom"),
+    )
+    with pytest.raises(PackageError, match="npack remove failed: boom"):
+        npk_module.remove_staged("hello", store=store)

@@ -240,3 +240,51 @@ def verify_embedded_matches(package_data: dict[str, Any], npack: dict[str, Any])
     actual = __import__("hashlib").sha256(_canonical_json(package_data)).hexdigest()
     if actual.lower() != str(expected).lower():
         raise PackageError(f"embedded native manifest hash mismatch: expected {expected}, got {actual}")
+
+
+def remove_staged(
+    name: str,
+    *,
+    store: Path = NPK_STORE_DEFAULT,
+    npack_bin: str = "",
+    publisher: str | None = None,
+) -> dict[str, Any] | None:
+    """Drop an installed package from the isolated npack store.
+
+    The host-side removal chain never touches the store copy, so callers run
+    this after a successful ``package.reconcile`` removal to reclaim the
+    staged payload, the flat prefix files, and the ``installed.json`` record.
+    Returns ``None`` when the store has no entry for this app (nothing to
+    do); raises :class:`PackageError` when ``npack remove`` itself fails.
+    """
+    installed = store / "installed.json"
+    if not installed.is_file():
+        return None
+    try:
+        entries = json.loads(installed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    match = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("name") == name
+            and (publisher is None or str(entry.get("publisher", "")).lower() == publisher.lower())
+        ),
+        None,
+    )
+    if match is None:
+        return None
+    binary = _npack_binary(npack_bin)
+    result = _run(binary, ["remove", f"{match['publisher']}/{name}"], store=store)
+    if result.returncode != 0:
+        raise PackageError(f"npack remove failed: {result.stderr.strip() or result.stdout.strip()}")
+    return {
+        "publisher": match["publisher"],
+        "name": name,
+        "version": match.get("version"),
+        "store": str(store),
+    }

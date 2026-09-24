@@ -381,3 +381,23 @@ def test_upgrade_npk_reads_staged_app_id_and_defaults_domain_path(app, monkeypat
     assert carry_calls == [installed]
     data = json.loads(result.stdout)
     assert data["previous_version"] == "1.0.0"
+
+
+def test_app_remove_native_cleans_npack_store(app, monkeypatch):
+    manifest = {"app": {"id": "example", "version": "1.0.0"}}
+    monkeypatch.setattr("nostrhost.native_providers.installed_package_manifest", lambda app_id: manifest)
+    monkeypatch.setattr(cli_module, "_run_lifecycle", lambda tool, args, *, state: {"ok": True, "result": {"results": []}})
+    cleaned = []
+
+    def fake_remove_staged(name, **kwargs):
+        cleaned.append(name)
+        return {"publisher": "ab" * 32, "name": name, "version": "1.0.0"}
+
+    monkeypatch.setattr("nostrhost.npk.remove_staged", fake_remove_staged)
+
+    result = _invoke(app, ["app", "remove", "example", "--output-as", "json"])
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(result.stdout)
+    assert cleaned == ["example"]
+    assert data["action"] == "removed"
+    assert data["npack_store"]["name"] == "example"
