@@ -635,6 +635,37 @@ def test_tmpfiles_removal_refuses_a_non_empty_directory(tmp_path: Path):
     assert list((tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
 
 
+def test_tmpfiles_definitions_are_unique_per_app(tmp_path: Path):
+    provider = TmpfilesProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    provider.apply(Operation("directory.ensure", "alpha:directory:install", {"path": "/var/www/alpha", "mode": 0o755}, reverse="directory.remove"))
+    provider.apply(Operation("directory.ensure", "beta:directory:install", {"path": "/var/www/beta", "mode": 0o755}, reverse="directory.remove"))
+    names = sorted(p.name for p in (tmp_path / "etc/tmpfiles.d").glob("nostrhost-*.conf"))
+    assert names == [
+        "nostrhost-alpha_directory_install.conf",
+        "nostrhost-beta_directory_install.conf",
+    ]
+
+
+def test_tmpfiles_removal_cleans_legacy_shared_definition(tmp_path: Path):
+    """Pre-fix releases named definitions after only the resource suffix
+    (nostrhost-install.conf), shared and overwritten by every app; removal
+    must unlink a stale copy that still declares this path."""
+    provider = TmpfilesProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
+    legacy_dir = tmp_path / "etc/tmpfiles.d"
+    legacy_dir.mkdir(parents=True)
+    legacy = legacy_dir / "nostrhost-install.conf"
+    legacy.write_text("d /var/www/alpha 0755 alpha - -\n", encoding="utf-8")
+    other = legacy_dir / "nostrhost-data.conf"
+    other.write_text("d /var/lib/beta 0750 beta - -\n", encoding="utf-8")
+    (tmp_path / "var/www/alpha").mkdir(parents=True)
+
+    result = provider.apply(Operation("directory.remove", "alpha:directory:install", {"path": "/var/www/alpha"}, reverse="directory.ensure"))
+    assert result["changed"] is True
+    assert not legacy.exists()
+    # a declaration for a different path survives
+    assert other.exists()
+
+
 def test_sysusers_provider_declares_requested_groups(tmp_path: Path):
     provider = SysusersProvider(root=tmp_path, command=lambda *_args, **_kwargs: None)
     provider.apply(provider.plan({"name": "example", "groups": ["example-workers"]})[0])

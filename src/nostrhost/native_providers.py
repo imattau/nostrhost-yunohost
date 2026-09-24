@@ -556,8 +556,14 @@ class TmpfilesProvider(DirectoryProvider):
     def apply(self, operation: Operation) -> dict[str, Any]:
         args = operation.args
         path = Path(args["path"])
-        resource_name = operation.resource.rsplit(":", 1)[-1]
-        name = hashlib.sha256(str(path).encode()).hexdigest()[:12] if resource_name.startswith("/") else _safe_name(resource_name)
+        resource = operation.resource
+        if resource.startswith("/"):
+            name = hashlib.sha256(str(path).encode()).hexdigest()[:12]
+        else:
+            # One definition per app+resource. Deriving the name from only the
+            # last segment ("install", "data") made every app that declares an
+            # install/data directory overwrite the same /etc/tmpfiles.d file.
+            name = _safe_name(resource.replace(":", "_"))
         definition = self.definition_dir / f"nostrhost-{name}.conf"
         if operation.name == "directory.remove":
             # The reverse op must drop the declaration and the directory it
@@ -567,17 +573,42 @@ class TmpfilesProvider(DirectoryProvider):
             try:
                 target.rmdir()
             except FileNotFoundError:
-                existed = definition.exists()
-                definition.unlink(missing_ok=True)
-                return {"path": str(path), "definition": str(definition), "changed": existed}
+                pass
             except OSError as exc:
                 raise ProviderError(f"directory is not empty or cannot be removed: {target}") from exc
-            definition.unlink(missing_ok=True)
-            return {"path": str(path), "definition": str(definition), "changed": True}
+            changed = self._drop_declaration(str(path), definition)
+            return {"path": str(path), "definition": str(definition), "changed": changed}
         self.definition_dir.mkdir(parents=True, exist_ok=True)
         definition.write_text(f"d {path} {args['mode']:04o} {args.get('owner') or '-'} {args.get('group') or '-'} -\n", encoding="utf-8")
         self.command(["systemd-tmpfiles", "--create", str(definition)], check=True)
         return {"path": str(path), "definition": str(definition), "changed": True}
+
+    def _drop_declaration(self, path: str, definition: Path) -> bool:
+        """Remove this path's tmpfiles declaration plus stale duplicates.
+
+        Older releases named definitions after the resource's last segment
+        (``nostrhost-install.conf``), which every app overwrote; a leftover
+        copy still declaring the same path would recreate the directory on
+        the next boot, so scan for and unlink those too."""
+        changed = False
+        if definition.is_file() or definition.is_symlink():
+            definition.unlink()
+            changed = True
+        for candidate in sorted(self.definition_dir.glob("nostrhost-*.conf")):
+            if candidate == definition:
+                continue
+            try:
+                lines = candidate.read_text(encoding="utf-8").splitlines()[:1]
+            except OSError:
+                continue
+            fields = lines[0].split() if lines else []
+            if len(fields) >= 2 and fields[0] == "d" and fields[1] == path:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    continue
+                changed = True
+        return changed
 
 
 class SysusersProvider(InspectVerifiedProvider):
