@@ -1,3 +1,15 @@
+yunohost (12.1.41.117) stable; urgency=low
+
+  * nostrhost-catalog: restart nostrhost-catalog.service after a
+    trusted-publishers change (nostrhost/list_render.py). The live
+    relay-sync daemon only reads catalogue.env at process start, so
+    publishing a new trust list previously left it running with a
+    stale, argv-frozen publisher allow-list until manually restarted --
+    newly declared npack apps from a just-(un)trusted publisher were
+    silently dropped in the meantime.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 25 Sep 2026 01:10:00 +0000
+
 yunohost (12.1.41.116) stable; urgency=low
 
   * nostrhost-core.preinst / postinst: diagnostic-only syslog breadcrumbs
