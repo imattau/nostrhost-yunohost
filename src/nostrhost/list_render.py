@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +58,16 @@ def render_entry(entry: Any) -> None:
 
 
 def render_trusted_publishers(pubkeys: list[str], *, path: str | Path = CATALOGUE_ENV) -> None:
-    """Rewrite the trusted-publisher line of ``catalogue.env`` in place."""
+    """Rewrite the trusted-publisher line of ``catalogue.env`` in place.
+
+    ``nostrhost-catalog.service`` reads this file only via systemd's
+    ``EnvironmentFile=`` at process start - its long-running ``sync``
+    subscription never re-reads it, so a trust-list change here has no
+    effect on the live relay feed until the service restarts. Restart it
+    the same way connectivity.py's ``_project_catalogue`` does for the
+    relay line, so a changed allow-list actually takes effect on newly
+    arriving declarations, not just on the next full state reload.
+    """
     target = Path(path)
     lines: list[str] = []
     if target.is_file():
@@ -74,6 +84,12 @@ def render_trusted_publishers(pubkeys: list[str], *, path: str | Path = CATALOGU
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(target, 0o600)
+    subprocess.run(
+        ["systemctl", "--no-block", "try-restart", "nostrhost-catalog.service"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def render_portal_settings(
