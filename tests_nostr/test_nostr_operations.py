@@ -792,6 +792,25 @@ def test_list_operations_marks_immediate_rejection_without_execution(monkeypatch
     assert entry["state"] == "FAILED"
 
 
+def test_list_operations_marks_successful_result_without_execution(monkeypatch):
+    """A 2204 with ok=True that lands before its 2203 (e.g. the started event
+    hasn't propagated to this relay snapshot yet) must still read SUCCEEDED,
+    not be forced to FAILED like the immediate-rejection case above."""
+    sk, pk = new_key()
+    request = build_operation_request(sk, pk, "system.version", {})
+    result = build_execution_result(sk, pk, request["id"], ok=True, result={})
+
+    monkeypatch.setattr("yunohost.nostr_operations._operations_cache", {})
+    monkeypatch.setattr(
+        "yunohost.nostrhost.events.query_chain_events",
+        lambda relay, **kw: [request, result],
+    )
+
+    entry = get_operation(request["id"])
+    assert entry is not None
+    assert entry["state"] == "SUCCEEDED"
+
+
 def test_list_operations_orders_same_second_events_by_chain_position(monkeypatch):
     """A 2203 and its 2204 usually share a created_at second; the reduction must
     still apply execution-started before the result."""

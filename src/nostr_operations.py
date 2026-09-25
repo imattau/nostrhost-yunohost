@@ -2525,7 +2525,7 @@ def _operation_entry(
             # a result in a non-terminal, non-executing state is a terminal
             # failure, not a request to keep showing as pending/approved.
             if event.get("kind") == KIND_EXECUTION_RESULT and state not in TERMINAL:
-                state = OpState.FAILED
+                state = OpState.SUCCEEDED if ok else OpState.FAILED
             continue  # ignore out-of-order/duplicate/invalid chain events
 
     anomalies = _chain_anomalies(chain, request_event, admins=admins, server_pubkey=server_pubkey)
