@@ -1,3 +1,14 @@
+yunohost (12.1.41.118) stable; urgency=low
+
+  * nsites: SiteRecord gains an explicit status field ("registered" |
+    "published") instead of admin/API callers inferring whether a
+    registered site is actually being served from whether
+    last_event_id/paths happen to be populated. site_register() leaves
+    new records at "registered"; publish() flips them to "published".
+    Pre-existing records without the field are back-filled on read.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 25 Sep 2026 12:00:00 +0000
+
 yunohost (12.1.41.117) stable; urgency=low
 
   * nostrhost-catalog: restart nostrhost-catalog.service after a
