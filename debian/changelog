@@ -1,3 +1,15 @@
+yunohost (12.1.41.119) stable; urgency=low
+
+  * nostr_operations: fix operation status wrongly forced to FAILED. A
+    completed execution result (2204, ok=true) reduced without its
+    preceding execution-started (2203) event in the fetched relay
+    snapshot was incorrectly reported as FAILED instead of SUCCEEDED --
+    this happens routinely since 2203 propagation commonly lags 2204,
+    so recently completed operations (including service.status/restart)
+    could read as failed even though they succeeded.
+
+ -- NostrHost <nostrhost@example.com>  Fri, 25 Sep 2026 21:55:00 +0000
+
 yunohost (12.1.41.118) stable; urgency=low
 
   * nsites: SiteRecord gains an explicit status field ("registered" |
