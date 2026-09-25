@@ -145,12 +145,21 @@ class GatewayConfig(BaseModel):
 
 
 class SiteRecord(BaseModel):
-    """A hosted-mode allowlist entry (rendered into nsite.toml §sites)."""
+    """A hosted-mode allowlist entry (rendered into nsite.toml §sites).
+
+    ``status`` is the explicit lifecycle state: ``registered`` means the
+    pubkey/d is allowlisted but no manifest has been published yet (the
+    gateway has nothing to serve); ``publish()`` flips it to ``published``
+    once a signed manifest has been broadcast and recorded. Callers should
+    read this field rather than inferring "is this live" from whether
+    ``last_event_id``/``paths`` happen to be non-empty.
+    """
 
     pubkey: str
     kind: int = 15128  # 15128 root | 35128 named
     d: str = ""
     title: str = ""
+    status: Literal["registered", "published"] = "registered"
     last_event_id: str = ""
     aggregate_hash: str = ""
     servers: list[str] = Field(default_factory=list)
