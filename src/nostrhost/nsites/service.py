@@ -1518,10 +1518,11 @@ class NsiteService:
         return {"action": "nsite.unregister", "pubkey": pubkey, "d": d, "removed": True, "ok": True}
 
     def site_list(self) -> dict[str, Any]:
+        sites = _sites(self.state_dir)
         return {
             "mode": (self._state().get("config") or {}).get("mode", "hosted"),
-            "sites": _sites(self.state_dir),
-            "count": len(_sites(self.state_dir)),
+            "sites": sites,
+            "count": len(sites),
         }
 
     def catalogue_nsite_links(self) -> dict[str, dict[str, str]]:
@@ -1566,7 +1567,7 @@ class NsiteService:
         if not path.is_file():
             raise NsiteError("site is not registered")
         record = json.loads(path.read_text(encoding="utf-8"))
-        return {"site": record}
+        return {"site": _normalize_site_record(record)}
 
     # -- custom domains (Phase 4) ------------------------------------------
 
@@ -2123,6 +2124,7 @@ class NsiteService:
                 "kind": kind,
                 "d": d,
                 "title": record.get("title", ""),
+                "status": "published",
                 "last_event_id": event.get("id", ""),
                 "aggregate_hash": _aggregate_from_event(event),
                 "paths": _paths_from_event(event),
@@ -3089,6 +3091,14 @@ def _site_metadata(
     }
 
 
+def _normalize_site_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Back-fill ``status`` for records written before the field existed: a
+    populated ``last_event_id`` means ``publish()`` already ran on it."""
+    if "status" not in record:
+        record["status"] = "published" if record.get("last_event_id") else "registered"
+    return record
+
+
 def _sites(state_dir: Path) -> list[dict[str, Any]]:
     d = nsites_state_dir(state_dir) / "sites"
     if not d.is_dir():
@@ -3096,9 +3106,10 @@ def _sites(state_dir: Path) -> list[dict[str, Any]]:
     out = []
     for path in sorted(d.glob("*.json")):
         try:
-            out.append(json.loads(path.read_text(encoding="utf-8")))
+            record = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        out.append(_normalize_site_record(record))
     return out
 
 
